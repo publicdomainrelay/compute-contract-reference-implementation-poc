@@ -273,6 +273,11 @@ async function buildCommand(distro: Distro) {
       CHROOT_DIR,
       "dracut",
       "--force",
+      "--no-hostonly",
+      "--add",
+      "dmsquash-live",
+      "--filesystems",
+      "squashfs overlay ext4",
       "/boot/initrd.img",
       kver,
     ]);
