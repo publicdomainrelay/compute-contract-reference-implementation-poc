@@ -180,6 +180,7 @@ interface DistroConfig {
   ociSource: string;
   install: (chrootDir: string) => Promise<void>;
   findKernel: (chrootDir: string) => Promise<string>;
+  kernelAppend: string;
 }
 
 const DISTRO_CONFIGS: Record<Distro, DistroConfig> = {
@@ -187,11 +188,13 @@ const DISTRO_CONFIGS: Record<Distro, DistroConfig> = {
     ociSource: "docker://registry.fedoraproject.org/fedora:latest",
     install: installFedora,
     findKernel: findKernelFedora,
+    kernelAppend: "console=ttyS0 root=live:LABEL=LIVEOS rd.live.image rd.overlayfs=1 rd.live.overlay.overlayfs=1 rd.live.overlay=/dev/vdb init=/usr/lib/systemd/systemd",
   },
   ubuntu: {
     ociSource: "docker://docker.io/library/ubuntu:latest",
     install: installUbuntu,
     findKernel: findKernelUbuntu,
+    kernelAppend: "console=ttyS0 root=live:LABEL=LIVEOS rd.live.image rd.overlay=/dev/vdb init=/usr/lib/systemd/systemd",
   },
 };
 
@@ -441,7 +444,7 @@ chpasswd:
     "-drive",
     `file=${overlayImg},format=raw,if=virtio`,
     "-append",
-    "console=ttyS0 root=live:LABEL=LIVEOS rd.live.image rd.overlayfs=1 rd.live.overlay.overlayfs=1 rd.live.overlay=/dev/vdb init=/usr/lib/systemd/systemd",
+    cfg.kernelAppend,
   ];
 
   console.log("==> Starting QEMU...");
