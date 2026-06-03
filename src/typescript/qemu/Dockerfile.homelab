@@ -1,0 +1,15 @@
+FROM fedora:latest
+
+RUN dnf install -y \
+    docker-cli \
+    unzip \
+ && dnf clean all
+
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
+
+WORKDIR /app
+COPY homelab.ts main.ts ./
+
+EXPOSE 8080
+
+ENTRYPOINT ["deno", "run", "-A", "homelab.ts"]

@@ -17,3 +17,9 @@ jobs:
           echo "=== WORKSPACE ==="
           find .
           echo "=== DONE ==="
+
+      - name: build qemu runner
+        run: |
+          cd src/typescript/qemu/
+          # --push
+          docker build --pull --progress plain -f Dockerfile -t atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner .
