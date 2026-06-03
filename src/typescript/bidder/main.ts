@@ -475,6 +475,7 @@ async function createDroplet(vm: VM, requesterDid: string): Promise<unknown> {
     name,
     region: "sfo3", // TODO pick based on vm.location
     size: "s-1vcpu-512mb-10gb",
+    // Must match distro
     image: "ubuntu",
     user_data: vm.user_data,
     with_droplet_agent: true,
