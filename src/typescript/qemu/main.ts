@@ -366,6 +366,7 @@ app.delete("/v2/droplets/:id", async (c) => {
   const id = Number(c.req.param("id"));
   if (!droplets.has(id)) return c.json({ id: "not_found", message: "Droplet not found" }, 404);
   droplets.delete(id);
+  await new Deno.Command("docker", { args: ["kill", `droplet-${id}`] }).output().catch(() => {});
   await new Deno.Command("docker", { args: ["rm", "-f", `droplet-${id}`] }).output().catch(() => {});
   return new Response(null, { status: 204 });
 });
@@ -391,7 +392,9 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
   Deno.addSignalListener(sig, async () => {
     log("info", `received ${sig}, shutting down`);
     await killAllDroplets();
-    Deno.exit(0);
+    if (sig === "SIGINT") {
+      Deno.exit(0);
+    }
   });
 }
 
