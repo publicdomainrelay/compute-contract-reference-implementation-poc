@@ -237,7 +237,7 @@ app.use("/v1/oidc/issue", async (c, next) => {
   try {
     const token = extractBearer(c.req.header("Authorization"));
     const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
-    const oidcToken = await raiseIfUnauthorized(issuerUrl, "com.fedproxy.rbac", token, "/v1/oidc/issue", c.req.method);
+    const oidcToken = await raiseIfUnauthorized(issuerUrl, "droplets.wid", token, "/v1/oidc/issue", c.req.method);
     // Attach verified token to context for the route handler
     c.set("oidcToken", oidcToken);
     await next();

@@ -1,9 +1,9 @@
 #!/usr/bin/env -S deno run -A
 /**
- * Deno Script to build and run a Fedora SquashFS LiveOS using QEMU.
- * * Usage:
- * deno run -A main.ts build
- * cat cloud-init.yaml | deno run -A main.ts run
+ * Deno Script to build and run a Fedora or Ubuntu SquashFS LiveOS using QEMU.
+ * Usage:
+ * deno run -A main.ts build [--distro=fedora|ubuntu]
+ * cat cloud-init.yaml | deno run -A main.ts run [--distro=fedora|ubuntu]
  */
 
 const HOME = Deno.env.get("HOME");
@@ -12,9 +12,24 @@ if (!HOME) {
   Deno.exit(1);
 }
 
+type Distro = "fedora" | "ubuntu";
+
+function parseDistro(args: string[]): Distro {
+  for (const arg of args) {
+    const m = arg.match(/^--distro=(.+)$/);
+    if (m) {
+      const d = m[1];
+      if (d !== "fedora" && d !== "ubuntu") {
+        console.error(`Unknown distro: ${d}. Use fedora or ubuntu.`);
+        Deno.exit(1);
+      }
+      return d as Distro;
+    }
+  }
+  return "ubuntu";
+}
+
 const CACHE_DIR = `${HOME}/.cache/simple-qemu`;
-const CHROOT_DIR = `${CACHE_DIR}/my-chroot`;
-const LIVEOS_IMG = `${CACHE_DIR}/liveos.img`;
 
 // --- Utility Functions ---
 
@@ -83,24 +98,125 @@ async function readStdin(): Promise<string> {
   return result;
 }
 
+// --- Distro configs ---
+
+async function installFedora(chrootDir: string): Promise<void> {
+  await run("sudo", [
+    "systemd-nspawn",
+    "-D",
+    chrootDir,
+    "dnf",
+    "-y",
+    "install",
+    "systemd",
+    "kernel-core",
+    "cloud-init",
+    "dracut",
+    "dracut-live",
+    "dracut-network",
+    "btrfs-progs",
+    "util-linux",
+    "rsyslog",
+    "openssh-server",
+    "vim",
+    "tmux",
+  ]);
+}
+
+async function installUbuntu(chrootDir: string): Promise<void> {
+  const nspawn = (cmd: string) =>
+    run("sudo", ["systemd-nspawn", "--timezone=off", "--bind-ro=/etc/resolv.conf", "-D", chrootDir, "sh", "-c", cmd]);
+
+  await nspawn(
+    "ln -sf /usr/share/zoneinfo/UTC /etc/localtime && " +
+    "DEBIAN_FRONTEND=noninteractive apt-get update && " +
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y systemd linux-image-generic cloud-init dracut btrfs-progs util-linux rsyslog openssh-server vim tmux ca-certificates curl",
+  );
+  await nspawn(
+    "install -m 0755 -d /etc/apt/keyrings && " +
+    "curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && " +
+    "chmod a+r /etc/apt/keyrings/docker.asc",
+  );
+  await nspawn(
+    ". /etc/os-release && " +
+    `printf 'Types: deb\\nURIs: https://download.docker.com/linux/ubuntu\\nSuites: %s\\nComponents: stable\\nArchitectures: %s\\nSigned-By: /etc/apt/keyrings/docker.asc\\n' ` +
+    '"${UBUNTU_CODENAME:-$VERSION_CODENAME}" "$(dpkg --print-architecture)" ' +
+    "> /etc/apt/sources.list.d/docker.sources",
+  );
+  await nspawn(
+    "DEBIAN_FRONTEND=noninteractive apt-get update && " +
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
+  );
+}
+
+async function findKernelFedora(chrootDir: string): Promise<string> {
+  const raw = await runCapture("find", [
+    `${chrootDir}/usr/lib/modules`,
+    "-name",
+    "vmlinuz",
+  ]);
+  const path = raw.split("\n")[0];
+  if (!path) throw new Error("Could not find vmlinuz in chroot (fedora).");
+  return path;
+}
+
+async function findKernelUbuntu(chrootDir: string): Promise<string> {
+  const raw = await runCapture("find", [
+    `${chrootDir}/boot`,
+    "-maxdepth",
+    "1",
+    "-name",
+    "vmlinuz-*",
+    "-not",
+    "-name",
+    "*.efi.signed",
+  ]);
+  const path = raw.split("\n")[0];
+  if (!path) throw new Error("Could not find vmlinuz in chroot (ubuntu).");
+  return path;
+}
+
+interface DistroConfig {
+  ociSource: string;
+  install: (chrootDir: string) => Promise<void>;
+  findKernel: (chrootDir: string) => Promise<string>;
+}
+
+const DISTRO_CONFIGS: Record<Distro, DistroConfig> = {
+  fedora: {
+    ociSource: "docker://registry.fedoraproject.org/fedora:latest",
+    install: installFedora,
+    findKernel: findKernelFedora,
+  },
+  ubuntu: {
+    ociSource: "docker://docker.io/library/ubuntu:latest",
+    install: installUbuntu,
+    findKernel: findKernelUbuntu,
+  },
+};
+
 // --- Commands ---
 
-async function buildCommand() {
+async function buildCommand(distro: Distro) {
+  const cfg = DISTRO_CONFIGS[distro];
+  const CHROOT_DIR = `${CACHE_DIR}/my-chroot-${distro}`;
+  const LIVEOS_IMG = `${CACHE_DIR}/liveos-${distro}.img`;
+
   await Deno.mkdir(CACHE_DIR, { recursive: true });
 
   // 1. Build chroot
   if (!(await exists(CHROOT_DIR))) {
-    console.log("==> Initializing chroot...");
+    console.log(`==> Initializing ${distro} chroot...`);
     await Deno.mkdir(CHROOT_DIR, { recursive: true });
 
-    const ociLayout = `${CACHE_DIR}/temp_oci_layout`;
+    const ociLayout = `${CACHE_DIR}/temp_oci_layout_${distro}`;
     await Deno.mkdir(ociLayout, { recursive: true });
 
     await run("skopeo", [
       "copy",
       "--format",
       "oci",
-      "docker://registry.fedoraproject.org/fedora:latest",
+      cfg.ociSource,
       `dir:${ociLayout}`,
     ]);
 
@@ -118,26 +234,7 @@ async function buildCommand() {
       ]);
     }
 
-    await run("sudo", [
-      "systemd-nspawn",
-      "-D",
-      CHROOT_DIR,
-      "dnf",
-      "-y",
-      "install",
-      "systemd",
-      "kernel-core",
-      "cloud-init",
-      "dracut",
-      "dracut-live",
-      "dracut-network",
-      "btrfs-progs",
-      "util-linux",
-      "rsyslog",
-      "openssh-server",
-      "vim",
-      "tmux",
-    ]);
+    await cfg.install(CHROOT_DIR);
   } else {
     console.log("==> Chroot already exists. Skipping chroot build.");
   }
@@ -191,7 +288,7 @@ async function buildCommand() {
   // 4. Build squashfs and final ext4 live image
   if (!(await exists(LIVEOS_IMG))) {
     console.log("==> Building squashfs & disk image...");
-    const stagingDir = `${CACHE_DIR}/liveos-staging`;
+    const stagingDir = `${CACHE_DIR}/liveos-staging-${distro}`;
     await Deno.mkdir(`${stagingDir}/LiveOS`, { recursive: true });
     const squashfsPath = `${stagingDir}/LiveOS/squashfs.img`;
 
@@ -254,10 +351,14 @@ async function readUserData(): Promise<string> {
   return await readStdin();
 }
 
-async function runCommand() {
+async function runCommand(distro: Distro) {
+  const cfg = DISTRO_CONFIGS[distro];
+  const CHROOT_DIR = `${CACHE_DIR}/my-chroot-${distro}`;
+  const LIVEOS_IMG = `${CACHE_DIR}/liveos-${distro}.img`;
+
   if (!(await exists(LIVEOS_IMG))) {
     console.error(
-      `Error: Disk image not found at ${LIVEOS_IMG}. Run 'build' first.`,
+      `Error: Disk image not found at ${LIVEOS_IMG}. Run 'build --distro=${distro}' first.`,
     );
     Deno.exit(1);
   }
@@ -306,15 +407,7 @@ chpasswd:
   console.log(`==> Cloud-Init server listening on internal port ${port}`);
 
   // 3. Locate Kernel and run QEMU
-  const kernelRawPath = await runCapture("find", [
-    `${CHROOT_DIR}/usr/lib/modules`,
-    "-name",
-    "vmlinuz",
-  ]);
-  const kernelPath = kernelRawPath.split("\n")[0];
-  if (!kernelPath) {
-    throw new Error("Could not find vmlinuz in chroot.");
-  }
+  const kernelPath = await cfg.findKernel(CHROOT_DIR);
 
   console.log(`==> SSH forwarded: container :22 -> guest :22`);
 
@@ -360,15 +453,16 @@ chpasswd:
 
 if (import.meta.main) {
   const command = Deno.args[0];
+  const distro = parseDistro(Deno.args.slice(1));
 
   if (command === "build") {
-    await buildCommand();
+    await buildCommand(distro);
   } else if (command === "run") {
-    await runCommand();
+    await runCommand(distro);
   } else {
     console.error("Usage:");
-    console.error("  deno run -A main.ts build");
-    console.error("  deno run -A main.ts run < user-data.yaml");
+    console.error("  deno run -A main.ts build [--distro=fedora|ubuntu]");
+    console.error("  deno run -A main.ts run [--distro=fedora|ubuntu] < user-data.yaml");
     Deno.exit(1);
   }
 }

@@ -3,6 +3,7 @@ FROM fedora:latest
 
 RUN dnf install -y \
     qemu-system-x86-core \
+    e2fsprogs \
     unzip \
  && dnf clean all
 
