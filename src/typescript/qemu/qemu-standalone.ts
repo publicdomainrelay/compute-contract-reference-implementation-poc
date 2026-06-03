@@ -194,7 +194,11 @@ const DISTRO_CONFIGS: Record<Distro, DistroConfig> = {
     ociSource: "docker://docker.io/library/ubuntu:latest",
     install: installUbuntu,
     findKernel: findKernelUbuntu,
-    kernelAppend: "console=ttyS0 root=live:LABEL=LIVEOS rd.live.image rd.overlay=/dev/vdb init=/usr/lib/systemd/systemd",
+    // dracut-ng 110 (Ubuntu): rd.overlay=<dev> both enables overlayfs and names
+    // the backing device. The 70overlayfs module auto-creates the overlay on a
+    // bare ext4 vdb. rd.live.overlay.nouserconfirmprompt suppresses the legacy
+    // dmsquash-live "Press [Enter]" prompt that otherwise blocks an automated boot.
+    kernelAppend: "console=ttyS0 root=live:LABEL=LIVEOS rd.live.image rd.overlay=/dev/vdb rd.live.overlay.nouserconfirmprompt init=/usr/lib/systemd/systemd",
   },
 };
 
