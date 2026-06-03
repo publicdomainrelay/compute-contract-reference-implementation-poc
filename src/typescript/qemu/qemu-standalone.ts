@@ -271,10 +271,15 @@ async function buildCommand(distro: Distro) {
 
   // 3. Build initrd with dmsquash-live
   const initrdPath = `${CHROOT_DIR}/boot/initrd.img`;
-  if (!(await exists(initrdPath))) {
+  // The distro packages ship a stock /boot/initrd.img (without dmsquash-live),
+  // so guard on our own marker rather than initrd.img existence — otherwise the
+  // stock initrd is reused and dracut FATALs with "Don't know how to handle
+  // 'root=live:LABEL=LIVEOS'".
+  const initrdMarker = `${CHROOT_DIR}/boot/.dmsquash-initrd`;
+  if (!(await exists(initrdMarker))) {
     console.log("==> Building initrd...");
     const liveConf =
-      `add_dracutmodules+=" dmsquash-live "\nfilesystems+=" squashfs overlay ext4 "\ncompress="zstd"\nhostonly="no"\n`;
+      `add_dracutmodules+=" dmsquash-live overlayfs "\nfilesystems+=" squashfs overlay ext4 "\ncompress="zstd"\nhostonly="no"\n`;
     await run("sudo", [
       "sh",
       "-c",
@@ -290,12 +295,13 @@ async function buildCommand(distro: Distro) {
       "--force",
       "--no-hostonly",
       "--add",
-      "dmsquash-live",
+      "dmsquash-live overlayfs",
       "--filesystems",
       "squashfs overlay ext4",
       "/boot/initrd.img",
       kver,
     ]);
+    await run("sudo", ["touch", initrdMarker]);
 
     const user = Deno.env.get("USER");
     if (user) {
