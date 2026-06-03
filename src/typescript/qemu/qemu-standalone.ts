@@ -147,6 +147,14 @@ async function installUbuntu(chrootDir: string): Promise<void> {
     "DEBIAN_FRONTEND=noninteractive apt-get update && " +
     "DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
   );
+  // DHCP on all ethernet so systemd-resolved gets upstream DNS at boot.
+  // Must run WITHOUT --bind-ro=/etc/resolv.conf so we can replace the symlink.
+  await run("sudo", ["systemd-nspawn", "--timezone=off", "-D", chrootDir, "sh", "-c",
+    "mkdir -p /etc/systemd/network && " +
+    "printf '[Match]\\nName=e*\\n\\n[Network]\\nDHCP=yes\\n\\n[DHCP]\\nUseDNS=yes\\nUseDomains=yes\\n' > /etc/systemd/network/20-wired.network && " +
+    "systemctl enable systemd-networkd systemd-resolved && " +
+    "rm -f /etc/resolv.conf && ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf",
+  ]);
 }
 
 async function findKernelFedora(chrootDir: string): Promise<string> {
@@ -402,6 +410,16 @@ chpasswd:
   }
   const metaData = "instance-id: deno-qemu-liveos\n";
   const vendorData = "";
+  // QEMU user-mode DNS is at 10.0.2.3; 8.8.8.8 as fallback
+  const networkConfig = `version: 2
+ethernets:
+  id0:
+    match:
+      name: "en*"
+    dhcp4: true
+    nameservers:
+      addresses: [10.0.2.3, 8.8.8.8]
+`;
 
   // 2. Start HTTP server for Cloud-Init NoCloud endpoint
   const ac = new AbortController();
@@ -412,6 +430,7 @@ chpasswd:
       if (url.pathname === "/user-data") return new Response(userData);
       if (url.pathname === "/meta-data") return new Response(metaData);
       if (url.pathname === "/vendor-data") return new Response(vendorData);
+      if (url.pathname === "/network-config") return new Response(networkConfig);
       return new Response("Not found", { status: 404 });
     },
   );
