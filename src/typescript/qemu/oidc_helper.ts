@@ -43,7 +43,12 @@ export async function getSigningKey(): Promise<CryptoKeyPair> {
       true, ["sign"],
     );
     const jwk = await jose.exportJWK(priv);
-    const pub = await jose.importJWK({ ...jwk, d: undefined }, "RS256") as CryptoKey;
+    const pubJwk = { ...jwk, d: undefined, dp: undefined, dq: undefined, p: undefined, q: undefined, qi: undefined };
+    const pub = await crypto.subtle.importKey(
+      "jwk", pubJwk,
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      true, ["verify"],
+    );
     _signingKey = { privateKey: priv, publicKey: pub };
   } else {
     _signingKey = await crypto.subtle.generateKey(

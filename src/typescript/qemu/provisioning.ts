@@ -72,22 +72,22 @@ export class ProvisioningData {
         `THIS_ENDPOINT="${THIS_ENDPOINT}"`,
         `PROVISIONING_TOKEN="${token.asString}"`,
       ].join("\n"),
-      // Challenge/prove script (literal — no interpolation)
-      String.raw`set -eu
+      // Challenge/prove script
+      `set -eu
 set -x
 while ! grep -q "0016" /proc/net/tcp; do sleep 1; done && echo "Port 22 is active"
 PORT=22
-SIG_JSON="$(echo -n "${PROVISIONING_TOKEN}" \
-    | ssh-keygen -Y sign -n prove-sshd -f /etc/ssh/ssh_host_ed25519_key \
-    | jq -c --arg port "${PORT}" --raw-input --slurp '{port: ($port | fromjson), sig: .}')"
-TOKEN="$(curl -sfL \
-    -H "Authorization: Bearer ${PROVISIONING_TOKEN}" \
-    -d "${SIG_JSON}" \
-    "${THIS_ENDPOINT}/v1/oidc/prove" \
+SIG_JSON="$(echo -n "\${PROVISIONING_TOKEN}" \\
+    | ssh-keygen -Y sign -n prove-sshd -f /etc/ssh/ssh_host_ed25519_key \\
+    | jq -c --arg port "\${PORT}" --raw-input --slurp '{port: (\$port | fromjson), sig: .}')"
+TOKEN="$(curl -sfL \\
+    -H "Authorization: Bearer \${PROVISIONING_TOKEN}" \\
+    -d "\${SIG_JSON}" \\
+    "\${THIS_ENDPOINT}/v1/oidc/prove" \\
     | jq -r .token)"
-if [ -n "${TOKEN}" ] && [ "${TOKEN}" != "null" ]; then
+if [ -n "\${TOKEN}" ] && [ "\${TOKEN}" != "null" ]; then
     mkdir -p /root/secrets/digitalocean.com/serviceaccount/
-    echo "${TOKEN}" > /root/secrets/digitalocean.com/serviceaccount/token
+    echo "\${TOKEN}" > /root/secrets/digitalocean.com/serviceaccount/token
 fi`,
     ].join("\n");
 
