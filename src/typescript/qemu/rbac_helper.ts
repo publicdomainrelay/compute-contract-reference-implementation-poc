@@ -18,7 +18,8 @@
  */
 
 import { OIDCToken, UnauthorizedException, parseAudience } from "./oidc_helper.ts";
-import { IdResolver, verifyJwt } from '@atproto/identity';
+import { IdResolver } from '@atproto/identity';
+import { verifyJwt } from '@atproto/xrpc-server'
 import * as jose from "npm:jose@5";
 
 function log(
