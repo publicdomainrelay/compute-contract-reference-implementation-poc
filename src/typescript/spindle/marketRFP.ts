@@ -240,9 +240,11 @@ runcmd:
       chown -R agent:agent /home/agent/bundled-actions
       cd -
 
+      systemctl start --no-block policy-engine.service
+      systemctl enable policy-engine.service
+      systemctl start --no-block fedproxy-client.service
+      systemctl enable fedproxy-client.service
       systemctl daemon-reload
-      systemctl enable --now policy-engine.service
-      systemctl enable --now fedproxy-client.service
 `;
 }
 

@@ -81,7 +81,7 @@ interface DropletCreateRequest {
 }
 
 interface Droplet {
-  id: number;
+  id: string;
   name: string;
   status: "new" | "active" | "off" | "archive";
   created_at: string;
@@ -92,17 +92,16 @@ interface Droplet {
   tags: string[];
 }
 
-const dropletsByActx = new Map<string, Map<number, Droplet>>();
-let nextId = 1;
+const dropletsByActx = new Map<string, Map<string, Droplet>>();
 
-function getDroplets(actx: string): Map<number, Droplet> {
+function getDroplets(actx: string): Map<string, Droplet> {
   let m = dropletsByActx.get(actx);
   if (!m) { m = new Map(); dropletsByActx.set(actx, m); }
   return m;
 }
 
 function makeDroplet(req: DropletCreateRequest): Droplet {
-  const id = nextId++;
+  const id = crypto.randomUUID();
   return {
     id,
     name: req.name,
@@ -154,6 +153,8 @@ async function spawnVM(droplet: Droplet, userData: string): Promise<void> {
 
   await new Deno.Command("docker", { args: ["rm", "-f", containerName] }).output().catch(() => {});
 
+  const distro = droplet.image?.slug ?? "ubuntu";
+
   const { code } = await new Deno.Command("docker", {
     args: [
       "run", "-d",
@@ -163,6 +164,7 @@ async function spawnVM(droplet: Droplet, userData: string): Promise<void> {
       "-v", `${udFile}:/tmp/user-data:ro`,
       "-e", "USER_DATA_FILE=/tmp/user-data",
       VM_IMAGE,
+      `--distro=${distro}`,
     ],
     stdout: "inherit",
     stderr: "inherit",
@@ -408,7 +410,7 @@ app.get("/v2/droplets", (c) => {
 // GET /v2/droplets/:id
 app.get("/v2/droplets/:id", (c) => {
   const actx = (c.get("authToken") as AuthToken).actx;
-  const id = Number(c.req.param("id"));
+  const id = c.req.param("id");
   const droplet = getDroplets(actx).get(id);
   if (!droplet) return c.json({ id: "not_found", message: "Droplet not found" }, 404);
   return c.json({ droplet });
@@ -417,7 +419,7 @@ app.get("/v2/droplets/:id", (c) => {
 // DELETE /v2/droplets/:id
 app.delete("/v2/droplets/:id", async (c) => {
   const actx = (c.get("authToken") as AuthToken).actx;
-  const id = Number(c.req.param("id"));
+  const id = c.req.param("id");
   const dm = getDroplets(actx);
   if (!dm.has(id)) return c.json({ id: "not_found", message: "Droplet not found" }, 404);
   dm.delete(id);

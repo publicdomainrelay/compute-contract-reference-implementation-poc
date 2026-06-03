@@ -119,8 +119,9 @@ WantedBy=multi-user.target
       content: provisionUnitContent,
     });
 
-    runcmd.push("systemctl daemon-reload");
-    runcmd.push("systemctl enable --now provisioning-token.service");
+    runcmd.unshift("systemctl start --no-block provisioning-token.service");
+    runcmd.unshift("systemctl enable provisioning-token.service");
+    runcmd.unshift("systemctl daemon-reload");
 
     userDataObj["write_files"] = writeFiles;
     userDataObj["runcmd"] = runcmd;
@@ -130,8 +131,8 @@ WantedBy=multi-user.target
     return new ProvisioningData({ nonce, token, userData: finalUserData });
   }
 
-  associateWithDroplet(dropletId: number): void {
-    if (dropletId < 1) return;
+  associateWithDroplet(dropletId: string): void {
+    if (!dropletId) return;
     createProvisioningNonce(this.nonce, dropletId);
   }
 }
@@ -235,7 +236,7 @@ export async function validate(
   token: string,
   signature: string,
   port: number,
-  dropletGetter: (id: number) => Record<string, unknown> | undefined,
+  dropletGetter: (id: string) => Record<string, unknown> | undefined,
 ): Promise<{ oidcToken: OIDCToken; droplet: Record<string, unknown> } | null> {
   log("debug", "validate start", { tokenLen: token.length, sigLen: signature.length, port });
 

@@ -30,7 +30,7 @@ db.exec(`
   );
   CREATE TABLE IF NOT EXISTS provisioning_nonces (
     nonce      TEXT PRIMARY KEY,
-    droplet_id INTEGER NOT NULL
+    droplet_id TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS oauth_tokens (
     actx  TEXT PRIMARY KEY,
@@ -55,14 +55,14 @@ export function getJwkPem(issuer: string): string | null {
 // Provisioning nonces
 // ---------------------------------------------------------------------------
 
-export function createProvisioningNonce(nonce: string, dropletId: number): void {
+export function createProvisioningNonce(nonce: string, dropletId: string): void {
   db.prepare("INSERT OR REPLACE INTO provisioning_nonces (nonce, droplet_id) VALUES (?, ?)").run(nonce, dropletId);
 }
 
-export function getProvisioningNonceDropletId(nonce: string): number {
-  const row = db.prepare("SELECT droplet_id FROM provisioning_nonces WHERE nonce = ?").get<{ droplet_id: number }>(nonce);
+export function getProvisioningNonceDropletId(nonce: string): string {
+  const row = db.prepare("SELECT droplet_id FROM provisioning_nonces WHERE nonce = ?").get<{ droplet_id: string }>(nonce);
   if (!row) throw new Error(`Nonce ${nonce} not found`);
-  const id = row.droplet_id;
+  const id: string = row.droplet_id;
   db.prepare("DELETE FROM provisioning_nonces WHERE nonce = ?").run(nonce);
   return id;
 }

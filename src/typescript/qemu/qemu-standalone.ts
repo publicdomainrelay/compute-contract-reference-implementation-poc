@@ -197,7 +197,7 @@ const DISTRO_CONFIGS: Record<Distro, DistroConfig> = {
     ociSource: "docker://registry.fedoraproject.org/fedora:latest",
     install: installFedora,
     findKernel: findKernelFedora,
-    kernelAppend: "console=ttyS0 root=live:LABEL=LIVEOS rd.live.image rd.overlayfs=1 rd.live.overlay.overlayfs=1 rd.live.overlay=/dev/vdb init=/usr/lib/systemd/systemd",
+    kernelAppend: "console=ttyS0 root=live:LABEL=LIVEOS rd.live.image rd.live.overlay.overlayfs=1 rd.live.overlay=LABEL=OVERLAY rd.live.overlay.nouserconfirmprompt init=/usr/lib/systemd/systemd",
   },
   ubuntu: {
     ociSource: "docker://docker.io/library/ubuntu:latest",
