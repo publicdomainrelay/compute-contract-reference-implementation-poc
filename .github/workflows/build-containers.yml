@@ -12,14 +12,20 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
 
-      - name: find workspace
+      - name: Print all files
         run: |
           echo "=== WORKSPACE ==="
           find .
           echo "=== DONE ==="
 
-      - name: build qemu runner
+      - name: Install docker
+        run: |
+          sudo dnf config-manager addrepo --from-repofile https://download.docker.com/linux/fedora/docker-ce.repo
+          sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+          sudo systemctl enable --now docker
+
+      - name: Build qemu runner container
         run: |
           cd src/typescript/qemu/
           # --push
-          docker build --pull --progress plain -f Dockerfile -t atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner .
+          sudo docker build --pull --progress plain -f Dockerfile -t atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner .

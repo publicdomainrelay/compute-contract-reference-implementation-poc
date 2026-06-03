@@ -13,6 +13,7 @@
 //   JETSTREAM_URL         – Bluesky jetstream WebSocket base URL
 //   KNOT_SCHEME           – http or https for bare knot hostnames (default: https)
 //   SPINDLE_DB_PATH       – path to JSON state file (default: ./spindle-db.json)
+//   SPINDLE_LOGS_DB_PATH  – path to JSON log store (default: ./spindle-logs-db.json)
 //   COMPUTE_PROVIDER      – set to "market.rfp" to provision VMs via ATProto marketplace
 //                           (also requires ATPROTO_HANDLE, ATPROTO_PASSWORD, and optional
 //                            ATP_RELAY_URL, FEDPROXY_HOST, VM_* — see marketRFP.ts)
@@ -195,6 +196,7 @@ function repoSecrets(repoDid: string): Map<string, SecretEntry> {
 const JETSTREAM_URL = Deno.env.get("JETSTREAM_URL") ?? "wss://jetstream2.us-east.bsky.network/subscribe";
 const DEFAULT_KNOT  = Deno.env.get("DEFAULT_KNOT")  ?? "knot1.tangled.sh";
 const DB_PATH       = Deno.env.get("SPINDLE_DB_PATH") ?? "./spindle-db.json";
+const LOGS_DB_PATH  = Deno.env.get("SPINDLE_LOGS_DB_PATH") ?? "./spindle-logs-db.json";
 
 // repoDids whose sh.tangled.repo record has spindle === HOSTNAME.
 // Triggers arriving for any other repoDid are silently ignored.
@@ -243,6 +245,41 @@ function saveDB(db: SpindleDB): void {
 
 const db = loadDB();
 log("info", "db loaded", { path: DB_PATH, knots: Object.keys(db.cursors), persistedRuns: Object.keys(db.runs).length });
+
+// ---------------------------------------------------------------------------
+// JSON file DB — persists run console output across restarts
+// ---------------------------------------------------------------------------
+
+interface SpindleLogsDB {
+  logs: Record<string, string>; // runKey → raw console output
+}
+
+function loadLogsDB(): SpindleLogsDB {
+  try {
+    const raw = Deno.readTextFileSync(LOGS_DB_PATH);
+    const parsed = JSON.parse(raw) as SpindleLogsDB;
+    if (!parsed.logs) parsed.logs = {};
+    return parsed;
+  } catch {
+    return { logs: {} };
+  }
+}
+
+function saveLogsDB(ldb: SpindleLogsDB): void {
+  try {
+    Deno.writeTextFileSync(LOGS_DB_PATH, JSON.stringify(ldb, null, 2));
+  } catch (err) {
+    log("error", "logs db save failed", { path: LOGS_DB_PATH, err: String(err) });
+  }
+}
+
+const logsDB = loadLogsDB();
+log("info", "logs db loaded", { path: LOGS_DB_PATH, storedRuns: Object.keys(logsDB.logs).length });
+
+function persistRunLog(key: string, output: string): void {
+  logsDB.logs[key] = output;
+  saveLogsDB(logsDB);
+}
 
 // Restore persisted runs into the in-memory Map so /logs works across restarts.
 for (const [key, pr] of Object.entries(db.runs)) {
@@ -798,6 +835,18 @@ async function trackRun(run: Run): Promise<void> {
 
     if (terminal) {
       log("info", "trackRun terminal", { taskId: run.taskId, workflow: run.workflow, status: status.status, exitStatus });
+      // Persist console output so /logs works after a server restart.
+      const key = runKey(run.knot, run.pipelineRkey, run.workflow);
+      try {
+        let output = status.console_output ?? "";
+        if (!output) {
+          const r = await fetch(`${run.peUrl}/request/console_output/${run.taskId}`);
+          if (r.ok) output = await r.text();
+        }
+        if (output) persistRunLog(key, output);
+      } catch (err) {
+        log("warn", "trackRun: failed to persist run log", { taskId: run.taskId, err: String(err) });
+      }
       break;
     }
   }
@@ -1104,6 +1153,23 @@ app.get("/logs/:knot/:pipelineRkey/:workflow", (c) => {
       }
     }
 
+    // Persisted log fallback: PE is gone after restart but we saved output locally.
+    if (linesStreamed === 0) {
+      const key = runKey(
+        c.req.param("knot"),
+        c.req.param("pipelineRkey"),
+        c.req.param("workflow"),
+      );
+      const saved = logsDB.logs[key];
+      if (saved) {
+        log("info", "log stream serving from persisted logs db", { taskId: run.taskId });
+        for (const line of saved.split("\n")) {
+          if (line) { processLine(line); linesStreamed++; }
+        }
+        log("info", "log stream persisted complete", { taskId: run.taskId, linesStreamed });
+      }
+    }
+
     // Close any still-open step, then close the workflow-level step.
     if (currentStepId !== 0) closeStep();
     send({
@@ -1275,6 +1341,7 @@ log("info", "tangled-spindle-minimal starting", {
   defaultKnot: DEFAULT_KNOT,
   jetstreamUrl: JETSTREAM_URL,
   dbPath: DB_PATH,
+  logsDbPath: LOGS_DB_PATH,
 });
 
 startKnotDiscovery().catch((err) => log("error", "knot discovery startup failed", { err: String(err) }));
