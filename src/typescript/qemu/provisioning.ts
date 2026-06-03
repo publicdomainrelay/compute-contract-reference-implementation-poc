@@ -9,6 +9,10 @@ import * as jsYaml from "npm:js-yaml@^4.2.0";
 import { OIDCToken } from "./oidc_helper.ts";
 import { createProvisioningNonce, getProvisioningNonceDropletId } from "./database.ts";
 
+function log(level: string, msg: string, data?: Record<string, unknown>) {
+  console.log(JSON.stringify({ level, msg, ts: new Date().toISOString(), ...data }));
+}
+
 const THIS_ENDPOINT = Deno.env.get("THIS_ENDPOINT") ?? Deno.env.get("ISSUER_URL") ?? "http://localhost:8080";
 
 const DEFAULT_NONCE_LEN = 64;
@@ -138,26 +142,36 @@ WantedBy=multi-user.target
 
 async function getPublicKeyFromSshd(publicIpv4: string, port: number): Promise<string> {
   const deadline = Date.now() + 300_000;
+  log("debug", "getPublicKeyFromSshd start", { publicIpv4, port, deadlineMs: 300_000 });
+  let attempt = 0;
   while (Date.now() < deadline) {
+    attempt++;
     try {
-      const { code, stdout } = await new Deno.Command("ssh-keyscan", {
+      log("debug", "ssh-keyscan attempt", { publicIpv4, port, attempt });
+      const { code, stdout, stderr } = await new Deno.Command("ssh-keyscan", {
         args: ["-t", "ed25519", "-p", String(port), publicIpv4],
         stdout: "piped",
-        stderr: "null",
+        stderr: "piped",
       }).output();
 
+      const out = new TextDecoder().decode(stdout).trim();
+      const errOut = new TextDecoder().decode(stderr).trim();
+      log("debug", "ssh-keyscan output", { code, outLen: out.length, errOut: errOut.slice(0, 200) });
+
       if (code === 0) {
-        const out = new TextDecoder().decode(stdout).trim();
         // ssh-keyscan output: "<host> <keytype> <base64key>"
         const line = out.split("\n").find((l) => l.includes("ed25519"));
         if (line) {
           // strip the host prefix, return "<keytype> <base64key>"
           const parts = line.split(" ");
-          return parts.slice(1).join(" ");
+          const key = parts.slice(1).join(" ");
+          log("debug", "ssh-keyscan got key", { publicIpv4, port, keyPrefix: key.slice(0, 40) });
+          return key;
         }
+        log("debug", "ssh-keyscan no ed25519 line found", { out: out.slice(0, 200) });
       }
-    } catch {
-      // not up yet
+    } catch (e) {
+      log("debug", "ssh-keyscan exception", { error: String(e), attempt });
     }
     await new Promise((r) => setTimeout(r, 2_000));
   }
@@ -173,6 +187,11 @@ export async function validateSshSignature(
   sshSignatureBlob: string,
   dataThatWasSigned: string,
 ): Promise<boolean> {
+  log("debug", "validateSshSignature start", {
+    keyPrefix: publicKeyOpensshString.slice(0, 40),
+    sigLen: sshSignatureBlob.length,
+    dataLen: dataThatWasSigned.length,
+  });
   const tmpDir = await Deno.makeTempDir();
   try {
     await Deno.writeTextFile(`${tmpDir}/allowed_signing_key.pub`, publicKeyOpensshString);
@@ -181,6 +200,7 @@ export async function validateSshSignature(
     await Deno.writeTextFile(dataPath, dataThatWasSigned);
 
     const dataBytes = await Deno.readFile(dataPath);
+    log("debug", "validateSshSignature running ssh-keygen check-novalidate", { tmpDir });
     const child = new Deno.Command("ssh-keygen", {
       args: [
         "-Y", "check-novalidate",
@@ -190,13 +210,16 @@ export async function validateSshSignature(
       ],
       cwd: tmpDir,
       stdin: "piped",
-      stdout: "null",
-      stderr: "null",
+      stdout: "piped",
+      stderr: "piped",
     }).spawn();
     const writer = child.stdin.getWriter();
     await writer.write(dataBytes);
     await writer.close();
-    const { code } = await child.status;
+    const { code, stdout, stderr } = await child.output();
+    const outStr = new TextDecoder().decode(stdout).trim();
+    const errStr = new TextDecoder().decode(stderr).trim();
+    log("debug", "validateSshSignature ssh-keygen result", { code, stdout: outStr, stderr: errStr });
 
     return code === 0;
   } finally {
@@ -214,21 +237,30 @@ export async function validate(
   port: number,
   dropletGetter: (id: number) => Record<string, unknown> | undefined,
 ): Promise<{ oidcToken: OIDCToken; droplet: Record<string, unknown> } | null> {
+  log("debug", "validate start", { tokenLen: token.length, sigLen: signature.length, port });
+
   const oidcToken = await OIDCToken.validate(token);
+  log("debug", "validate oidcToken validated", { actx: oidcToken.actx, sub: oidcToken.sub });
 
   const nonce = oidcToken.claims["nonce"] as string | undefined;
   if (!nonce) throw new Error("provisioning token missing nonce claim");
+  log("debug", "validate nonce extracted", { nonceLen: nonce.length });
 
   const dropletId = getProvisioningNonceDropletId(nonce);
+  log("debug", "validate dropletId from nonce", { dropletId });
 
   const droplet = dropletGetter(dropletId);
   if (!droplet) throw new Error(`droplet ${dropletId} not found`);
+  log("debug", "validate droplet found", { dropletId, dropletName: droplet["name"] });
 
   const networks = droplet["networks"] as { v4: { ip_address: string; type: string }[] } | undefined;
   const publicIpv4 = networks?.v4.find((n) => n.type === "public")?.ip_address;
+  log("debug", "validate network lookup", { publicIpv4, v4Count: networks?.v4?.length });
   if (!publicIpv4) throw new Error(`no public IPv4 for droplet ${dropletId}`);
 
+  log("debug", "validate fetching public key via ssh-keyscan", { publicIpv4, port });
   const publicKey = await getPublicKeyFromSshd(publicIpv4, port);
+  log("debug", "validate got public key", { keyPrefix: publicKey.slice(0, 40) });
 
   let valid: boolean;
   try {
@@ -236,6 +268,7 @@ export async function validate(
   } catch (e) {
     throw new Error(`Failed to validate SSHD signature: ${e}`);
   }
+  log("debug", "validate ssh signature result", { valid });
 
   if (!valid) return null;
   return { oidcToken, droplet };

@@ -312,31 +312,44 @@ app.post("/v1/oidc/issue", async (c) => {
 
 // POST /v1/oidc/prove — validate droplet SSH challenge + issue scoped token
 app.post("/v1/oidc/prove", async (c) => {
+  log("debug", "/v1/oidc/prove request received");
   try {
     const body = await c.req.json<{ sig: string; port: number }>();
+    log("debug", "/v1/oidc/prove body parsed", { port: body.port, sigLen: body.sig?.length });
     const token = extractBearer(c.req.header("Authorization"));
+    log("debug", "/v1/oidc/prove bearer extracted", { tokenPresent: !!token, tokenLen: token?.length });
 
     const provToken = await OIDCToken.validate(token);
     const actx = provToken.actx;
-    const result = await provisioningValidate(token, body.sig, body.port, (id) => getDroplets(actx).get(id) as Record<string, unknown> | undefined);
+    log("debug", "/v1/oidc/prove token validated", { actx, provTokenSub: provToken.sub });
+
+    const result = await provisioningValidate(token, body.sig, body.port, (id) => {
+      const droplet = getDroplets(actx).get(id) as Record<string, unknown> | undefined;
+      log("debug", "/v1/oidc/prove droplet lookup", { id, found: !!droplet });
+      return droplet;
+    });
+    log("debug", "/v1/oidc/prove provisioningValidate result", { valid: !!result });
     if (!result) return c.json({ valid: false });
 
     const { oidcToken, droplet } = result;
     const dropletTags = ((droplet["tags"] as string[]) ?? []);
+    log("debug", "/v1/oidc/prove droplet info", { dropletId: droplet["id"], tags: dropletTags });
     const subject = [
       `actx:${oidcToken.actx}`,
       ...dropletTags
         .filter((t) => t.startsWith("oidc-sub:") && t.split(":").length === 3 && t.split(":")[1] !== "actx")
         .map((t) => t.split(":", 2)[1]),
     ].join(":");
+    log("debug", "/v1/oidc/prove computed subject", { subject });
 
     const issued = await OIDCToken.create(oidcToken.actx, {
       sub: subject,
       droplet_id: droplet["id"],
     });
+    log("debug", "/v1/oidc/prove token issued", { sub: subject, dropletId: droplet["id"] });
     return c.json({ token: issued.asString });
   } catch (err) {
-    log("error", "oidc prove failed", { error: String(err) });
+    log("error", "oidc prove failed", { error: String(err), stack: err instanceof Error ? err.stack : undefined });
     return c.json({ id: "unauthorized", message: String(err) }, 401);
   }
 });
