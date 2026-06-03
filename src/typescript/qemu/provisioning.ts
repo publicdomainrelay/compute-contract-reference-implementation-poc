@@ -141,19 +141,26 @@ WantedBy=multi-user.target
 // SSH public key retrieval via ssh-keyscan
 // ---------------------------------------------------------------------------
 
-async function getPublicKeyFromSshd(publicIpv4: string, port: number): Promise<string> {
+async function getPublicKeyFromSshd(publicIpv4: string, port: number, containerName?: string): Promise<string> {
   const deadline = Date.now() + 300_000;
-  log("debug", "getPublicKeyFromSshd start", { publicIpv4, port, deadlineMs: 300_000 });
+  log("debug", "getPublicKeyFromSshd start", { publicIpv4, port, containerName, deadlineMs: 300_000 });
   let attempt = 0;
   while (Date.now() < deadline) {
     attempt++;
     try {
-      log("debug", "ssh-keyscan attempt", { publicIpv4, port, attempt });
-      const { code, stdout, stderr } = await new Deno.Command("ssh-keyscan", {
-        args: ["-t", "ed25519", "-p", String(port), publicIpv4],
-        stdout: "piped",
-        stderr: "piped",
-      }).output();
+      log("debug", "ssh-keyscan attempt", { publicIpv4, port, containerName, attempt });
+      const cmd = containerName
+        ? new Deno.Command("docker", {
+            args: ["exec", containerName, "ssh-keyscan", "-t", "ed25519", "-p", String(port), "127.0.0.1"],
+            stdout: "piped",
+            stderr: "piped",
+          })
+        : new Deno.Command("ssh-keyscan", {
+            args: ["-t", "ed25519", "-p", String(port), publicIpv4],
+            stdout: "piped",
+            stderr: "piped",
+          });
+      const { code, stdout, stderr } = await cmd.output();
 
       const out = new TextDecoder().decode(stdout).trim();
       const errOut = new TextDecoder().decode(stderr).trim();
@@ -259,8 +266,9 @@ export async function validate(
   log("debug", "validate network lookup", { publicIpv4, v4Count: networks?.v4?.length });
   if (!publicIpv4) throw new Error(`no public IPv4 for droplet ${dropletId}`);
 
-  log("debug", "validate fetching public key via ssh-keyscan", { publicIpv4, port });
-  const publicKey = await getPublicKeyFromSshd(publicIpv4, port);
+  const containerName = droplet["containerName"] as string | undefined;
+  log("debug", "validate fetching public key via ssh-keyscan", { publicIpv4, port, containerName });
+  const publicKey = await getPublicKeyFromSshd(publicIpv4, port, containerName);
   log("debug", "validate got public key", { keyPrefix: publicKey.slice(0, 40) });
 
   let valid: boolean;

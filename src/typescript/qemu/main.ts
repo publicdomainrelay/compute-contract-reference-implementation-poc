@@ -184,6 +184,7 @@ async function spawnVM(droplet: Droplet, userData: string): Promise<void> {
       const up = await pollSsh(ip);
       if (up) {
         droplet.networks.v4 = [{ ip_address: ip, type: "public" }];
+        (droplet as unknown as Record<string, unknown>)["containerName"] = containerName;
         droplet.status = "active";
         log("info", "SSH ready", { droplet_id: droplet.id, ip });
       } else {
