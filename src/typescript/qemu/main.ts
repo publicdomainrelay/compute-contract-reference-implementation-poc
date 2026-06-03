@@ -374,6 +374,27 @@ app.delete("/v2/droplets/:id", async (c) => {
 // Start
 // ---------------------------------------------------------------------------
 
+async function killAllDroplets(): Promise<void> {
+  const ids = [...droplets.keys()];
+  if (ids.length === 0) return;
+  log("info", "shutdown: killing droplets", { ids });
+  await Promise.all(
+    ids.map((id) =>
+      new Deno.Command("docker", { args: ["rm", "-f", `droplet-${id}`] })
+        .output()
+        .catch(() => {})
+    ),
+  );
+}
+
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  Deno.addSignalListener(sig, async () => {
+    log("info", `received ${sig}, shutting down`);
+    await killAllDroplets();
+    Deno.exit(0);
+  });
+}
+
 // Warm up signing key (loads from DB or generates + persists)
 await getSigningKey();
 const jwk = await getPublicJwk();

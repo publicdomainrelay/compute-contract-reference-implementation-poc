@@ -154,7 +154,7 @@ export async function validateSshSignature(
     await Deno.writeTextFile(dataPath, dataThatWasSigned);
 
     const dataBytes = await Deno.readFile(dataPath);
-    const { code } = await new Deno.Command("ssh-keygen", {
+    const child = new Deno.Command("ssh-keygen", {
       args: [
         "-Y", "check-novalidate",
         "-n", "prove-sshd",
@@ -165,30 +165,11 @@ export async function validateSshSignature(
       stdin: "piped",
       stdout: "null",
       stderr: "null",
-    }).spawn().then(async (proc) => {
-      // Not available in all Deno versions — use the buffered approach
-      void proc;
-      throw new Error("use buffered");
-    }).catch(async () => {
-      // Buffered approach: pipe stdin via subprocess input
-      const cmd = new Deno.Command("ssh-keygen", {
-        args: [
-          "-Y", "check-novalidate",
-          "-n", "prove-sshd",
-          "-f", "allowed_signing_key.pub",
-          "-s", "signature",
-        ],
-        cwd: tmpDir,
-        stdin: "piped",
-        stdout: "null",
-        stderr: "null",
-      });
-      const child = cmd.spawn();
-      const writer = child.stdin.getWriter();
-      await writer.write(dataBytes);
-      await writer.close();
-      return child.status;
-    });
+    }).spawn();
+    const writer = child.stdin.getWriter();
+    await writer.write(dataBytes);
+    await writer.close();
+    const { code } = await child.status;
 
     return code === 0;
   } finally {
