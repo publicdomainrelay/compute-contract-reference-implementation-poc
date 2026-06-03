@@ -125,7 +125,7 @@ export class OIDCToken implements OIDCTokenData {
   ): Promise<OIDCToken> {
     const keys = await getSigningKey();
     const jwk = await getPublicJwk();
-    const audience = `api://${api}?actx=${actx}`;
+    let audience = `api://${api}?actx=${actx}`;
 
     const sub = claims["sub"] as string | undefined;
     if (!sub || !sub.includes(`actx:${actx}`)) {
@@ -140,6 +140,10 @@ export class OIDCToken implements OIDCTokenData {
       expTime = Math.floor(Date.now() / 1000) + (claims["ttl"] as number);
     } else {
       expTime = Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 365 * 100;
+    }
+
+    if (typeof claims["aud"] === "string") {
+      audience = claims["aud"]
     }
 
     const token = await new jose.SignJWT(payload as jose.JWTPayload)

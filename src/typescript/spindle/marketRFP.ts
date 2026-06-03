@@ -554,7 +554,7 @@ export async function marketRFPSubmitWorkflow(
         role_name: serviceName,
         definition: {
           // aud is us
-          aud: `api://ATProto?actx=${agentDid}`,
+          aud: `api://ATProto?actx=${winner.config.actx}`,
           iss: `${winner.config.issuer_uri}`,
           // actx is them for this simple example
           // TODO Thi should be templating winner.config.subject
