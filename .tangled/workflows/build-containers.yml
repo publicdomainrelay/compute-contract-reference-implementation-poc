@@ -1,0 +1,11 @@
+when:
+  - event: ["push", "manual"]
+    branch: ["main"]
+  - event: ["pull_request"]
+    branch: ["main", "test5"]
+
+engine: "bridgeGHA"
+
+bridgeGHA:
+  workflow:
+    name: 'build-containers.yml'
