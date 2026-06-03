@@ -8,7 +8,6 @@
 import * as jsYaml from "npm:js-yaml@^4.2.0";
 import { OIDCToken } from "./oidc_helper.ts";
 import { createProvisioningNonce, getProvisioningNonceDropletId } from "./database.ts";
-import { doDropletGet } from "./do_api.ts";
 
 const THIS_ENDPOINT = Deno.env.get("THIS_ENDPOINT") ?? Deno.env.get("ISSUER_URL") ?? "http://localhost:8080";
 
@@ -205,6 +204,7 @@ export async function validate(
   token: string,
   signature: string,
   port: number,
+  dropletGetter: (id: number) => Record<string, unknown> | undefined,
 ): Promise<{ oidcToken: OIDCToken; droplet: Record<string, unknown> } | null> {
   const oidcToken = await OIDCToken.validate(token);
 
@@ -213,8 +213,8 @@ export async function validate(
 
   const dropletId = getProvisioningNonceDropletId(nonce);
 
-  // Use a placeholder token for the DO API call — the droplet is already created
-  const droplet = await doDropletGet("feedface", dropletId);
+  const droplet = dropletGetter(dropletId);
+  if (!droplet) throw new Error(`droplet ${dropletId} not found`);
 
   const networks = droplet["networks"] as { v4: { ip_address: string; type: string }[] } | undefined;
   const publicIpv4 = networks?.v4.find((n) => n.type === "public")?.ip_address;

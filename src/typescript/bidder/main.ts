@@ -12,7 +12,7 @@ import { Hono } from "npm:hono@^4.12.23";
 import { Agent, CredentialSession } from "@atproto/api";
 import { IdResolver } from "@atproto/identity";
 import { getPdsEndpoint } from "@atproto/common-web";
-import { stringify as yamlStringify, parse as yamlParse } from "npm:std@^0.1.40";
+import { stringify as yamlStringify, parse as yamlParse } from "npm:yaml@^2.7.0";
 
 // x402 middleware (Hono variant per CDP docs).
 import { paymentMiddleware, x402ResourceServer } from "npm:@x402/hono";

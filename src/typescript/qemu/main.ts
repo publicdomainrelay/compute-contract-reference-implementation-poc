@@ -272,7 +272,7 @@ app.post("/v1/oidc/prove", async (c) => {
     const body = await c.req.json<{ sig: string; port: number }>();
     const token = extractBearer(c.req.header("Authorization"));
 
-    const result = await provisioningValidate(token, body.sig, body.port);
+    const result = await provisioningValidate(token, body.sig, body.port, (id) => droplets.get(id) as Record<string, unknown> | undefined);
     if (!result) return c.json({ valid: false });
 
     const { oidcToken, droplet } = result;
