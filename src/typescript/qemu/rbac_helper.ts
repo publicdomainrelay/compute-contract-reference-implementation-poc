@@ -125,41 +125,6 @@ async function resolvePDS(did: string): Promise<string> {
   return pds;
 }
 
-// ---------------------------------------------------------------------------
-// ATProto service auth JWT validation (non-OIDC)
-// Validates com.atproto.server.getServiceAuth tokens against DID doc keys.
-// ---------------------------------------------------------------------------
-
-async function validateATProtoServiceAuth(token: string): Promise<{ iss: string; sub: string; payload: jose.JWTPayload }> {
-  const parts = token.split(".");
-  if (parts.length !== 3) throw new UnauthorizedException("Invalid JWT format");
-
-  const payloadJson = JSON.parse(new TextDecoder().decode(jose.base64url.decode(parts[1])));
-  const iss = payloadJson.iss as string | undefined;
-  if (!iss || !iss.startsWith("did:")) {
-    throw new UnauthorizedException("ATProto service auth token must have DID iss");
-  }
-
-  const didDoc = await resolveDIDDoc(iss);
-  const vms = didDoc.verificationMethod ?? [];
-
-  log("info", "validateATProtoServiceAuth", { iss: iss, didDoc: didDoc, payloadJson: payloadJson });
-
-  let lastErr: Error = new Error("no verificationMethod entries in DID document");
-  for (const vm of vms) {
-    try {
-      if (!vm.publicKeyJwk) continue;
-      const key = await jose.importJWK(vm.publicKeyJwk);
-      const { payload } = await jose.jwtVerify(token, key);
-      const sub = (payload.sub as string | undefined) ?? iss;
-      return { iss, sub, payload };
-    } catch (e) {
-      lastErr = e as Error;
-    }
-  }
-  throw new UnauthorizedException(`ATProto JWT validation failed: ${lastErr.message}`);
-}
-
 // Initialize the official ATProto Identity Resolver.
 // This handles caching, did:plc resolution (via plc.directory), and did:web resolution.
 const idResolver = new IdResolver();
