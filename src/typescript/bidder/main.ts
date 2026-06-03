@@ -183,9 +183,26 @@ async function atprotoCreateRecord(
 
 type DOContext = { rbacRepoRoot: string; teamUuid: string };
 
+// Derive did:web: from the service base URL for use as getServiceAuth aud.
+function urlToDid(url: string): string {
+  const host = new URL(url).host;
+  return `did:web:${host}`;
+}
+
+// Get a short-lived ATProto service auth token targeting the DO/QEMU endpoint.
+// These are non-OIDC JWTs: signed by the PDS, iss=agentDid, validated via DID doc.
+async function getServiceAuthToken(): Promise<string> {
+  const aud = urlToDid(DIGITALOCEAN_BASE_URL);
+  // cannot request a method-less token with an expiration more than a minute in the futur
+  const exp = Math.floor(Date.now() / 1000) + 60; // 1 min
+  const res = await agent.com.atproto.server.getServiceAuth({ aud, exp });
+  return res.data.token;
+}
+
 async function makeDoctx(): Promise<DOContext> {
+  const token = await getServiceAuthToken();
   const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/account`, {
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${DO_TOKEN}` },
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
   });
   const json = await res.json();
   console.error("[do] /v2/account:", JSON.stringify(json));
@@ -366,6 +383,59 @@ echo "password=\${TOKEN}"
   }
 }
 
+// Creates a separate com.fedproxy.rbac record for scope=account.auth.
+// Protects /v2/account and /v2/droplets* using ATProto service auth tokens
+// (com.atproto.server.getServiceAuth — iss=agentDid, validated via DID doc keys).
+async function configureAccountAuthRbac(doctx: DOContext): Promise<void> {
+  const roleName = `account-auth-${agentDid.split(":").slice(-1)[0]}`;
+
+  const rbacRecord = {
+    $type: RBAC_NSID,
+    protects: {
+      [roleName]: {
+        service: `${DIGITALOCEAN_BASE_URL}`,
+        scope: "account.auth",
+      },
+    },
+    roles: {
+      // ATProto service auth: iss and sub are both the bidder's DID.
+      // getServiceAuth tokens have iss=agentDid, validated via DID document keys.
+      [roleName]: {
+        role_name: roleName,
+        definition: {
+          iss: agentDid,
+          sub: agentDid,
+          policies: [roleName],
+        },
+      },
+    },
+    policies: {
+      [roleName]: {
+        meta: { policy: roleName },
+        schemas: {
+          "/v2/account": {
+            type: "object",
+            properties: { capability: { enum: ["read"] } },
+          },
+          "/v2/droplets": {
+            type: "object",
+            properties: { capability: { enum: ["read", "create"] } },
+          },
+          "/v2/droplets/*": {
+            type: "object",
+            properties: { capability: { enum: ["read", "update", "delete"] } },
+          },
+        },
+      },
+    },
+    createdAt: new Date().toISOString(),
+  };
+
+  console.error(`[com.fedproxy.rbac] creating account.auth record`);
+  await atprotoCreateRecord(agent, RBAC_NSID, rbacRecord);
+  console.error(`[com.fedproxy.rbac] account.auth record created`);
+}
+
 function injectAcceptBundle(userData: string, bundle: Record<string, unknown>): string {
   // deno-lint-ignore no-explicit-any
   let obj: Record<string, any> = {};
@@ -404,9 +474,11 @@ async function createDroplet(vm: VM, requesterDid: string): Promise<unknown> {
   console.error("[do] droplet request:", JSON.stringify(body));
   const doctx = await makeDoctx();
   await configureDropletRbac(doctx, vm, requesterDid);
+  await configureAccountAuthRbac(doctx);
+  const token = await getServiceAuthToken();
   const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/droplets`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${DO_TOKEN}` },
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
     body: JSON.stringify(body),
   });
   const json = await res.json();
@@ -547,7 +619,7 @@ app.get("/receipt/*", async (c) => {
 
   const { repo: requesterDid } = parseAtUri(accept._uri);
   // TODO retry droplet creation on failure
-  await createDroplet(vm, requesterDid, agent);
+  await createDroplet(vm, requesterDid);
 
   const res = await agent.com.atproto.repo.createRecord({
     repo: agent.assertDid,

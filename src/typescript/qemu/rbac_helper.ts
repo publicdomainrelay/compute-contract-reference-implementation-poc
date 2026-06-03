@@ -8,9 +8,38 @@
  *   4. Verify JWT against those issuers via OIDC discovery + JWKS
  *   5. Match verified sub against roles → collect policies
  *   6. Find best path schema → check capability enum
+ *
+ * ATProto service auth path (non-OIDC):
+ *   If token iss is a DID (com.atproto.server.getServiceAuth tokens):
+ *   1. Resolve issuer DID document
+ *   2. Verify JWT signature against verificationMethod keys
+ *   3. Fetch com.fedproxy.rbac from issuer's PDS
+ *   4. Check policy
  */
 
 import { OIDCToken, UnauthorizedException, parseAudience } from "./oidc_helper.ts";
+import { IdResolver, verifyJwt } from '@atproto/identity';
+import * as jose from "npm:jose@5";
+
+function log(
+  level: "info" | "error" | "warn",
+  msg: string,
+  extra?: Record<string, unknown>,
+) {
+  const entry = { ts: new Date().toISOString(), level, msg, ...extra };
+  Deno.stderr.writeSync(new TextEncoder().encode(JSON.stringify(entry) + "\n"));
+}
+
+// ---------------------------------------------------------------------------
+// Shared auth token shape returned by both OIDC and ATProto paths
+// ---------------------------------------------------------------------------
+
+export interface AuthToken {
+  sub: string;
+  actx: string;
+  asString: string;
+  claims: Record<string, unknown>;
+}
 
 // ---------------------------------------------------------------------------
 // ATProto types
@@ -94,6 +123,87 @@ async function resolvePDS(did: string): Promise<string> {
   )?.serviceEndpoint;
   if (!pds) throw new Error(`no PDS in DID document for ${did}`);
   return pds;
+}
+
+// ---------------------------------------------------------------------------
+// ATProto service auth JWT validation (non-OIDC)
+// Validates com.atproto.server.getServiceAuth tokens against DID doc keys.
+// ---------------------------------------------------------------------------
+
+async function validateATProtoServiceAuth(token: string): Promise<{ iss: string; sub: string; payload: jose.JWTPayload }> {
+  const parts = token.split(".");
+  if (parts.length !== 3) throw new UnauthorizedException("Invalid JWT format");
+
+  const payloadJson = JSON.parse(new TextDecoder().decode(jose.base64url.decode(parts[1])));
+  const iss = payloadJson.iss as string | undefined;
+  if (!iss || !iss.startsWith("did:")) {
+    throw new UnauthorizedException("ATProto service auth token must have DID iss");
+  }
+
+  const didDoc = await resolveDIDDoc(iss);
+  const vms = didDoc.verificationMethod ?? [];
+
+  log("info", "validateATProtoServiceAuth", { iss: iss, didDoc: didDoc, payloadJson: payloadJson });
+
+  let lastErr: Error = new Error("no verificationMethod entries in DID document");
+  for (const vm of vms) {
+    try {
+      if (!vm.publicKeyJwk) continue;
+      const key = await jose.importJWK(vm.publicKeyJwk);
+      const { payload } = await jose.jwtVerify(token, key);
+      const sub = (payload.sub as string | undefined) ?? iss;
+      return { iss, sub, payload };
+    } catch (e) {
+      lastErr = e as Error;
+    }
+  }
+  throw new UnauthorizedException(`ATProto JWT validation failed: ${lastErr.message}`);
+}
+
+// Initialize the official ATProto Identity Resolver.
+// This handles caching, did:plc resolution (via plc.directory), and did:web resolution.
+const idResolver = new IdResolver();
+
+// ---------------------------------------------------------------------------
+// ATProto service auth JWT validation (non-OIDC)
+// Validates com.atproto.server.getServiceAuth tokens against DID doc keys.
+// ---------------------------------------------------------------------------
+export async function validateATProtoServiceAuth(
+  token: string
+): Promise<{ iss: string; sub: string; payload: jose.JWTPayload }> {
+  // 1. Parse token quickly to read the issuer (iss)
+  const parts = token.split(".");
+  if (parts.length !== 3) {
+    throw new UnauthorizedException("Invalid JWT format");
+  }
+
+  const payloadJson = JSON.parse(
+    new TextDecoder().decode(jose.base64url.decode(parts[1]))
+  );
+  const iss = payloadJson.iss as string | undefined;
+  if (!iss || !iss.startsWith("did:")) {
+    throw new UnauthorizedException("ATProto service auth token must have DID iss");
+  }
+
+  try {
+    // 2. Resolve the DID Document & verify the signature using @atproto/identity.
+    // verifyJwt handles:
+    //   - Resolving the DID Document (using plc.directory or did:web lookup)
+    //   - Safely parsing publicKeyMultibase (secp256k1/k256, ed25519) and publicKeyJwk formats
+    //   - Cryptographically verifying the token signature
+    const payload = await verifyJwt(token, iss, async (did) => {
+      const didDoc = await idResolver.did.resolveAtprotoKey(did);
+      return didDoc; // Returns the verification key string directly
+    });
+
+    // 3. Extract subject (sub) and return
+    const sub = (payload.sub as string | undefined) ?? iss;
+    return { iss, sub, payload };
+  } catch (error: any) {
+    throw new UnauthorizedException(
+      `ATProto JWT validation failed: ${error.message || error}`
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,20 +358,17 @@ export function checkRBACPolicy(
 }
 
 // ---------------------------------------------------------------------------
-// Full RBAC-validated token check (mirrors raiseIfUnauthorized in rbac_helper.py)
+// OIDC flow: raiseIfUnauthorized (scope: droplets.wid, /v1/oidc/issue)
 // ---------------------------------------------------------------------------
 
 export async function raiseIfUnauthorized(
-  // Service is FQDN of THIS_ENDPOINT, as that scopes to bob's builder vs. etc.
   service: string,
-  // For xrpc methods the scope is the NSID
   scope: string,
   token: string,
   path: string,
   method: string,
   reqJson?: unknown,
-): Promise<OIDCToken> {
-  // Peek at aud to extract actx before we verify signature
+): Promise<AuthToken> {
   const unverifiedPayload = (() => {
     try {
       const [, payloadB64] = token.split(".");
@@ -278,7 +385,6 @@ export async function raiseIfUnauthorized(
   let rbac: RBACRecord | null = null;
   let getIssuers: ((api: string, actx: string) => Promise<string[]>) | undefined;
 
-  // If actx looks like a DID, resolve ATProto RBAC
   try {
     const { actx, api } = parseAudience(rawAud);
     if (actx.startsWith("did:")) {
@@ -286,7 +392,7 @@ export async function raiseIfUnauthorized(
       rbac = await getRBACRecord(pdsURL, actx, service, scope);
       const issuers = collectIssuers(rbac);
       getIssuers = async (_api: string, _actx: string) => issuers;
-      void api; // used indirectly via getIssuers closure
+      void api;
     }
   } catch {
     // actx is not a DID or RBAC not found — fall through to own-issuer-only validation
@@ -298,5 +404,26 @@ export async function raiseIfUnauthorized(
     checkRBACPolicy(rbac, oidcToken.sub, path, method, reqJson);
   }
 
-  return oidcToken;
+  return oidcToken as AuthToken;
+}
+
+// ---------------------------------------------------------------------------
+// ATProto service auth flow: raiseIfUnauthorizedServiceAuth
+// (scope: account.auth, /v2/account + /v2/droplets*)
+// Tokens are com.atproto.server.getServiceAuth JWTs: iss=DID, validated via
+// DID document verificationMethod keys — no OIDC discovery used.
+// ---------------------------------------------------------------------------
+
+export async function raiseIfUnauthorizedServiceAuth(
+  service: string,
+  scope: string,
+  token: string,
+  path: string,
+  method: string,
+): Promise<AuthToken> {
+  const { iss, sub, payload } = await validateATProtoServiceAuth(token);
+  const pdsURL = await resolvePDS(iss);
+  const rbac = await getRBACRecord(pdsURL, iss, service, scope);
+  checkRBACPolicy(rbac, sub, path, method);
+  return { sub, actx: iss, asString: token, claims: payload as Record<string, unknown> };
 }

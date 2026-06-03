@@ -27,7 +27,7 @@
 
 import { Hono } from "https://deno.land/x/hono@v4.3.11/mod.ts";
 import { getPublicJwk, getSigningKey, OIDCToken, UnauthorizedException } from "./oidc_helper.ts";
-import { raiseIfUnauthorized } from "./rbac_helper.ts";
+import { raiseIfUnauthorized, raiseIfUnauthorizedServiceAuth, AuthToken } from "./rbac_helper.ts";
 import { ProvisioningData, validate as provisioningValidate } from "./provisioning.ts";
 
 // ---------------------------------------------------------------------------
@@ -224,25 +224,64 @@ app.get("/.well-known/jwks", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// RBAC middleware for /v1/oidc/issue
+// RBAC middleware — two distinct flows
 //
-// Mirrors rbac_helper.raise_if_unauthorized / main.go validateOIDCToken flow:
-//   1. Extract bearer token
-//   2. Peek aud → if actx is DID: resolve PDS → fetch com.fedproxy.rbac → collect issuers
-//   3. Verify JWT signature + aud + iss + exp
-//   4. Match sub against roles → check policy allows POST /v1/oidc/issue
+// droplets.wid (OIDC): /v1/oidc/issue
+//   Token: OIDC JWT, aud encodes actx, validated via OIDC discovery + JWKS
+//
+// account.auth (ATProto service auth): /v2/account, /v2/droplets*
+//   Token: com.atproto.server.getServiceAuth JWT, iss=DID,
+//   validated against DID document verificationMethod keys — no OIDC discovery
 // ---------------------------------------------------------------------------
 
 app.use("/v1/oidc/issue", async (c, next) => {
   try {
     const token = extractBearer(c.req.header("Authorization"));
     const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
-    const oidcToken = await raiseIfUnauthorized(issuerUrl, "droplets.wid", token, "/v1/oidc/issue", c.req.method);
-    // Attach verified token to context for the route handler
-    c.set("oidcToken", oidcToken);
+    const authToken = await raiseIfUnauthorized(issuerUrl, "droplets.wid", token, "/v1/oidc/issue", c.req.method);
+    c.set("authToken", authToken);
     await next();
   } catch (err) {
-    log("warn", "rbac middleware denied", { error: String(err), path: c.req.path });
+    log("warn", "rbac denied /v1/oidc/issue", { error: String(err) });
+    return c.json({ id: "unauthorized", message: String(err) }, 401);
+  }
+});
+
+app.use("/v2/account", async (c, next) => {
+  try {
+    const token = extractBearer(c.req.header("Authorization"));
+    const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
+    const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", token, "/v2/account", c.req.method);
+    c.set("authToken", authToken);
+    await next();
+  } catch (err) {
+    log("warn", "rbac denied /v2/account", { error: String(err) });
+    return c.json({ id: "unauthorized", message: String(err) }, 401);
+  }
+});
+
+app.use("/v2/droplets", async (c, next) => {
+  try {
+    const token = extractBearer(c.req.header("Authorization"));
+    const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
+    const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", token, c.req.path, c.req.method);
+    c.set("authToken", authToken);
+    await next();
+  } catch (err) {
+    log("warn", "rbac denied /v2/droplets", { error: String(err) });
+    return c.json({ id: "unauthorized", message: String(err) }, 401);
+  }
+});
+
+app.use("/v2/droplets/*", async (c, next) => {
+  try {
+    const token = extractBearer(c.req.header("Authorization"));
+    const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
+    const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", token, c.req.path, c.req.method);
+    c.set("authToken", authToken);
+    await next();
+  } catch (err) {
+    log("warn", "rbac denied /v2/droplets/*", { error: String(err) });
     return c.json({ id: "unauthorized", message: String(err) }, 401);
   }
 });
@@ -251,8 +290,8 @@ app.use("/v1/oidc/issue", async (c, next) => {
 app.post("/v1/oidc/issue", async (c) => {
   try {
     const body = await c.req.json<Record<string, unknown>>();
-    const oidcToken = c.get("oidcToken") as OIDCToken;
-    const actx = oidcToken.actx;
+    const authToken = c.get("authToken") as AuthToken;
+    const actx = authToken.actx;
 
     const sub = (body["sub"] as string | undefined) ?? actx;
     if (!sub.includes(`actx:${actx}`)) {
@@ -297,21 +336,10 @@ app.post("/v1/oidc/prove", async (c) => {
 });
 
 // GET /v2/account
-app.get("/v2/account", async (c) => {
-  try {
-    const token = extractBearer(c.req.header("Authorization"));
-    let teamUuid = TEAM_UUID;
-
-    if (isOidcToken(token)) {
-      const oidcToken = await OIDCToken.validate(token);
-      teamUuid = oidcToken.actx ?? TEAM_UUID;
-    }
-
-    return c.json({ account: { team: { uuid: teamUuid } } });
-  } catch (err) {
-    log("error", "account get failed", { error: String(err) });
-    return c.json({ id: "unauthorized", message: String(err) }, 401);
-  }
+app.get("/v2/account", (c) => {
+  const authToken = c.get("authToken") as AuthToken;
+  log("info", "/v2/account uuid", { uuid: authToken.actx ?? TEAM_UUID });
+  return c.json({ account: { team: { uuid: authToken.actx ?? TEAM_UUID } } });
 });
 
 // POST /v2/droplets — create/spawn a droplet
