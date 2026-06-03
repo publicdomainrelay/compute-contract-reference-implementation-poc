@@ -1,0 +1,19 @@
+name: 'build: containers'
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: find workspace
+        run: |
+          echo "=== WORKSPACE ==="
+          find .
+          echo "=== DONE ==="
