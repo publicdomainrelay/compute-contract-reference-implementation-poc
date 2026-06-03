@@ -98,6 +98,7 @@ async function getRBACRecord(pdsURL: string, did: string, service: string, scope
 
     const out = await res.json() as { records: { uri: string; value: RBACRecord }[]; cursor?: string };
 
+    let anyProtects = false;
     for (const rec of out.records ?? []) {
       const rbac = rec.value;
       let protectsThis = false;
@@ -111,6 +112,8 @@ async function getRBACRecord(pdsURL: string, did: string, service: string, scope
       }
       if (protectsThis !== true) {
         continue;
+      } else {
+        anyProtects = true;
       }
       for (const [name, policy] of Object.entries(rbac.policies ?? {})) {
         joined.policies[name] = policy;
@@ -124,6 +127,8 @@ async function getRBACRecord(pdsURL: string, did: string, service: string, scope
     if (!out.cursor) break;
     cursor = out.cursor;
   }
+
+  if (anyProtects === false) throw new Error(`no com.fedproxy.rbac records found which protect for did=${did} service=${service} scope=${scope}`);
 
   if (total === 0) throw new Error(`no com.fedproxy.rbac record found for did=${did}`);
   return joined;

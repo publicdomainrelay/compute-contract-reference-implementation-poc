@@ -30,6 +30,7 @@ const BID_NSID = "com.publicdomainrelay.temp.market.bid";
 const BIDS_X402_NSID = "com.publicdomainrelay.temp.market.bids.x402";
 const ACCEPT_NSID = "com.publicdomainrelay.temp.market.accept";
 const RECEIPT_NSID = "com.publicdomainrelay.temp.market.receipt";
+const RBAC_NSID = "com.fedproxy.rbac";
 
 const ACCEPT_PATH_RECORD = "$HOME/secrets/publicdomainrelay.com/market/accept.json";
 const ACCEPT_PATH_VM = "/root/secrets/publicdomainrelay.com/market/accept.json";
@@ -156,6 +157,27 @@ class HTTPError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// ATProto
+// ---------------------------------------------------------------------------
+
+async function atprotoCreateRecord(
+  agent: Agent,
+  collection: string,
+  record: Record<string, unknown>,
+): Promise<StrongRef> {
+  const res = await agent.com.atproto.repo.createRecord({
+    repo: agent.assertDid,
+    collection,
+    record,
+  });
+  return {
+    $type: "com.atproto.repo.strongRef",
+    uri: res.data.uri,
+    cid: res.data.cid,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // DigitalOcean + RBAC
 // ---------------------------------------------------------------------------
 
@@ -187,6 +209,70 @@ async function isDir(p: string): Promise<boolean> {
 }
 
 async function configureDropletRbac(doctx: DOContext, vm: VM, requesterDid: string): Promise<void> {
+  const requesterPlc = requesterDid.split(":").slice(-1)[0];
+  const slug = `${doctx.teamUuid}-${requesterPlc}-${vm.role}`;
+  const roleName = `ex-${slug}`;
+
+  const rbacRecord = {
+    $type: RBAC_NSID,
+    protects: {
+      [roleName]: {
+        service: `${DIGITALOCEAN_BASE_URL}`,
+        scope: 'droplets.wid',
+      }
+    },
+    roles: {
+      [roleName]: {
+        role_name: roleName,
+        definition: {
+          aud: `api://DigitalOcean?actx=${doctx.teamUuid}`,
+          sub: `actx:${doctx.teamUuid}:plc:${requesterPlc}:role:${vm.role}`,
+          policies: [roleName],
+        },
+      },
+    },
+    policies: {
+      [roleName]: {
+        meta: {
+          policy: roleName,
+        },
+        schemas: {
+          "/v1/oidc/issue": {
+            type: "object",
+            $schema: "http://json-schema.org/draft-07/schema#",
+            required: ["capability", "allowed_parameters"],
+            properties: {
+              capability: {
+                enum: ["create"],
+              },
+              allowed_parameters: {
+                type: "object",
+                properties: {
+                  aud: { type: "string" },
+                  sub: {
+                    type: "string",
+                    const: `actx:${doctx.teamUuid}:plc:${requesterPlc}:role:${vm.role}`,
+                  },
+                  ttl: {
+                    type: "number",
+                    const: 3600,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    custom_claims_roles_index: {
+      job_workflow_ref: {},
+    },
+    createdAt: new Date().toISOString(),
+  };
+  console.error(`[com.fedproxy.rbac] creating`);
+  await atprotoCreateRecord(agent, RBAC_NSID, rbacRecord);
+  console.error(`[com.fedproxy.rbac] created`);
+
   const rbac = doctx.rbacRepoRoot;
   if (!(await isDir(`${rbac}/.git`))) {
     await Deno.mkdir(rbac, { recursive: true });
@@ -230,9 +316,6 @@ echo "password=\${TOKEN}"
       }
     }
   }
-
-  const requesterPlc = requesterDid.split(":").slice(-1)[0];
-  const slug = `${doctx.teamUuid}-${requesterPlc}-${vm.role}`;
 
   const policyPath = `${rbac}/policies/ex-${slug}.hcl`;
   const policyEx = `path "/v1/oidc/issue" {
@@ -464,7 +547,7 @@ app.get("/receipt/*", async (c) => {
 
   const { repo: requesterDid } = parseAtUri(accept._uri);
   // TODO retry droplet creation on failure
-  await createDroplet(vm, requesterDid);
+  await createDroplet(vm, requesterDid, agent);
 
   const res = await agent.com.atproto.repo.createRecord({
     repo: agent.assertDid,

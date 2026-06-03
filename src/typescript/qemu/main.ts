@@ -36,7 +36,7 @@ import { ProvisioningData, validate as provisioningValidate } from "./provisioni
 
 const PORT = Number(Deno.env.get("PORT") ?? 8080);
 const TEAM_UUID = Deno.env.get("TEAM_UUID") ?? "00000000-0000-0000-0000-000000000000";
-const VM_IMAGE = Deno.env.get("VM_IMAGE") ?? "atcr.io/johnandersen777.bsky.social/homelab-runner";
+const VM_IMAGE = Deno.env.get("VM_IMAGE") ?? "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner";
 const CACHE_DIR = `${Deno.env.get("HOME")}/.cache/simple-qemu`;
 
 // ---------------------------------------------------------------------------

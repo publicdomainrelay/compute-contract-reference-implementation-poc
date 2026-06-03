@@ -1,3 +1,4 @@
+# docker build --pull --push --progress plain -f qemu-runner.Dockerfile -t atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner .
 FROM fedora:latest
 
 RUN dnf install -y \
@@ -8,6 +9,6 @@ RUN dnf install -y \
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
 
 WORKDIR /app
-COPY qemu-runner.ts .
+COPY qemu-standalone.ts .
 
-ENTRYPOINT ["deno", "run", "-A", "qemu-runner.ts", "run"]
+ENTRYPOINT ["deno", "run", "-A", "qemu-standalone.ts", "run"]
