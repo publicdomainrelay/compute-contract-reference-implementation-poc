@@ -1,0 +1,13 @@
+{
+  "imports": {
+    "@atproto/api": "npm:@atproto/api@^0.20.8",
+    "@atproto/common-web": "npm:@atproto/common-web@^0.5.0",
+    "@atproto/identity": "npm:@atproto/identity@^0.5.0",
+    "@x402/core": "npm:@x402/core@^2.14.0",
+    "@x402/evm": "npm:@x402/evm@^2.14.0",
+    "@x402/hono": "npm:@x402/hono@^2.14.0",
+    "hono": "npm:hono@^4.12.23",
+    "main.ts": "npm:main.ts@^1.0.0",
+    "std": "npm:std@^0.1.40"
+  }
+}
