@@ -19,7 +19,6 @@
  *
  * Env:
  *   PORT              — listen port (default 8080)
- *   TEAM_UUID         — team UUID returned by /v2/account (non-DID actx)
  *   VM_IMAGE          — Docker image for QEMU VMs
  *   ISSUER_URL / THIS_ENDPOINT — OIDC issuer URL (default http://localhost:PORT)
  *   DATABASE_URI      — sqlite:///path or postgresql://... (default ./app.db)
@@ -35,7 +34,6 @@ import { ProvisioningData, validate as provisioningValidate } from "./provisioni
 // ---------------------------------------------------------------------------
 
 const PORT = Number(Deno.env.get("PORT") ?? 8080);
-const TEAM_UUID = Deno.env.get("TEAM_UUID") ?? "00000000-0000-0000-0000-000000000000";
 const VM_IMAGE = Deno.env.get("VM_IMAGE") ?? "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner";
 const CACHE_DIR = `${Deno.env.get("HOME")}/.cache/simple-qemu`;
 
@@ -94,8 +92,14 @@ interface Droplet {
   tags: string[];
 }
 
-const droplets = new Map<number, Droplet>();
+const dropletsByActx = new Map<string, Map<number, Droplet>>();
 let nextId = 1;
+
+function getDroplets(actx: string): Map<number, Droplet> {
+  let m = dropletsByActx.get(actx);
+  if (!m) { m = new Map(); dropletsByActx.set(actx, m); }
+  return m;
+}
 
 function makeDroplet(req: DropletCreateRequest): Droplet {
   const id = nextId++;
@@ -312,7 +316,9 @@ app.post("/v1/oidc/prove", async (c) => {
     const body = await c.req.json<{ sig: string; port: number }>();
     const token = extractBearer(c.req.header("Authorization"));
 
-    const result = await provisioningValidate(token, body.sig, body.port, (id) => droplets.get(id) as Record<string, unknown> | undefined);
+    const provToken = await OIDCToken.validate(token);
+    const actx = provToken.actx;
+    const result = await provisioningValidate(token, body.sig, body.port, (id) => getDroplets(actx).get(id) as Record<string, unknown> | undefined);
     if (!result) return c.json({ valid: false });
 
     const { oidcToken, droplet } = result;
@@ -338,8 +344,8 @@ app.post("/v1/oidc/prove", async (c) => {
 // GET /v2/account
 app.get("/v2/account", (c) => {
   const authToken = c.get("authToken") as AuthToken;
-  log("info", "/v2/account uuid", { uuid: authToken.actx ?? TEAM_UUID });
-  return c.json({ account: { team: { uuid: authToken.actx ?? TEAM_UUID } } });
+  log("info", "/v2/account uuid", { uuid: authToken.actx });
+  return c.json({ account: { team: { uuid: authToken.actx } } });
 });
 
 // POST /v2/droplets — create/spawn a droplet
@@ -360,15 +366,18 @@ app.post("/v2/droplets", async (c) => {
   }
 
   try {
+    const authToken = c.get("authToken") as AuthToken;
+    const actx = authToken.actx;
+
     // Local Docker/QEMU path
     const droplet = makeDroplet(body);
-    droplets.set(droplet.id, droplet);
+    getDroplets(actx).set(droplet.id, droplet);
 
-    const provisioningData = await ProvisioningData.create(TEAM_UUID, body.user_data ?? null);
+    const provisioningData = await ProvisioningData.create(actx, body.user_data ?? null);
     body.user_data = provisioningData.userData;
     provisioningData.associateWithDroplet(droplet.id);
 
-    log("info", "droplets.create → local VM", { name: body.name });
+    log("info", "droplets.create → local VM", { name: body.name, actx });
     await spawnVM(droplet, provisioningData.userData);
     return c.json({ droplet }, 202);
   } catch (err) {
@@ -377,24 +386,28 @@ app.post("/v2/droplets", async (c) => {
   }
 });
 
-// GET /v2/droplets — list all local droplets
+// GET /v2/droplets — list caller's droplets
 app.get("/v2/droplets", (c) => {
-  return c.json({ droplets: [...droplets.values()] });
+  const actx = (c.get("authToken") as AuthToken).actx;
+  return c.json({ droplets: [...getDroplets(actx).values()] });
 });
 
 // GET /v2/droplets/:id
 app.get("/v2/droplets/:id", (c) => {
+  const actx = (c.get("authToken") as AuthToken).actx;
   const id = Number(c.req.param("id"));
-  const droplet = droplets.get(id);
+  const droplet = getDroplets(actx).get(id);
   if (!droplet) return c.json({ id: "not_found", message: "Droplet not found" }, 404);
   return c.json({ droplet });
 });
 
 // DELETE /v2/droplets/:id
 app.delete("/v2/droplets/:id", async (c) => {
+  const actx = (c.get("authToken") as AuthToken).actx;
   const id = Number(c.req.param("id"));
-  if (!droplets.has(id)) return c.json({ id: "not_found", message: "Droplet not found" }, 404);
-  droplets.delete(id);
+  const dm = getDroplets(actx);
+  if (!dm.has(id)) return c.json({ id: "not_found", message: "Droplet not found" }, 404);
+  dm.delete(id);
   await new Deno.Command("docker", { args: ["kill", `droplet-${id}`] }).output().catch(() => {});
   await new Deno.Command("docker", { args: ["rm", "-f", `droplet-${id}`] }).output().catch(() => {});
   return new Response(null, { status: 204 });
@@ -405,7 +418,7 @@ app.delete("/v2/droplets/:id", async (c) => {
 // ---------------------------------------------------------------------------
 
 async function killAllDroplets(): Promise<void> {
-  const ids = [...droplets.keys()];
+  const ids = [...dropletsByActx.values()].flatMap((m) => [...m.keys()]);
   if (ids.length === 0) return;
   log("info", "shutdown: killing droplets", { ids });
   await Promise.all(
