@@ -475,7 +475,7 @@ async function createDroplet(vm: VM, requesterDid: string): Promise<unknown> {
     name,
     region: "sfo3", // TODO pick based on vm.location
     size: "s-1vcpu-512mb-10gb",
-    image: "ubuntu-24-04-x64",
+    image: "ubuntu",
     user_data: vm.user_data,
     with_droplet_agent: true,
     tags: [`oidc-sub:plc:${requesterPlc}`, `oidc-sub:role:${vm.role}`],
