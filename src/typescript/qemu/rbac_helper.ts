@@ -54,6 +54,25 @@ interface RBACRecord {
 // DID resolution
 // ---------------------------------------------------------------------------
 
+interface DIDDocument {
+  service?: { id: string; type: string; serviceEndpoint: string }[];
+  verificationMethod?: { id: string; type: string; publicKeyJwk?: jose.JWK; publicKeyMultibase?: string }[];
+}
+
+async function resolveDIDDoc(did: string): Promise<DIDDocument> {
+  let res: Response;
+  if (did.startsWith("did:plc:")) {
+    res = await fetch(`https://plc.directory/${did}`);
+  } else if (did.startsWith("did:web:")) {
+    const host = did.slice("did:web:".length).replace(/:/g, "/");
+    res = await fetch(`https://${host}/.well-known/did.json`);
+  } else {
+    throw new Error(`unsupported DID method: ${did}`);
+  }
+  if (!res.ok) throw new Error(`DID resolution failed for ${did}: ${res.status}`);
+  return await res.json() as DIDDocument;
+}
+
 async function resolvePDS(did: string): Promise<string> {
   let didDoc: { service?: { id: string; type: string; serviceEndpoint: string }[] };
 
