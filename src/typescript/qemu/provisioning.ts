@@ -64,18 +64,14 @@ export class ProvisioningData {
     }
 
     const runcmd = (userDataObj["runcmd"] as unknown[]) ?? [];
+    const writeFiles = (userDataObj["write_files"] as unknown[]) ?? [];
 
-    const provisionScript = [
-      // Variable setup (interpolated)
-      [
-        `TEAM_UUID="${teamUuid}"`,
-        `THIS_ENDPOINT="${THIS_ENDPOINT}"`,
-        `PROVISIONING_TOKEN="${token.asString}"`,
-      ].join("\n"),
-      // Challenge/prove script
-      `set -eu
+    const provisionScriptContent = `#!/bin/sh
+set -eu
 set -x
-while ! grep -q "0016" /proc/net/tcp; do sleep 1; done && echo "Port 22 is active"
+TEAM_UUID="${teamUuid}"
+THIS_ENDPOINT="${THIS_ENDPOINT}"
+PROVISIONING_TOKEN="${token.asString}"
 PORT=22
 SIG_JSON="$(echo -n "\${PROVISIONING_TOKEN}" \\
     | ssh-keygen -Y sign -n prove-sshd -f /etc/ssh/ssh_host_ed25519_key \\
@@ -90,10 +86,39 @@ if [ -n "\${TOKEN}" ] && [ "\${TOKEN}" != "null" ]; then
     echo "\${TOKEN}" > /root/secrets/digitalocean.com/serviceaccount/token
     echo "\${TEAM_UUID}" > /root/secrets/digitalocean.com/serviceaccount/team_uuid
     echo "\${THIS_ENDPOINT}" > /root/secrets/digitalocean.com/serviceaccount/base_url
-fi`,
-    ].join("\n");
+fi
+`;
 
-    runcmd.push(provisionScript);
+    const provisionUnitContent = `[Unit]
+Description=Provisioning Token Exchange
+After=ssh.service network-online.target
+Wants=network-online.target
+ConditionPathExists=!/root/secrets/digitalocean.com/serviceaccount/base_url
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/provisioning-token.sh
+
+[Install]
+WantedBy=multi-user.target
+`;
+
+    writeFiles.push({
+      path: "/usr/local/bin/provisioning-token.sh",
+      permissions: "0700",
+      content: provisionScriptContent,
+    });
+    writeFiles.push({
+      path: "/etc/systemd/system/provisioning-token.service",
+      permissions: "0644",
+      content: provisionUnitContent,
+    });
+
+    runcmd.push("systemctl daemon-reload");
+    runcmd.push("systemctl enable --now provisioning-token.service");
+
+    userDataObj["write_files"] = writeFiles;
     userDataObj["runcmd"] = runcmd;
 
     const finalUserData = "#cloud-config\n" + jsYaml.dump(userDataObj, { lineWidth: -1 });
