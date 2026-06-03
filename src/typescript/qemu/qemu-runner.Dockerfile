@@ -8,6 +8,6 @@ RUN dnf install -y \
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
 
 WORKDIR /app
-COPY main.ts .
+COPY qemu-runner.ts .
 
-ENTRYPOINT ["deno", "run", "-A", "main.ts", "run"]
+ENTRYPOINT ["deno", "run", "-A", "qemu-runner.ts", "run"]

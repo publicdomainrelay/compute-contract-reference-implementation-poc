@@ -262,6 +262,13 @@ async function runCommand() {
     Deno.exit(1);
   }
 
+  // Create per-invocation sparse 20GB overlay disk in a tempdir
+  const overlayDir = await Deno.makeTempDir({ prefix: "qemu-overlay-" });
+  const overlayImg = `${overlayDir}/overlay.img`;
+  console.log("==> Creating 20GB sparse overlay disk...");
+  await run("truncate", ["-s", "20G", overlayImg]);
+  await run("mkfs.ext4", ["-L", "OVERLAY", overlayImg]);
+
   // 1. Prepare cloud-init payloads
   let userData = await readUserData();
   if (!userData.trim()) {
@@ -333,8 +340,10 @@ chpasswd:
     kernelPath,
     "-drive",
     `file=${LIVEOS_IMG},format=raw,if=virtio,readonly=on`,
+    "-drive",
+    `file=${overlayImg},format=raw,if=virtio`,
     "-append",
-    "console=ttyS0 root=live:LABEL=LIVEOS rd.live.image rd.overlayfs=1 rd.live.overlay.overlayfs=1 init=/usr/lib/systemd/systemd",
+    "console=ttyS0 root=live:LABEL=LIVEOS rd.live.image rd.overlayfs=1 rd.live.overlay.overlayfs=1 rd.live.overlay=/dev/vdb init=/usr/lib/systemd/systemd",
   ];
 
   console.log("==> Starting QEMU...");
@@ -343,6 +352,7 @@ chpasswd:
   } finally {
     console.log("==> QEMU exited. Shutting down cloud-init server...");
     ac.abort();
+    await Deno.remove(overlayDir, { recursive: true });
   }
 }
 
