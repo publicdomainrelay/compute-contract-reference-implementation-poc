@@ -207,7 +207,15 @@ async function makeDoctx(): Promise<DOContext> {
   const json = await res.json();
   console.error("[do] /v2/account:", JSON.stringify(json));
   if (res.status >= 400) throw new Error(`DO /v2/account ${res.status}: ${JSON.stringify(json)}`);
-  return { rbacRepoRoot: RBAC_REPO_ROOT, teamUuid: json.account.team.uuid };
+
+  let uuid = json.account.team.uuid;
+  // Handle custom/homelab did:plc as actx / team uuid
+  if (uuid.startsWith("did:plc:")) {
+    uuid = uuid.substring(8);
+  }
+  const result = { rbacRepoRoot: RBAC_REPO_ROOT, teamUuid: uuid };
+  console.error("[do] /v2/account fixedup:", JSON.stringify(result));
+  return result;
 }
 
 async function runProc(cmd: string[], cwd: string): Promise<{ code: number; stdout: Uint8Array; stderr: Uint8Array }> {
@@ -386,7 +394,8 @@ echo "password=\${TOKEN}"
 // Creates a separate com.fedproxy.rbac record for scope=account.auth.
 // Protects /v2/account and /v2/droplets* using ATProto service auth tokens
 // (com.atproto.server.getServiceAuth — iss=agentDid, validated via DID doc keys).
-async function configureAccountAuthRbac(doctx: DOContext): Promise<void> {
+async function configureAccountAuthRbac(): Promise<void> {
+  // TODO Check if this exists and if not then post
   const roleName = `account-auth-${agentDid.split(":").slice(-1)[0]}`;
 
   const rbacRecord = {
@@ -474,7 +483,6 @@ async function createDroplet(vm: VM, requesterDid: string): Promise<unknown> {
   console.error("[do] droplet request:", JSON.stringify(body));
   const doctx = await makeDoctx();
   await configureDropletRbac(doctx, vm, requesterDid);
-  await configureAccountAuthRbac(doctx);
   const token = await getServiceAuthToken();
   const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/droplets`, {
     method: "POST",
@@ -739,6 +747,7 @@ const main = async () => {
   void VM_NSID; // referenced for parity / future use
   await loadReadme();
   await loginAgent();
+  await configureAccountAuthRbac();
   const port = Number(Deno.env.get("PORT") ?? 4021);
   Deno.serve({ port, hostname: "0.0.0.0", onListen: ({ port, hostname }) => {
     console.error(`[server] listening on http://${hostname}:${port}`);

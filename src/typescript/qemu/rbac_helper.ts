@@ -130,12 +130,28 @@ async function resolvePDS(did: string): Promise<string> {
 // This handles caching, did:plc resolution (via plc.directory), and did:web resolution.
 const idResolver = new IdResolver();
 
+// Derive did:web: from the service base URL for use as getServiceAuth aud.
+function urlToDid(url: string): string {
+  const host = new URL(url).host;
+  return `did:web:${host}`;
+}
+
+// Get a short-lived ATProto service auth token targeting the DO/QEMU endpoint.
+// These are non-OIDC JWTs: signed by the PDS, iss=agentDid, validated via DID doc.
+async function getServiceAuthToken(): Promise<string> {
+  // cannot request a method-less token with an expiration more than a minute in the futur
+  const exp = Math.floor(Date.now() / 1000) + 60; // 1 min
+  const res = await agent.com.atproto.server.getServiceAuth({ aud, exp });
+  return res.data.token;
+}
+
 // ---------------------------------------------------------------------------
 // ATProto service auth JWT validation (non-OIDC)
 // Validates com.atproto.server.getServiceAuth tokens against DID doc keys.
 // ---------------------------------------------------------------------------
 export async function validateATProtoServiceAuth(
-  token: string
+  token: string,
+  service: string,
 ): Promise<{ iss: string; sub: string; payload: jose.JWTPayload }> {
   // 1. Parse token quickly to read the issuer (iss)
   const parts = token.split(".");
@@ -151,13 +167,16 @@ export async function validateATProtoServiceAuth(
     throw new UnauthorizedException("ATProto service auth token must have DID iss");
   }
 
+  const aud = urlToDid(service);
+  log("info", "", { aud: aud, service: service, payloadJson: payloadJson });
+
   try {
     // 2. Resolve the DID Document & verify the signature using @atproto/identity.
     // verifyJwt handles:
     //   - Resolving the DID Document (using plc.directory or did:web lookup)
     //   - Safely parsing publicKeyMultibase (secp256k1/k256, ed25519) and publicKeyJwk formats
     //   - Cryptographically verifying the token signature
-    const payload = await verifyJwt(token, iss, async (did) => {
+    const payload = await verifyJwt(token, aud, null,  async (did) => {
       const didDoc = await idResolver.did.resolveAtprotoKey(did);
       return didDoc; // Returns the verification key string directly
     });
@@ -181,6 +200,7 @@ async function getRBACRecord(pdsURL: string, did: string, service: string, scope
   let cursor = "";
   let total = 0;
 
+  let anyProtects = false;
   for (;;) {
     const url = new URL(`${pdsURL}/xrpc/com.atproto.repo.listRecords`);
     url.searchParams.set("repo", did);
@@ -193,7 +213,6 @@ async function getRBACRecord(pdsURL: string, did: string, service: string, scope
 
     const out = await res.json() as { records: { uri: string; value: RBACRecord }[]; cursor?: string };
 
-    let anyProtects = false;
     for (const rec of out.records ?? []) {
       const rbac = rec.value;
       let protectsThis = false;
@@ -387,7 +406,7 @@ export async function raiseIfUnauthorizedServiceAuth(
   path: string,
   method: string,
 ): Promise<AuthToken> {
-  const { iss, sub, payload } = await validateATProtoServiceAuth(token);
+  const { iss, sub, payload } = await validateATProtoServiceAuth(token, service);
   const pdsURL = await resolvePDS(iss);
   const rbac = await getRBACRecord(pdsURL, iss, service, scope);
   checkRBACPolicy(rbac, sub, path, method);
