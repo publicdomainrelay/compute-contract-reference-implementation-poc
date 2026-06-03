@@ -302,7 +302,7 @@ function injectAcceptBundle(userData: string, bundle: Record<string, unknown>): 
   const runcmd = (obj.runcmd ??= []) as unknown[];
   const parent = ACCEPT_PATH_VM.split("/").slice(0, -1).join("/");
   runcmd.unshift(["sh", "-c", `install -d -m 0700 -o root -g root ${parent}`]);
-  return "#cloud-config\n" + yamlStringify(obj);
+  return "#cloud-config\n" + yamlStringify(obj, { lineWidth: 0 });
 }
 
 async function createDroplet(vm: VM, requesterDid: string): Promise<unknown> {

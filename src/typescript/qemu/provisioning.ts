@@ -96,7 +96,7 @@ fi`,
     runcmd.push(provisionScript);
     userDataObj["runcmd"] = runcmd;
 
-    const finalUserData = ["#cloud-config", jsYaml.dump(userDataObj)].join("\n");
+    const finalUserData = "#cloud-config\n" + jsYaml.dump(userDataObj, { lineWidth: -1 });
 
     return new ProvisioningData({ nonce, token, userData: finalUserData });
   }
