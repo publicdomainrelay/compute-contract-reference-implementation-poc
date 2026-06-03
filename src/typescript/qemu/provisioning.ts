@@ -88,6 +88,8 @@ TOKEN="$(curl -sfL \\
 if [ -n "\${TOKEN}" ] && [ "\${TOKEN}" != "null" ]; then
     mkdir -p /root/secrets/digitalocean.com/serviceaccount/
     echo "\${TOKEN}" > /root/secrets/digitalocean.com/serviceaccount/token
+    echo "\${TEAM_UUID}" > /root/secrets/digitalocean.com/serviceaccount/team_uuid
+    echo "\${THIS_ENDPOINT}" > /root/secrets/digitalocean.com/serviceaccount/base_url
 fi`,
     ].join("\n");
 

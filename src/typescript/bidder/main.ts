@@ -462,7 +462,7 @@ app.get("/receipt/*", async (c) => {
 
   vm.user_data = injectAcceptBundle(vm.user_data, bundle);
 
-  const { repo: requesterDid } = parseAtUri(rfp._uri);
+  const { repo: requesterDid } = parseAtUri(accept._uri);
   // TODO retry droplet creation on failure
   await createDroplet(vm, requesterDid);
 
