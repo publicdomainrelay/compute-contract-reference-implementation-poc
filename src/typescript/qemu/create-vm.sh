@@ -1,1 +1,31 @@
-TOKEN=$(goat xrpc get @pds com.atproto.server.getServiceAuth aud==did:web:homelab--johnandersen777-bsky-social.fedproxy.com | jq -r .token) && curl -X POST   -H "Content-Type: application/json"   -H "Authorization: Bearer $TOKEN"   -d '{"name":"test-0001","region":"nyc3","size":"s-1vcpu-1gb","image":"ubuntu","ssh_keys":[289794,"3b:16:e4:bf:8b:00:8b:b8:59:8c:a9:d3:f0:19:fa:45"],"backups":true,"ipv6":true,"monitoring":true,"tags":["oidc-sub:role:my-cool-role"],"user_data":"#cloud-config\nruncmd:\n  - set -x && systemctl enable sshd.service && systemctl start --no-block sshd.service\n","vpc_uuid":"760e09ef-dc84-11e8-981e-3cfdfeaae000"}'   "https://homelab--johnandersen777-bsky-social.fedproxy.com/v2/droplets" | yq -P
+set -euo pipefail
+
+TOKEN=$(goat xrpc get @pds com.atproto.server.getServiceAuth aud==did:web:mini-cloud-0001--johnandersen777-bsky-social.fedproxy.com | jq -r .token)
+
+set -x
+user_data=$(cat)
+if [ "x${user_data}" = "x" ]; then
+  user_data="#cloud-config\nruncmd:\n  - set -x && systemctl enable sshd.service && systemctl start --no-block sshd.service\n"
+fi
+set +x
+
+jq -n \
+  --arg name "test-0001" \
+  --arg region "nyc3" \
+  --arg size "s-1vcpu-1gb" \
+  --arg image "ubuntu" \
+  --arg user_data "${user_data}" \
+  --argjson tags '["oidc-sub:plc:5svqtrhheairglgiiyvutzik", "oidc-sub:role:policy-engine-680d9545985c1368"]' \
+  '{
+    name: $name,
+    region: $region,
+    size: $size,
+    image: $image,
+    tags: $tags,
+    user_data: $user_data,
+  }' | tee /dev/stderr | curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d @- \
+  "https://mini-cloud-0001--johnandersen777-bsky-social.fedproxy.com/v2/droplets" \
+  | yq -P

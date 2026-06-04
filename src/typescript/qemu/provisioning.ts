@@ -70,8 +70,8 @@ export class ProvisioningData {
     const runcmd = (userDataObj["runcmd"] as unknown[]) ?? [];
     const writeFiles = (userDataObj["write_files"] as unknown[]) ?? [];
 
-    const provisionScriptContent = `#!/bin/sh
-set -eu
+    const provisionScriptContent = `#!/usr/bin/env bash
+set -euo pipefail
 set -x
 TEAM_UUID="${teamUuid}"
 THIS_ENDPOINT="${THIS_ENDPOINT}"

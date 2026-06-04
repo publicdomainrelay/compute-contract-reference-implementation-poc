@@ -168,7 +168,7 @@ export async function validateATProtoServiceAuth(
   }
 
   const aud = urlToDid(service);
-  log("info", "", { aud: aud, service: service, payloadJson: payloadJson });
+  log("info", "aud", { aud: aud, service: service, payloadJson: payloadJson });
 
   try {
     // 2. Resolve the DID Document & verify the signature using @atproto/identity.
@@ -370,17 +370,25 @@ export async function raiseIfUnauthorized(
   let rbac: RBACRecord | null = null;
   let getIssuers: ((api: string, actx: string) => Promise<string[]>) | undefined;
 
+  let { actx, api } = parseAudience(rawAud);
+  if (actx.includes(".")) {
+    // did:web:
+    actx = "did:web:" + actx
+  } else {
+    // did:plc:
+    actx = "did:plc:" + actx
+  }
+
   try {
-    const { actx, api } = parseAudience(rawAud);
-    if (actx.startsWith("did:")) {
-      const pdsURL = await resolvePDS(actx);
-      rbac = await getRBACRecord(pdsURL, actx, service, scope);
-      const issuers = collectIssuers(rbac);
-      getIssuers = async (_api: string, _actx: string) => issuers;
-      void api;
-    }
-  } catch {
+    const pdsURL = await resolvePDS(actx);
+    rbac = await getRBACRecord(pdsURL, actx, service, scope);
+    const issuers = collectIssuers(rbac);
+    getIssuers = async (_api: string, _actx: string) => issuers;
+    void api;
+  } catch (err) {
     // actx is not a DID or RBAC not found — fall through to own-issuer-only validation
+    log("error", "failed to lookup rbac record", { actx: actx, err: String(err) });
+    return {};
   }
 
   const oidcToken = await OIDCToken.validate(token, getIssuers);
@@ -410,5 +418,12 @@ export async function raiseIfUnauthorizedServiceAuth(
   const pdsURL = await resolvePDS(iss);
   const rbac = await getRBACRecord(pdsURL, iss, service, scope);
   checkRBACPolicy(rbac, sub, path, method);
-  return { sub, actx: iss, asString: token, claims: payload as Record<string, unknown> };
+  let actx = iss;
+  if (actx.includes(":")) {
+    const actxSplit = actx.split(":")
+    actx = actxSplit[actxSplit.length - 1];
+  }
+  const result = { sub, actx: actx, asString: token, claims: payload as Record<string, unknown> };
+  log("info", "raiseIfUnauthorizedServiceAuth.result", result);
+  return result;
 }

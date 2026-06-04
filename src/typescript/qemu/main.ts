@@ -341,7 +341,8 @@ app.post("/v1/oidc/prove", async (c) => {
       `actx:${oidcToken.actx}`,
       ...dropletTags
         .filter((t) => t.startsWith("oidc-sub:") && t.split(":").length === 3 && t.split(":")[1] !== "actx")
-        .map((t) => t.split(":", 2)[1]),
+        .filter((t) => !t.startsWith("oidc-sub:") || !t.split(":").length !== 3)
+        .map((t) => t.split(":")[1] + ":" + t.split(":")[2]),
     ].join(":");
     log("debug", "/v1/oidc/prove computed subject", { subject });
 
