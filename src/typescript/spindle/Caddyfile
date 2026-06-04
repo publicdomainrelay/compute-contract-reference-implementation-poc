@@ -1,0 +1,12 @@
+# *.gha.spindle.tangled.fedcicd.com → spindle main.ts via Unix socket
+# Each leftmost subdomain encodes the owner DID: did-plc-aaa.gha.spindle.tangled.fedcicd.com
+# main.ts derives SPINDLE_OWNER_DID from the Host header when env var is unset.
+# Wildcard cert via Cloudflare DNS-01 challenge — requires xcaddy + caddy-dns/cloudflare.
+# Set CF_API_TOKEN in environment before starting Caddy.
+
+https://*.gha.spindle.tangled.fedcicd.com {
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+	reverse_proxy unix//opt/spindle/spindle.sock
+}
