@@ -1,5 +1,4 @@
 // Tangled Spindle — GitHub Actions / policy-engine backend
-// Deno + Hono single-file implementation.
 //
 // Wire format mirrors tack (go.mitchellh.com/tack) so the Tangled appview
 // treats this as a drop-in spindle.
