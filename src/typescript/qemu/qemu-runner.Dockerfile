@@ -4,6 +4,7 @@ FROM fedora:latest
 RUN dnf install -y \
     qemu-system-x86-core \
     e2fsprogs \
+    ssh-keyscan \
     openssh-clients \
     unzip \
  && dnf clean all
