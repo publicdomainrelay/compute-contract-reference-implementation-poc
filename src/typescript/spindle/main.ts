@@ -161,6 +161,9 @@ interface Run {
 // runKey(knot, pipelineRkey, workflow) → Run
 const runs = new Map<string, Run>();
 
+// Pre-PE log lines collected during marketRFP provisioning (runKey → lines)
+const preRunLogs = new Map<string, string[]>();
+
 // WebSocket subscribers for /events
 const subscribers = new Set<WebSocket>();
 
@@ -873,7 +876,9 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
       try {
         if (COMPUTE_PROVIDER === "market.rfp") {
           const rfpConfig = marketRFPConfigFromEnv();
-          const result = await marketRFPSubmitWorkflow(wfObj, trigger, rfpConfig, HOSTNAME);
+          const preLogs: string[] = [];
+          preRunLogs.set(key, preLogs);
+          const result = await marketRFPSubmitWorkflow(wfObj, trigger, rfpConfig, HOSTNAME, (line) => preLogs.push(line));
           taskId = result.taskId;
           peUrl = result.peUrl;
         } else {
@@ -1087,6 +1092,14 @@ app.get("/logs/:knot/:pipelineRkey/:workflow", (c) => {
     });
 
     let linesStreamed = 0;
+
+    // Emit any pre-PE log lines collected during marketRFP provisioning.
+    const preLogs = preRunLogs.get(key);
+    if (preLogs && preLogs.length > 0) {
+      openStep("Provisioning", 1 /* StepKindUser */);
+      for (const line of preLogs) { sendData(line); linesStreamed++; }
+      closeStep();
+    }
 
     try {
       // Connect to PE SSE stream — delivers lines as emitted, closes on `event: done`.

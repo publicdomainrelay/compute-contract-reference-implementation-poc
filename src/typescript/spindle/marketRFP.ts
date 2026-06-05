@@ -119,10 +119,15 @@ function randomHex(bytes = 8): string {
   return Array.from(arr, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function log(msg: string, fields: Record<string, unknown> = {}): void {
-  const entry = JSON.stringify({ ts: new Date().toISOString(), level: "info", component: "market-rfp", msg, ...fields });
-  const enc = new TextEncoder();
-  Deno.stderr.writeSync(enc.encode(entry + "\n"));
+type RFPLogger = (msg: string, fields?: Record<string, unknown>) => void;
+
+function makeLogger(onLog?: (line: string) => void): RFPLogger {
+  return (msg: string, fields: Record<string, unknown> = {}): void => {
+    const entry = JSON.stringify({ ts: new Date().toISOString(), level: "info", component: "market-rfp", msg, ...fields });
+    const enc = new TextEncoder();
+    Deno.stderr.writeSync(enc.encode(entry + "\n"));
+    onLog?.(entry);
+  };
 }
 
 async function resolvePDS(did: string): Promise<string> {
@@ -256,6 +261,7 @@ async function collectBidsForRfp(
   rfpUri: string,
   jetstreamUrl: string,
   windowMs: number,
+  log: RFPLogger,
 ): Promise<CollectedBid[]> {
   const bids: CollectedBid[] = [];
   const seen = new Set<string>();
@@ -334,7 +340,7 @@ async function resolveAtRef(uri: string): Promise<Record<string, unknown> | unde
   return data.value as Record<string, unknown>;
 }
 
-async function resolveBidPayloads(bids: CollectedBid[]): Promise<void> {
+async function resolveBidPayloads(bids: CollectedBid[], log: RFPLogger): Promise<void> {
   await Promise.all(bids.map(async (bid) => {
     if (bid.record.payload?.uri) {
       try {
@@ -376,6 +382,7 @@ function watchForSshKey(
   serviceName: string,
   jetstreamUrl: string,
   timeoutMs: number,
+  log: RFPLogger,
 ): Promise<{ did: string; key: string; handle: string }> {
   log("watching for sshPublicKey", { serviceName, timeoutMs });
 
@@ -431,7 +438,7 @@ function watchForSshKey(
 // Poll policy engine until ready
 // ---------------------------------------------------------------------------
 
-async function waitForPolicyEngine(peUrl: string, timeoutMs: number): Promise<void> {
+async function waitForPolicyEngine(peUrl: string, timeoutMs: number, log: RFPLogger): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   log("waiting for policy engine", { peUrl, timeoutMs });
 
@@ -468,7 +475,9 @@ export async function marketRFPSubmitWorkflow(
   },
   config: MarketRFPConfig,
   spindleHostname: string,
+  onLog?: (line: string) => void,
 ): Promise<MarketRFPResult> {
+  const log = makeLogger(onLog);
   // Step 1: Generate service name before user_data so it knows its name
   const serviceName = `${config.vm.role}-${randomHex(8)}`;
   log("service name generated", { serviceName });
@@ -517,13 +526,13 @@ export async function marketRFPSubmitWorkflow(
 
   // Step 6: Listen for bids during the bid window
   const rfpUri = rfpRef.uri;
-  const bids = await collectBidsForRfp(rfpUri, config.jetstreamUrl, config.bidWindowMs);
+  const bids = await collectBidsForRfp(rfpUri, config.jetstreamUrl, config.bidWindowMs, log);
 
   if (bids.length === 0) {
     throw new Error(`No bids received for RFP ${rfpUri} within ${config.bidWindowMs}ms`);
   }
 
-  await resolveBidPayloads(bids);
+  await resolveBidPayloads(bids, log);
 
   const winner = scoreLowestCost(bids);
   if (!winner) throw new Error("No scoreable bid found");
@@ -643,6 +652,7 @@ export async function marketRFPSubmitWorkflow(
     serviceName,
     config.jetstreamUrl,
     config.vmReadyTimeoutMs,
+    log,
   );
   log("VM registered SSH key", { serviceName, did: sshKeyEvent.did });
 
@@ -651,7 +661,7 @@ export async function marketRFPSubmitWorkflow(
   log("policy engine URL", { peUrl });
 
   // Step 12: Poll until policy engine is ready
-  await waitForPolicyEngine(peUrl, config.peReadyTimeoutMs);
+  await waitForPolicyEngine(peUrl, config.peReadyTimeoutMs, log);
 
   // Step 13: Submit workflow to the remote policy engine
   const req = {
