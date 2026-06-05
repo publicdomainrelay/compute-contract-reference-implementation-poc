@@ -1,4 +1,5 @@
 // Tangled Spindle — GitHub Actions / policy-engine backend
+// Deno + Hono single-file implementation.
 //
 // Wire format mirrors tack (go.mitchellh.com/tack) so the Tangled appview
 // treats this as a drop-in spindle.
@@ -13,8 +14,6 @@
 //   KNOT_SCHEME           – http or https for bare knot hostnames (default: https)
 //   SPINDLE_DB_PATH       – path to JSON state file (default: ./spindle-db.json)
 //   SPINDLE_LOGS_DB_PATH  – path to JSON log store (default: ./spindle-logs-db.json)
-//   SPINDLE_UNIX_SOCKET   – if set, listen on this Unix socket path instead of PORT
-//                           (e.g. /opt/spindle/spindle.sock — used behind Caddy)
 //   COMPUTE_PROVIDER      – set to "market.rfp" to provision VMs via ATProto marketplace
 //                           (also requires ATPROTO_HANDLE, ATPROTO_PASSWORD, and optional
 //                            ATP_RELAY_URL, FEDPROXY_HOST, VM_* — see marketRFP.ts)
@@ -51,39 +50,13 @@ const OWNER_DID = Deno.env.get("SPINDLE_OWNER_DID") ?? "";
 const HOSTNAME = Deno.env.get("SPINDLE_HOSTNAME") ?? "localhost";
 const POLICY_ENGINE_URL = Deno.env.get("POLICY_ENGINE_URL") ?? "http://localhost:8080";
 const PORT = parseInt(Deno.env.get("PORT") ?? "8090", 10);
-const UNIX_SOCKET = Deno.env.get("SPINDLE_UNIX_SOCKET") ?? "";
 // COMPUTE_PROVIDER=market.rfp provisions VMs via ATProto marketplace instead of local PE
 const COMPUTE_PROVIDER = Deno.env.get("COMPUTE_PROVIDER") ?? "";
 
-// Derive owner DID from the leftmost subdomain when SPINDLE_OWNER_DID is not set.
-// did-plc-aaa.gha.spindle.example.com → did:plc:aaa
-function subdomainToDID(host: string): string {
-  const leftmost = host.split(".")[0] ?? "";
-  return leftmost.replace(/-/g, ":");
-}
-
-function getOwnerDid(host: string): string {
-  if (OWNER_DID) return OWNER_DID;
-  return subdomainToDID(host);
-}
-
-// did:plc:aaa → did-plc-aaa
-function didToSubdomain(did: string): string {
-  return did.replace(/:/g, "-");
-}
-
-// When SPINDLE_OWNER_DID is set: effective hostname is HOSTNAME.
-// When dynamic subdomain mode: each owner gets <did-slug>.HOSTNAME.
-function effectiveHostname(ownerDid: string): string {
-  if (OWNER_DID) return HOSTNAME;
-  return didToSubdomain(ownerDid) + "." + HOSTNAME;
-}
-
-// Returns true if a repo's spindle field points at this spindle instance.
-function matchesThisSpindle(spindle: string | undefined, repoDid: string): boolean {
-  if (!spindle) return false;
-  if (OWNER_DID) return spindle === HOSTNAME;
-  return spindle === effectiveHostname(repoDid);
+if (!OWNER_DID) {
+  log("error", "SPINDLE_OWNER_DID is required");
+  // deno exits below; stderr flush is synchronous
+  Deno.exit(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +198,7 @@ const DEFAULT_KNOT  = Deno.env.get("DEFAULT_KNOT")  ?? "knot1.tangled.sh";
 const DB_PATH       = Deno.env.get("SPINDLE_DB_PATH") ?? "./spindle-db.json";
 const LOGS_DB_PATH  = Deno.env.get("SPINDLE_LOGS_DB_PATH") ?? "./spindle-logs-db.json";
 
-// repoDids whose sh.tangled.repo record matches this spindle (via matchesThisSpindle).
+// repoDids whose sh.tangled.repo record has spindle === HOSTNAME.
 // Triggers arriving for any other repoDid are silently ignored.
 const authorizedRepoDids = new Set<string>();
 
@@ -493,12 +466,10 @@ function watchKnot(knot: string): void {
 // AT Proto repo discovery — listRecords sh.tangled.repo for OWNER_DID
 // ---------------------------------------------------------------------------
 
-async function discoverKnotsFromATProto(ownerDid?: string): Promise<void> {
-  const did = ownerDid ?? OWNER_DID;
-  if (!did) return;
-  const pds = await resolvePDS(did);
+async function discoverKnotsFromATProto(): Promise<void> {
+  const pds = await resolvePDS(OWNER_DID);
   if (!pds) {
-    log("warn", "knot-discovery: could not resolve PDS", { did });
+    log("warn", "knot-discovery: could not resolve PDS", { did: OWNER_DID });
     return;
   }
 
@@ -507,7 +478,7 @@ async function discoverKnotsFromATProto(ownerDid?: string): Promise<void> {
   let foundRepos = 0;
   for (;;) {
     const url = new URL(`${pds}/xrpc/com.atproto.repo.listRecords`);
-    url.searchParams.set("repo", did);
+    url.searchParams.set("repo", OWNER_DID);
     url.searchParams.set("collection", "sh.tangled.repo");
     url.searchParams.set("limit", "100");
     if (cursor) url.searchParams.set("cursor", cursor);
@@ -527,12 +498,12 @@ async function discoverKnotsFromATProto(ownerDid?: string): Promise<void> {
       const spindle = rec.value.spindle as string | undefined;
       const repoDid = rec.value.repoDid as string | undefined;
       const repoName = rec.value.name   as string | undefined;
-      log("debug", "knot-discovery: record", { knot, spindle, repoDid, repoName, matchesHostname: matchesThisSpindle(spindle, repoDid ?? "") });
-      if (knot && matchesThisSpindle(spindle, repoDid ?? "")) {
+      log("debug", "knot-discovery: record", { knot, spindle, repoDid, repoName, matchesHostname: spindle === HOSTNAME });
+      if (knot && spindle === HOSTNAME) {
         watchKnot(knot);
         foundKnots++;
       }
-      if (repoDid && matchesThisSpindle(spindle, repoDid)) {
+      if (repoDid && spindle === HOSTNAME) {
         authorizedRepoDids.add(repoDid);
         log("info", "knot-discovery: authorized repo", { repoDid, repoName, knot });
         foundRepos++;
@@ -577,7 +548,7 @@ function startJetstreamWatcher(): void {
       const spindle = record.spindle as string | undefined;
       const knot    = record.knot    as string | undefined;
       const repoDid = record.repoDid as string | undefined;
-      if (matchesThisSpindle(spindle, repoDid ?? "")) {
+      if (spindle === HOSTNAME) {
         if (knot) {
           log("info", "jetstream: new repo points at this spindle", { knot, repoDid });
           watchKnot(knot);
@@ -719,7 +690,7 @@ async function submitWorkflow(
           GITHUB_SHA: trigger.ref,
           GITHUB_REF: trigger.ref,
           GITHUB_SERVER_URL: `https://${trigger.knot}`,
-          SPINDLE_HOSTNAME: effectiveHostname(trigger.repoDid),
+          SPINDLE_HOSTNAME: HOSTNAME,
           // Used by .tangled/actions/*/checkout and BUNDLED_ACTIONS_DIR overrides
           SPINDLE_KNOT: knotBaseUrl(trigger.knot),
           SPINDLE_REPO_DID: trigger.repoDid,
@@ -901,7 +872,7 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
       try {
         if (COMPUTE_PROVIDER === "market.rfp") {
           const rfpConfig = marketRFPConfigFromEnv();
-          const result = await marketRFPSubmitWorkflow(wfObj, trigger, rfpConfig, effectiveHostname(trigger.repoDid));
+          const result = await marketRFPSubmitWorkflow(wfObj, trigger, rfpConfig, HOSTNAME);
           taskId = result.taskId;
           peUrl = result.peUrl;
         } else {
@@ -981,15 +952,12 @@ Routes:
   POST /xrpc/sh.tangled.repo.removeSecret          remove secret { repo, key }
 
 Spindle hostname : ${HOSTNAME}
-Owner DID        : ${getOwnerDid(c.req.header("host") ?? HOSTNAME)}
+Owner DID        : ${OWNER_DID}
 Policy engine    : ${POLICY_ENGINE_URL}
 `));
 
 // sh.tangled.owner — required for appview spindle registration
-app.get("/xrpc/sh.tangled.owner", (c) => {
-  const host = c.req.header("host") ?? HOSTNAME;
-  return c.json({ owner: getOwnerDid(host) });
-});
+app.get("/xrpc/sh.tangled.owner", (c) => c.json({ owner: OWNER_DID }));
 
 // /events — WebSocket fan-out of sh.tangled.pipeline.status events
 // Accepts ?cursor=<nanoseconds> for backfill; replays all stored events
@@ -1010,7 +978,7 @@ app.get(
         }
         subscribers.add(raw);
         try {
-          raw.send(JSON.stringify({ type: "connected", hostname: effectiveHostname(getOwnerDid(c.req.header("host") ?? HOSTNAME)) }));
+          raw.send(JSON.stringify({ type: "connected", hostname: HOSTNAME }));
         } catch { /* ignore */ }
       },
       onClose(_evt, ws) { subscribers.delete(ws.raw as WebSocket); },
@@ -1302,8 +1270,7 @@ app.post("/xrpc/sh.tangled.repo.addSecret", async (c) => {
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) return c.json({ error: "InvalidRequest", message: "invalid key identifier" }, 400);
   const m = repoSecrets(repo);
   if (m.has(key)) return c.json({ error: "InvalidRequest", message: "key already present" }, 400);
-  const host = c.req.header("host") ?? HOSTNAME;
-  m.set(key, { key, value, repo, createdAt: new Date().toISOString(), createdBy: getOwnerDid(host) });
+  m.set(key, { key, value, repo, createdAt: new Date().toISOString(), createdBy: OWNER_DID });
   return c.body(null, 200);
 });
 
@@ -1354,8 +1321,8 @@ app.post("/trigger", async (c) => {
     ref: trigger.ref,
     workflows: submitted.map((stem) => ({
       workflow: stem,
-      logsUrl: `https://${effectiveHostname(trigger.repoDid)}/logs/${trigger.knot}/${trigger.pipelineRkey}/${stem}`,
-      statusUrl: `https://${effectiveHostname(trigger.repoDid)}/status/${trigger.knot}/${trigger.pipelineRkey}/${stem}`,
+      logsUrl: `https://${HOSTNAME}/logs/${trigger.knot}/${trigger.pipelineRkey}/${stem}`,
+      statusUrl: `https://${HOSTNAME}/status/${trigger.knot}/${trigger.pipelineRkey}/${stem}`,
     })),
   });
 });
@@ -1368,7 +1335,7 @@ app.get("/healthz", (c) => c.json({ ok: true }));
 
 log("info", "tangled-spindle-minimal starting", {
   port: PORT,
-  owner: OWNER_DID || "(derived from subdomain)",
+  owner: OWNER_DID,
   hostname: HOSTNAME,
   policyEngine: POLICY_ENGINE_URL,
   defaultKnot: DEFAULT_KNOT,
@@ -1379,11 +1346,4 @@ log("info", "tangled-spindle-minimal starting", {
 
 startKnotDiscovery().catch((err) => log("error", "knot discovery startup failed", { err: String(err) }));
 
-if (UNIX_SOCKET) {
-  // Remove stale socket file if present.
-  try { Deno.removeSync(UNIX_SOCKET); } catch { /* ignore */ }
-  log("info", "listening on unix socket", { path: UNIX_SOCKET });
-  Deno.serve({ path: UNIX_SOCKET } as Deno.ServeUnixOptions, app.fetch);
-} else {
-  Deno.serve({ port: PORT }, app.fetch);
-}
+Deno.serve({ port: PORT }, app.fetch);
