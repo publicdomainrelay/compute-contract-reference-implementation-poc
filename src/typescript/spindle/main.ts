@@ -200,12 +200,14 @@ function saveEventLog(): void {
 loadEventLog();
 log("info", "event log loaded", { path: EVENTS_DB_PATH, events: eventLog.length });
 
-// Keep-alive: fedproxy (and most proxies) idle-close a silent WebSocket after
-// ~18s. Deno's upgradeWebSocket auto-sends native WS ping control frames at
-// idleTimeout/2 — invisible to the Go consumer (gorilla handles ping frames
-// out of band), exactly like core's keepalive. Half of this (15s) stays below
-// the observed ~18s fedproxy cutoff.
-const WS_IDLE_TIMEOUT_SEC = 30;
+// Keep-alive interval. fedproxy idle-closes a WS that sends no DATA frames —
+// and crucially it does NOT count native WS ping control frames as activity
+// (verified: a ping-only connection is dropped at ~5s). So core's native-ping
+// keepalive does not survive fedproxy; we must send an application-level data
+// frame. A {"type":"ping"} frame unmarshals to a zero-value Event on the Go
+// consumer (Nsid="" → ignored), so it is harmless. 4s stays under the observed
+// ~5s fedproxy idle cutoff.
+const KEEPALIVE_MS = 4_000;
 
 // ---------------------------------------------------------------------------
 // Secrets store  (in-memory; keyed by repoDid → key → SecretEntry)
@@ -1025,14 +1027,13 @@ app.get("/xrpc/sh.tangled.owner", (c) => c.json({ owner: OWNER_DID }));
 // /events — WebSocket fan-out of sh.tangled.pipeline.status events.
 // Accepts ?cursor=<nanoseconds> for backfill; replays all stored events
 // with created > cursor before going live, matching core spindle behaviour.
-// Wire-faithful to core: emits ONLY event envelopes as data frames; keep-alive
-// is a native WS ping (via Deno's idleTimeout), invisible to the Go consumer.
+// Emits event envelopes plus a periodic {"type":"ping"} data-frame keepalive
+// (ignored by the Go consumer) required to survive fedproxy's idle timeout.
 app.get("/events", (c) => {
   const cursorStr = c.req.query("cursor");
   const cursor = cursorStr ? parseInt(cursorStr, 10) : 0;
-  const { socket, response } = Deno.upgradeWebSocket(c.req.raw, {
-    idleTimeout: WS_IDLE_TIMEOUT_SEC,
-  });
+  const { socket, response } = Deno.upgradeWebSocket(c.req.raw);
+  let keepAlive: ReturnType<typeof setInterval> | undefined;
 
   socket.onopen = () => {
     const backfill = cursor > 0
@@ -1042,9 +1043,17 @@ app.get("/events", (c) => {
       try { socket.send(JSON.stringify(envelope)); } catch { /* ignore */ }
     }
     subscribers.add(socket);
+    keepAlive = setInterval(() => {
+      if (socket.readyState !== WebSocket.OPEN) return;
+      try { socket.send(JSON.stringify({ type: "ping" })); } catch { /* ignore */ }
+    }, KEEPALIVE_MS);
   };
-  socket.onclose = () => subscribers.delete(socket);
-  socket.onerror = () => subscribers.delete(socket);
+  const cleanup = () => {
+    if (keepAlive !== undefined) clearInterval(keepAlive);
+    subscribers.delete(socket);
+  };
+  socket.onclose = cleanup;
+  socket.onerror = cleanup;
 
   return response;
 });
@@ -1061,14 +1070,25 @@ app.get("/logs/:knot/:pipelineRkey/:workflow", (c) => {
   const run = runs.get(key);
   if (!run) return c.text("run not found\n", 404);
 
-  // Native WS ping keep-alive (idleTimeout/2) so the proxy doesn't idle-close
-  // while a live pipeline is between log lines — invisible to the appview's
-  // log reader, matching core spindle's keep-alive.
-  const { socket, response } = Deno.upgradeWebSocket(c.req.raw, {
-    idleTimeout: WS_IDLE_TIMEOUT_SEC,
-  });
+  const { socket, response } = Deno.upgradeWebSocket(c.req.raw);
+
+  // Data-frame keepalive so fedproxy doesn't idle-close while a live pipeline is
+  // between log lines. A {"type":"ping"} frame has Kind="" → ignored by the
+  // appview's LogLine switch (renders an empty fragment). Native WS pings don't
+  // survive fedproxy, so a data frame is required. Cleared on completion/disconnect.
+  let logKeepAlive: ReturnType<typeof setInterval> | undefined;
+  const stopLogKeepAlive = () => {
+    if (logKeepAlive !== undefined) { clearInterval(logKeepAlive); logKeepAlive = undefined; }
+  };
+  socket.onclose = stopLogKeepAlive;
+  socket.onerror = stopLogKeepAlive;
 
   socket.onopen = async () => {
+    logKeepAlive = setInterval(() => {
+      if (socket.readyState !== WebSocket.OPEN) return;
+      try { socket.send(JSON.stringify({ type: "ping" })); } catch { /* closed */ }
+    }, KEEPALIVE_MS);
+
     // step_id counter: 0 = workflow-level system step, 1+ = per-group user steps
     let nextStepId = 0;
     let currentStepId = 0;
@@ -1255,6 +1275,7 @@ app.get("/logs/:knot/:pipelineRkey/:workflow", (c) => {
       step_status: "end",
     });
     log("info", "log stream closing", { taskId: run.taskId, linesStreamed });
+    stopLogKeepAlive();
     try { socket.close(1000, "log stream complete"); } catch { /* ignore */ }
   };
 
