@@ -205,9 +205,10 @@ log("info", "event log loaded", { path: EVENTS_DB_PATH, events: eventLog.length 
 // (verified: a ping-only connection is dropped at ~5s). So core's native-ping
 // keepalive does not survive fedproxy; we must send an application-level data
 // frame. A {"type":"ping"} frame unmarshals to a zero-value Event on the Go
-// consumer (Nsid="" → ignored), so it is harmless. 4s stays under the observed
-// ~5s fedproxy idle cutoff.
-const KEEPALIVE_MS = 4_000;
+// consumer (Nsid="" → ignored), so it is harmless. fedproxy's idle cutoff is
+// variable (observed 5–13s); 2s matches the run-broadcast cadence that demonstrably
+// held a connection 35s+, so it keeps idle connections stable (no reconnect churn).
+const KEEPALIVE_MS = 2_000;
 
 // ---------------------------------------------------------------------------
 // Secrets store  (in-memory; keyed by repoDid → key → SecretEntry)
