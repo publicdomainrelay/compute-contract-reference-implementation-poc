@@ -114,7 +114,7 @@ interface EventsEnvelope {
 interface PipelineStatusRecord {
   $type: "sh.tangled.pipeline.status";
   workflow: string;
-  status: "queued" | "running" | "success" | "failure" | "cancelled";
+  status: "pending" | "running" | "success" | "failed" | "cancelled";
   createdAt: string;
   pipeline?: string;  // AT-URI of the pipeline record: at://did:web:<knot>/sh.tangled.pipeline/<rkey>
 }
@@ -744,10 +744,10 @@ function makeTID(): string {
 
 function peStatusToTangled(s: PolicyEngineStatus["status"]): PipelineStatusRecord["status"] {
   switch (s) {
-    case "submitted":   return "queued";
+    case "submitted":   return "pending";
     case "in_progress": return "running";
     case "complete":    return "success"; // exit_status checked separately
-    default:            return "failure";
+    default:            return "failed";
   }
 }
 
@@ -761,7 +761,7 @@ function broadcastStatus(
 ): void {
   let s = peStatusToTangled(peStatus);
   if (peStatus === "complete" && exitStatus && exitStatus !== "success") {
-    s = "failure";
+    s = "failed";
   }
 
   const pipeline = knot && pipelineRkey
@@ -869,6 +869,7 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
 
       let taskId: string;
       let peUrl: string = POLICY_ENGINE_URL;
+      broadcastStatus(rkey, stem, "submitted", undefined, trigger.knot, trigger.pipelineRkey);
       try {
         if (COMPUTE_PROVIDER === "market.rfp") {
           const rfpConfig = marketRFPConfigFromEnv();
@@ -879,7 +880,14 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
           taskId = await submitWorkflow(wfObj, trigger);
         }
       } catch (err) {
-        log("error", "submit workflow failed", { workflow: stem, repoDid: trigger.repoDid, err: String(err) });
+        const msg = String(err);
+        const noBid = msg.includes("No bids received") || msg.includes("No scoreable bid");
+        log("error", "submit workflow failed", { workflow: stem, repoDid: trigger.repoDid, noBid, err: msg });
+        if (noBid) {
+          broadcastStatus(rkey, stem, "unknown", "no-bid", trigger.knot, trigger.pipelineRkey);
+        } else {
+          broadcastStatus(rkey, stem, "unknown", "error", trigger.knot, trigger.pipelineRkey);
+        }
         return;
       }
 
@@ -912,7 +920,6 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
       submitted.push(stem);
 
       log("info", "submitted", { run: run });
-      broadcastStatus(rkey, stem, "submitted", undefined, trigger.knot, trigger.pipelineRkey);
       trackRun(run).catch((err) => log("error", "trackRun failed", { workflow: stem, taskId, err: String(err) }));
     }),
   );
