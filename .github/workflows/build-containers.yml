@@ -20,6 +20,9 @@ jobs:
 
       - name: Build qemu runner container
         run: |
+          set -x
           cd src/typescript/qemu/
           # --push
+          sudo findmnt /var/lib/docker
+          sudo findmnt /var/lib/containerd
           sudo docker build --pull --progress plain -f qemu-runner.Dockerfile -t atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner .
