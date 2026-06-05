@@ -1,0 +1,17 @@
+knot1.fedfork.com {
+	reverse_proxy http://127.0.0.1:5555
+}
+
+mini-cloud-0001.fedfork.com {
+	reverse_proxy http://127.0.0.1:9000
+}
+
+https://*.gha.spindle.tangled.fedcicd.com {
+	tls {
+		dns cloudflare {
+			api_token {env.CF_API_TOKEN}
+		}
+	}
+	# reverse_proxy unix//opt/spindle/spindle.sock
+	reverse_proxy http://127.0.0.1:9090
+}
