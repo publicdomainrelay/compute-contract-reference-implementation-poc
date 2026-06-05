@@ -4,5 +4,36 @@ when:
   - event: ["pull_request"]
     branch: ["main"]
 
-# engine: "bridgeGHA"
 engine: "nixery"
+
+# using the default values
+clone:
+  skip: false
+  depth: 1
+  submodules: false
+
+dependencies:
+  # nixpkgs
+  nixpkgs:
+    - nodejs
+    - go
+  # custom registry
+  git+https://tangled.org/@example.com/my_pkg:
+    - my_pkg
+
+environment:
+  GOOS: "linux"
+  GOARCH: "arm64"
+  NODE_ENV: "production"
+  MY_ENV_VAR: "MY_ENV_VALUE"
+
+steps:
+  - name: "Build backend"
+    command: "go build"
+    environment:
+      GOOS: "darwin"
+      GOARCH: "arm64"
+  - name: "Build frontend"
+    command: "npm run build"
+    environment:
+      NODE_ENV: "production"
