@@ -2,7 +2,7 @@ when:
   - event: ["push", "manual"]
     branch: ["main"]
   - event: ["pull_request"]
-    branch: ["main", "test5"]
+    branch: ["main", "test7"]
 
 engine: "bridgeGHA"
 
