@@ -149,6 +149,20 @@ async function installUbuntu(chrootDir: string): Promise<void> {
     "DEBIAN_FRONTEND=noninteractive apt-get update && " +
     "DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
   );
+  // The live root is an overlayfs. Docker/buildkit overlayfs snapshots cannot
+  // be stacked on top of an overlayfs lowerdir (nested overlay -> mount fails
+  // with "invalid argument"). Mount /var/lib/docker and /var/lib/containerd on
+  // dedicated ext4 data disks (LABEL=DOCKERDATA on /dev/vdc, CTRDDATA on
+  // /dev/vdd, created at run time) so the storage drivers sit on a real fs.
+  // nofail: boot still succeeds if the disks are absent. RequiresMountsFor
+  // ordering guarantees the mounts land before the daemons start their stores.
+  await nspawn(
+    "mkdir -p /var/lib/docker /var/lib/containerd && " +
+    "printf 'LABEL=DOCKERDATA /var/lib/docker ext4 defaults,nofail 0 2\\nLABEL=CTRDDATA /var/lib/containerd ext4 defaults,nofail 0 2\\n' >> /etc/fstab && " +
+    "mkdir -p /etc/systemd/system/docker.service.d /etc/systemd/system/containerd.service.d && " +
+    "printf '[Unit]\\nRequiresMountsFor=/var/lib/docker /var/lib/containerd\\n' > /etc/systemd/system/docker.service.d/10-storage.conf && " +
+    "printf '[Unit]\\nRequiresMountsFor=/var/lib/containerd\\n' > /etc/systemd/system/containerd.service.d/10-storage.conf",
+  );
   // DHCP on all ethernet so systemd-resolved gets upstream DNS at boot.
   // Must run WITHOUT --bind-ro=/etc/resolv.conf so we can replace the symlink.
   await run("sudo", ["systemd-nspawn", "--timezone=off", "-D", chrootDir, "sh", "-c",
@@ -398,6 +412,18 @@ async function runCommand(distro: Distro) {
   await run("truncate", ["-s", "20G", overlayImg]);
   await run("mkfs.ext4", ["-L", "OVERLAY", overlayImg]);
 
+  // Dedicated ext4 data disks for docker + containerd storage. The live root
+  // is overlayfs and docker/buildkit cannot stack overlay-on-overlay, so these
+  // get mounted at /var/lib/docker and /var/lib/containerd (see installUbuntu
+  // fstab entries) to give the storage drivers a real filesystem.
+  const dockerImg = `${overlayDir}/docker.img`;
+  const containerdImg = `${overlayDir}/containerd.img`;
+  console.log("==> Creating docker/containerd data disks...");
+  await run("truncate", ["-s", "40G", dockerImg]);
+  await run("mkfs.ext4", ["-L", "DOCKERDATA", dockerImg]);
+  await run("truncate", ["-s", "40G", containerdImg]);
+  await run("mkfs.ext4", ["-L", "CTRDDATA", containerdImg]);
+
   // 1. Prepare cloud-init payloads
   let userData = await readUserData();
   if (!userData.trim()) {
@@ -474,6 +500,10 @@ ethernets:
     `file=${LIVEOS_IMG},format=raw,if=virtio,readonly=on`,
     "-drive",
     `file=${overlayImg},format=raw,if=virtio`,
+    "-drive",
+    `file=${dockerImg},format=raw,if=virtio`,
+    "-drive",
+    `file=${containerdImg},format=raw,if=virtio`,
     "-append",
     cfg.kernelAppend,
   ];
