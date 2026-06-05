@@ -38,6 +38,19 @@ const ACCEPT_PATH_VM = "/root/secrets/publicdomainrelay.com/market/accept.json";
 const CID_RE = /^(bafy|z)[A-Za-z0-9]+$/;
 
 // ---------------------------------------------------------------------------
+// Structured logger — JSON to stderr
+// ---------------------------------------------------------------------------
+
+type LogLevel = "info" | "warn" | "error" | "debug";
+
+const enc = new TextEncoder();
+
+function log(level: LogLevel, msg: string, fields: Record<string, unknown> = {}): void {
+  const entry = JSON.stringify({ ts: new Date().toISOString(), level, msg, ...fields });
+  Deno.stderr.writeSync(enc.encode(entry + "\n"));
+}
+
+// ---------------------------------------------------------------------------
 // types (loose — these are wire-shape, not strict pydantic validators)
 // ---------------------------------------------------------------------------
 
@@ -195,6 +208,7 @@ async function getServiceAuthToken(): Promise<string> {
   const aud = urlToDid(DIGITALOCEAN_BASE_URL);
   // cannot request a method-less token with an expiration more than a minute in the futur
   const exp = Math.floor(Date.now() / 1000) + 60; // 1 min
+  log("info", "calling getServiceAuth", { aud: aud, exp: exp });
   const res = await agent.com.atproto.server.getServiceAuth({ aud, exp });
   return res.data.token;
 }
@@ -668,7 +682,9 @@ function x402UrlTemplate(reqUrl: string): string {
 }
 
 app.post("/hook/rfp", async (c) => {
-  const payload = (await c.req.json()) as WebhookPayload;
+  const hookData = await c.req.json();
+  log("info", "hit /hook/rfp", { hookData: hookData });
+  const payload = hookData as WebhookPayload;
   const commit = payload.event?.commit;
   if (!commit) throw new HTTPError(400, "missing event.commit");
   if (commit.operation !== "create") return c.json({ skipped: "operation", operation: commit.operation });
