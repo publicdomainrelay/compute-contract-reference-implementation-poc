@@ -1,0 +1,17 @@
+services:
+  knot:
+    image: atcr.io/tangled.org/knot:latest
+    environment:
+      KNOT_SERVER_HOSTNAME: knot1.fedfork.com
+      KNOT_SERVER_OWNER: did:plc:7nebcphrbnjegrniycnbvyrk
+      KNOT_SERVER_DB_PATH: /app/knotserver.db
+      KNOT_REPO_SCAN_PATH: /home/git/repositories
+      KNOT_SERVER_INTERNAL_LISTEN_ADDR: localhost:5444
+    volumes:
+      - ./keys:/etc/ssh/keys
+      - ./repositories:/home/git/repositories
+      - ./server:/app
+    ports:
+      - "127.0.0.1:5555:5555"
+      - "22:22"
+    restart: always
