@@ -21,8 +21,16 @@ jobs:
       - name: Build qemu runner container
         run: |
           set -x
-          cd src/typescript/qemu/
-          # --push
+          set +e
+          export DEBIAN_FRONTEND=noninteractive
+          which findmnt
+          sudo apt-get update
+          sudo apt-get install -y util-linux
+          which findmnt
+
           sudo findmnt /var/lib/docker
           sudo findmnt /var/lib/containerd
+
+          cd src/typescript/qemu/
+          # --push
           sudo docker build --pull --progress plain -f qemu-runner.Dockerfile -t atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner .
