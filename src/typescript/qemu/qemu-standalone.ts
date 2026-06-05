@@ -120,6 +120,7 @@ async function installFedora(chrootDir: string): Promise<void> {
     "openssh-server",
     "vim",
     "tmux",
+    "sudo",
     "jq",
   ]);
 }
@@ -131,7 +132,7 @@ async function installUbuntu(chrootDir: string): Promise<void> {
   await nspawn(
     "ln -sf /usr/share/zoneinfo/UTC /etc/localtime && " +
     "DEBIAN_FRONTEND=noninteractive apt-get update && " +
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y systemd linux-image-generic cloud-init dracut btrfs-progs util-linux rsyslog openssh-server vim tmux ca-certificates curl jq",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y systemd linux-image-generic cloud-init dracut btrfs-progs util-linux rsyslog openssh-server vim tmux ca-certificates curl jq sudo locales",
   );
   await nspawn(
     "install -m 0755 -d /etc/apt/keyrings && " +
