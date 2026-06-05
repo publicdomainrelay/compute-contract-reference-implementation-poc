@@ -14,6 +14,8 @@
 //   KNOT_SCHEME           – http or https for bare knot hostnames (default: https)
 //   SPINDLE_DB_PATH       – path to JSON state file (default: ./spindle-db.json)
 //   SPINDLE_LOGS_DB_PATH  – path to JSON log store (default: ./spindle-logs-db.json)
+//   SPINDLE_EVENTS_DB_PATH – path to JSON event-log store for /events backfill
+//                           (default: ./spindle-events-db.json)
 //   COMPUTE_PROVIDER      – set to "market.rfp" to provision VMs via ATProto marketplace
 //                           (also requires ATPROTO_HANDLE, ATPROTO_PASSWORD, and optional
 //                            ATP_RELAY_URL, FEDPROXY_HOST, VM_* — see marketRFP.ts)
@@ -167,9 +169,42 @@ const preRunLogs = new Map<string, string[]>();
 // WebSocket subscribers for /events
 const subscribers = new Set<WebSocket>();
 
-// Persisted event log for /events cursor backfill (capped ring)
+// Persisted event log for /events cursor backfill (capped ring).
+// Backed by a JSON file so backfill survives process restarts — matches core's
+// DB-backed eventstream.Store. Without this, status events emitted while no
+// subscriber is connected are lost on restart and never reach the appview.
 const eventLog: EventsEnvelope[] = [];
 const MAX_EVENT_LOG = 1000;
+const EVENTS_DB_PATH = Deno.env.get("SPINDLE_EVENTS_DB_PATH") ?? "./spindle-events-db.json";
+
+function loadEventLog(): void {
+  try {
+    const raw = Deno.readTextFileSync(EVENTS_DB_PATH);
+    const parsed = JSON.parse(raw) as EventsEnvelope[];
+    if (Array.isArray(parsed)) {
+      // Keep only the most recent MAX_EVENT_LOG entries.
+      for (const e of parsed.slice(-MAX_EVENT_LOG)) eventLog.push(e);
+    }
+  } catch {
+    // missing/corrupt → start empty
+  }
+}
+
+function saveEventLog(): void {
+  try {
+    Deno.writeTextFileSync(EVENTS_DB_PATH, JSON.stringify(eventLog));
+  } catch (err) {
+    log("error", "event log save failed", { path: EVENTS_DB_PATH, err: String(err) });
+  }
+}
+
+loadEventLog();
+log("info", "event log loaded", { path: EVENTS_DB_PATH, events: eventLog.length });
+
+// Keep-alive: fedproxy (and most proxies) idle-close a silent WebSocket after
+// ~15-30s. Core pings every 30s; we send an application-level keepalive frame
+// (harmless zero-value Event to the Go consumer) below the observed ~18s cutoff.
+const KEEPALIVE_MS = 15_000;
 
 // ---------------------------------------------------------------------------
 // Secrets store  (in-memory; keyed by repoDid → key → SecretEntry)
@@ -787,9 +822,10 @@ function broadcastStatus(
     created: nowNs(),
   };
 
-  // Store for cursor backfill on reconnect
+  // Store for cursor backfill on reconnect (durably, survives restart)
   if (eventLog.length >= MAX_EVENT_LOG) eventLog.shift();
   eventLog.push(envelope);
+  saveEventLog();
 
   const msg = JSON.stringify(envelope);
   let sent = 0;
@@ -983,6 +1019,8 @@ app.get(
   upgradeWebSocket((c) => {
     const cursorStr = c.req.query("cursor");
     const cursor = cursorStr ? parseInt(cursorStr, 10) : 0;
+    // Per-connection keep-alive timer so the proxy doesn't idle-close us.
+    let keepAlive: number | undefined;
     return {
       onOpen(_evt, ws) {
         const raw = ws.raw as WebSocket;
@@ -996,9 +1034,23 @@ app.get(
         try {
           raw.send(JSON.stringify({ type: "connected", hostname: HOSTNAME }));
         } catch { /* ignore */ }
+        // Application-level keepalive: a {"type":"ping"} frame unmarshals to a
+        // zero-value Event on the Go consumer (Nsid="" → ignored) but keeps the
+        // proxy connection alive. Native WS ping frames aren't exposed by Deno's
+        // server WebSocket, so we use a data frame instead.
+        keepAlive = setInterval(() => {
+          if (raw.readyState !== WebSocket.OPEN) return;
+          try { raw.send(JSON.stringify({ type: "ping" })); } catch { /* ignore */ }
+        }, KEEPALIVE_MS);
       },
-      onClose(_evt, ws) { subscribers.delete(ws.raw as WebSocket); },
-      onError(_evt, ws) { subscribers.delete(ws.raw as WebSocket); },
+      onClose(_evt, ws) {
+        if (keepAlive !== undefined) clearInterval(keepAlive);
+        subscribers.delete(ws.raw as WebSocket);
+      },
+      onError(_evt, ws) {
+        if (keepAlive !== undefined) clearInterval(keepAlive);
+        subscribers.delete(ws.raw as WebSocket);
+      },
     };
   }),
 );
@@ -1017,7 +1069,22 @@ app.get("/logs/:knot/:pipelineRkey/:workflow", (c) => {
 
   const { socket, response } = Deno.upgradeWebSocket(c.req.raw);
 
+  // Keep-alive so the proxy doesn't idle-close while a live pipeline is between
+  // log lines. A {"type":"ping"} frame has Kind="" → ignored by the appview's
+  // LogLine switch. Cleared on completion and on disconnect.
+  let logKeepAlive: number | undefined;
+  const stopLogKeepAlive = () => {
+    if (logKeepAlive !== undefined) { clearInterval(logKeepAlive); logKeepAlive = undefined; }
+  };
+  socket.onclose = stopLogKeepAlive;
+  socket.onerror = stopLogKeepAlive;
+
   socket.onopen = async () => {
+    logKeepAlive = setInterval(() => {
+      if (socket.readyState !== WebSocket.OPEN) return;
+      try { socket.send(JSON.stringify({ type: "ping" })); } catch { /* closed */ }
+    }, KEEPALIVE_MS);
+
     // step_id counter: 0 = workflow-level system step, 1+ = per-group user steps
     let nextStepId = 0;
     let currentStepId = 0;
@@ -1204,6 +1271,7 @@ app.get("/logs/:knot/:pipelineRkey/:workflow", (c) => {
       step_status: "end",
     });
     log("info", "log stream closing", { taskId: run.taskId, linesStreamed });
+    stopLogKeepAlive();
     try { socket.close(1000, "log stream complete"); } catch { /* ignore */ }
   };
 
