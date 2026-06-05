@@ -67,6 +67,25 @@ function getOwnerDid(host: string): string {
   return subdomainToDID(host);
 }
 
+// did:plc:aaa → did-plc-aaa
+function didToSubdomain(did: string): string {
+  return did.replace(/:/g, "-");
+}
+
+// When SPINDLE_OWNER_DID is set: effective hostname is HOSTNAME.
+// When dynamic subdomain mode: each owner gets <did-slug>.HOSTNAME.
+function effectiveHostname(ownerDid: string): string {
+  if (OWNER_DID) return HOSTNAME;
+  return didToSubdomain(ownerDid) + "." + HOSTNAME;
+}
+
+// Returns true if a repo's spindle field points at this spindle instance.
+function matchesThisSpindle(spindle: string | undefined, repoDid: string): boolean {
+  if (!spindle) return false;
+  if (OWNER_DID) return spindle === HOSTNAME;
+  return spindle === effectiveHostname(repoDid);
+}
+
 // ---------------------------------------------------------------------------
 // Types — knot XRPC responses
 // ---------------------------------------------------------------------------
@@ -206,7 +225,7 @@ const DEFAULT_KNOT  = Deno.env.get("DEFAULT_KNOT")  ?? "knot1.tangled.sh";
 const DB_PATH       = Deno.env.get("SPINDLE_DB_PATH") ?? "./spindle-db.json";
 const LOGS_DB_PATH  = Deno.env.get("SPINDLE_LOGS_DB_PATH") ?? "./spindle-logs-db.json";
 
-// repoDids whose sh.tangled.repo record has spindle === HOSTNAME.
+// repoDids whose sh.tangled.repo record matches this spindle (via matchesThisSpindle).
 // Triggers arriving for any other repoDid are silently ignored.
 const authorizedRepoDids = new Set<string>();
 
@@ -508,12 +527,12 @@ async function discoverKnotsFromATProto(ownerDid?: string): Promise<void> {
       const spindle = rec.value.spindle as string | undefined;
       const repoDid = rec.value.repoDid as string | undefined;
       const repoName = rec.value.name   as string | undefined;
-      log("debug", "knot-discovery: record", { knot, spindle, repoDid, repoName, matchesHostname: spindle === HOSTNAME });
-      if (knot && spindle === HOSTNAME) {
+      log("debug", "knot-discovery: record", { knot, spindle, repoDid, repoName, matchesHostname: matchesThisSpindle(spindle, repoDid ?? "") });
+      if (knot && matchesThisSpindle(spindle, repoDid ?? "")) {
         watchKnot(knot);
         foundKnots++;
       }
-      if (repoDid && spindle === HOSTNAME) {
+      if (repoDid && matchesThisSpindle(spindle, repoDid)) {
         authorizedRepoDids.add(repoDid);
         log("info", "knot-discovery: authorized repo", { repoDid, repoName, knot });
         foundRepos++;
@@ -558,7 +577,7 @@ function startJetstreamWatcher(): void {
       const spindle = record.spindle as string | undefined;
       const knot    = record.knot    as string | undefined;
       const repoDid = record.repoDid as string | undefined;
-      if (spindle === HOSTNAME) {
+      if (matchesThisSpindle(spindle, repoDid ?? "")) {
         if (knot) {
           log("info", "jetstream: new repo points at this spindle", { knot, repoDid });
           watchKnot(knot);
@@ -700,7 +719,7 @@ async function submitWorkflow(
           GITHUB_SHA: trigger.ref,
           GITHUB_REF: trigger.ref,
           GITHUB_SERVER_URL: `https://${trigger.knot}`,
-          SPINDLE_HOSTNAME: HOSTNAME,
+          SPINDLE_HOSTNAME: effectiveHostname(trigger.repoDid),
           // Used by .tangled/actions/*/checkout and BUNDLED_ACTIONS_DIR overrides
           SPINDLE_KNOT: knotBaseUrl(trigger.knot),
           SPINDLE_REPO_DID: trigger.repoDid,
@@ -882,7 +901,7 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
       try {
         if (COMPUTE_PROVIDER === "market.rfp") {
           const rfpConfig = marketRFPConfigFromEnv();
-          const result = await marketRFPSubmitWorkflow(wfObj, trigger, rfpConfig, HOSTNAME);
+          const result = await marketRFPSubmitWorkflow(wfObj, trigger, rfpConfig, effectiveHostname(trigger.repoDid));
           taskId = result.taskId;
           peUrl = result.peUrl;
         } else {
@@ -991,7 +1010,7 @@ app.get(
         }
         subscribers.add(raw);
         try {
-          raw.send(JSON.stringify({ type: "connected", hostname: HOSTNAME }));
+          raw.send(JSON.stringify({ type: "connected", hostname: effectiveHostname(getOwnerDid(c.req.header("host") ?? HOSTNAME)) }));
         } catch { /* ignore */ }
       },
       onClose(_evt, ws) { subscribers.delete(ws.raw as WebSocket); },
@@ -1335,8 +1354,8 @@ app.post("/trigger", async (c) => {
     ref: trigger.ref,
     workflows: submitted.map((stem) => ({
       workflow: stem,
-      logsUrl: `https://${HOSTNAME}/logs/${trigger.knot}/${trigger.pipelineRkey}/${stem}`,
-      statusUrl: `https://${HOSTNAME}/status/${trigger.knot}/${trigger.pipelineRkey}/${stem}`,
+      logsUrl: `https://${effectiveHostname(trigger.repoDid)}/logs/${trigger.knot}/${trigger.pipelineRkey}/${stem}`,
+      statusUrl: `https://${effectiveHostname(trigger.repoDid)}/status/${trigger.knot}/${trigger.pipelineRkey}/${stem}`,
     })),
   });
 });
