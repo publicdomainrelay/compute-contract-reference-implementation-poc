@@ -4,8 +4,4 @@ when:
   - event: ["pull_request"]
     branch: ["main", "test7"]
 
-engine: "bridgeGHA"
-
-bridgeGHA:
-  workflow:
-    name: 'build-containers.yml'
+# engine: "bridgeGHA"
