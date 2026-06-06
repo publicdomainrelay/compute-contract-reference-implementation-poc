@@ -1,0 +1,43 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.submitRfp",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Submit an RFP directly to a bidder whose offering record matches the RFP payload NSID. The bidder creates a bid and optionally calls sendBid back to the RFP issuer.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["rfpUri", "rfpCid"],
+          "properties": {
+            "rfpUri": {
+              "type": "string",
+              "description": "AT-URI of the RFP record."
+            },
+            "rfpCid": {
+              "type": "string",
+              "description": "CID of the RFP record."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["ok"],
+          "properties": {
+            "ok": { "type": "boolean" },
+            "bidUri": { "type": "string" },
+            "bidCid": { "type": "string" }
+          }
+        }
+      },
+      "errors": [
+        { "name": "InvalidRequest" },
+        { "name": "NotApplicable" }
+      ]
+    }
+  }
+}

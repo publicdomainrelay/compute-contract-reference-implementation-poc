@@ -1,16 +1,18 @@
 // marketRFP.ts — ATProto market RFP compute provider for tangled-spindle-minimal
 //
 // When COMPUTE_PROVIDER=market.rfp, this module handles workflow submission by:
-//   1. Generating a random service name: policy-engine-${hex}
-//   2. Building cloud-init user_data that pulls + starts the policy-engine binary
-//   3. Creating compute.vm + market.rfp ATProto records
-//   4. Listening for bids on the jetstream
-//   5. Accepting the winning bid
-//   6. Creating com.fedproxy.rbac to authorize the VM's DID to register its SSH key
-//   7. Submitting the accept bundle to the bidder (x402 receipt endpoint)
-//   8. Watching jetstream for com.fedproxy.sshPublicKey with the generated service name
-//   9. Polling the fedproxy URL until the policy engine is ready
-//  10. Forwarding the workflow submission to the remote policy engine
+//   Generating a random service name: policy-engine-${hex}
+//   Building cloud-init user_data that pulls + starts the policy-engine binary
+//   Creating compute.vm + market.rfp ATProto records
+//   Discovering vouched bidders via repo owner + knot collaborator vouches (sh.tangled.graph.vouch)
+//   Calling submitRfp on each vouched bidder whose offering covers com.publicdomainrelay.temp.compute.vm
+//   Listening for bids on the jetstream (bid window)
+//   Accepting the winning bid
+//   Creating com.fedproxy.rbac to authorize the VM's DID to register its SSH key
+//   Submitting the accept bundle to the bidder (x402 receipt endpoint)
+//   Watching jetstream for com.fedproxy.sshPublicKey with the generated service name
+//   Polling the fedproxy URL until the policy engine is ready
+//   Forwarding the workflow submission to the remote policy engine
 //
 // Env vars (all optional except ATPROTO_HANDLE + ATPROTO_PASSWORD):
 //   ATPROTO_PDS_URL         PDS base URL (default: https://bsky.social)
@@ -258,6 +260,142 @@ runcmd:
 }
 
 // ---------------------------------------------------------------------------
+// Offering / vouch discovery — find bidders via repo owner + collaborator vouches
+// ---------------------------------------------------------------------------
+
+const OFFERING_NSID = "com.publicdomainrelay.temp.market.offering";
+const VOUCH_NSID    = "sh.tangled.graph.vouch";
+const KNOT_MEMBER_NSID = "sh.tangled.knot.member";
+
+async function listRecordsAll(
+  pdsUrl: string,
+  repo: string,
+  collection: string,
+): Promise<Array<{ uri: string; cid: string; value: Record<string, unknown> }>> {
+  const records: Array<{ uri: string; cid: string; value: Record<string, unknown> }> = [];
+  let cursor: string | undefined;
+  do {
+    const url = new URL(`${pdsUrl}/xrpc/com.atproto.repo.listRecords`);
+    url.searchParams.set("repo", repo);
+    url.searchParams.set("collection", collection);
+    url.searchParams.set("limit", "100");
+    if (cursor) url.searchParams.set("cursor", cursor);
+    const res = await fetch(url.toString(), { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) break;
+    const data = await res.json() as { records: Array<{ uri: string; cid: string; value: unknown }>; cursor?: string };
+    for (const r of data.records) {
+      records.push({ uri: r.uri, cid: r.cid, value: r.value as Record<string, unknown> });
+    }
+    cursor = data.cursor;
+  } while (cursor);
+  return records;
+}
+
+// Get DIDs vouched for by a given account.
+async function getVouchedDids(did: string, log: RFPLogger): Promise<string[]> {
+  try {
+    const pds = await resolvePDS(did);
+    const records = await listRecordsAll(pds, did, VOUCH_NSID);
+    // rkey encodes the vouched DID; filter to kind="vouch" only
+    const vouched = records
+      .filter((r) => (r.value.kind as string | undefined) !== "denounce")
+      .map((r) => r.uri.split("/").pop() ?? "")
+      .filter((rkey) => rkey.startsWith("did:"));
+    return Array.from(new Set([did, ...vouched]));
+  } catch (err) {
+    log("vouch lookup failed", { did, err: String(err) });
+    return [];
+  }
+}
+
+// Get collaborator DIDs for a knot (knot member records).
+async function getKnotMemberDids(knot: string, log: RFPLogger): Promise<string[]> {
+  try {
+    const knotDid = `did:web:${knot}`;
+    const pdsUrl = `https://${knot}`;
+    const records = await listRecordsAll(pdsUrl, knotDid, KNOT_MEMBER_NSID);
+    return records
+      .map((r) => r.value.subject as string | undefined)
+      .filter((s): s is string => typeof s === "string" && s.startsWith("did:"));
+  } catch (err) {
+    log("knot member lookup failed", { knot, err: String(err) });
+    return [];
+  }
+}
+
+// For a vouched DID, check their offering collection and call submitRfp if applicable.
+async function notifyBidderViaOffering(
+  bidderDid: string,
+  rfpUri: string,
+  rfpCid: string,
+  payloadNsid: string,
+  log: RFPLogger,
+): Promise<void> {
+  let pds: string;
+  try { pds = await resolvePDS(bidderDid); } catch { return; }
+
+  let offerings: Array<{ uri: string; cid: string; value: Record<string, unknown> }>;
+  try {
+    offerings = await listRecordsAll(pds, bidderDid, OFFERING_NSID);
+  } catch { return; }
+
+  for (const offering of offerings) {
+    const appliesTo = offering.value.appliesTo as string[] | undefined;
+    const endpointUrl = offering.value.endpointUrl as string | undefined;
+    if (!endpointUrl || !Array.isArray(appliesTo)) continue;
+    if (!appliesTo.includes(payloadNsid)) continue;
+
+    log("submitting RFP to vouched bidder", { bidderDid, endpointUrl, rfpUri });
+    try {
+      const res = await fetch(`${endpointUrl.replace(/\/+$/, "")}/xrpc/com.publicdomainrelay.temp.market.submitRfp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rfpUri, rfpCid }),
+        signal: AbortSignal.timeout(15000),
+      });
+      log("submitRfp response", { bidderDid, status: res.status });
+    } catch (err) {
+      log("submitRfp failed", { bidderDid, endpointUrl, err: String(err) });
+    }
+    break; // one offering per bidder is enough
+  }
+}
+
+// Discover bidders via repo owner + collaborator vouches, notify them about the RFP.
+async function discoverAndNotifyBidders(
+  trigger: { repoDid: string; knot: string },
+  rfpUri: string,
+  rfpCid: string,
+  payloadNsid: string,
+  log: RFPLogger,
+): Promise<void> {
+  log("discovering bidders via vouches", { repoDid: trigger.repoDid, knot: trigger.knot });
+
+  const accountsToCheck = new Set<string>([trigger.repoDid]);
+
+  const collaborators = await getKnotMemberDids(trigger.knot, log);
+  for (const c of collaborators) accountsToCheck.add(c);
+
+  log("accounts to check for vouches", { count: accountsToCheck.size });
+
+  const vouchedDids = new Set<string>();
+  await Promise.all(
+    Array.from(accountsToCheck).map(async (did) => {
+      const vouched = await getVouchedDids(did, log);
+      for (const v of vouched) vouchedDids.add(v);
+    }),
+  );
+
+  log("vouched bidder candidates", { count: vouchedDids.size });
+
+  await Promise.all(
+    Array.from(vouchedDids).map((did) =>
+      notifyBidderViaOffering(did, rfpUri, rfpCid, payloadNsid, log)
+    ),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Jetstream bid collector
 // ---------------------------------------------------------------------------
 
@@ -495,11 +633,11 @@ export async function marketRFPSubmitWorkflow(
   onLog?: (line: string) => void,
 ): Promise<MarketRFPResult> {
   const log = makeLogger(onLog);
-  // Step 1: Generate service name before user_data so it knows its name
+  // Generate service name before user_data so it knows its name
   const serviceName = `${config.vm.role}-${randomHex(8)}`;
   log("service name generated", { serviceName });
 
-  // Step 2: Login to ATProto
+  // Login to ATProto
   const session = new CredentialSession(new URL(config.pdsUrl));
   await session.login({ identifier: config.handle, password: config.password });
   const agent = new Agent(session);
@@ -507,10 +645,10 @@ export async function marketRFPSubmitWorkflow(
   const agentDidPlcKey = agentDid.split(":")[2];
   log("atproto authenticated", { did: agentDid, handle: config.handle });
 
-  // Step 3: Build user_data with policy-engine bootstrap
+  // Build user_data with policy-engine bootstrap
   const userData = buildUserData(serviceName);
 
-  // Step 4: Create compute.vm record
+  // Create compute.vm record
   const vmRecord = {
     $type: VM_NSID,
     cpus: config.vm.cpus,
@@ -525,7 +663,7 @@ export async function marketRFPSubmitWorkflow(
   const vmRef = await atprotoCreateRecord(agent, VM_NSID, vmRecord);
   log("compute.vm created", { uri: vmRef.uri });
 
-  // Step 5: Create market.rfp record wrapping the VM
+  // Create market.rfp record wrapping the VM
   const sendBidUrl = spindleHostname
     ? `https://${spindleHostname}/xrpc/com.publicdomainrelay.temp.market.submitBid`
     : undefined;
@@ -539,8 +677,17 @@ export async function marketRFPSubmitWorkflow(
   const rfpRef = await atprotoCreateRecord(agent, RFP_NSID, rfpRecord);
   log("market.rfp created", { uri: rfpRef.uri });
 
-  // Step 6: Listen for bids during the bid window
+  // Discover vouched bidders and notify them about the RFP before opening the window.
   const rfpUri = rfpRef.uri;
+  await discoverAndNotifyBidders(
+    { repoDid: trigger.repoDid, knot: trigger.knot },
+    rfpUri,
+    rfpRef.cid,
+    VM_NSID,
+    log,
+  );
+
+  // Listen for bids during the bid window
   const bids = await collectBidsForRfp(rfpUri, config.jetstreamUrl, config.bidWindowMs, log);
 
   if (bids.length === 0) {
@@ -560,7 +707,7 @@ export async function marketRFPSubmitWorkflow(
     cid: winner.cid,
   };
 
-  // Step 7: Accept the winning bid
+  // Accept the winning bid
   const acceptRecord = {
     $type: ACCEPT_NSID,
     rfp: rfpRef,
@@ -570,7 +717,7 @@ export async function marketRFPSubmitWorkflow(
   const acceptRef = await atprotoCreateRecord(agent, ACCEPT_NSID, acceptRecord);
   log("market.accept created", { uri: acceptRef.uri });
 
-  // Step 8: Create com.fedproxy.rbac BEFORE submitting receipt
+  // Create com.fedproxy.rbac BEFORE submitting receipt
   // Grants agentDid permission to createRecord com.fedproxy.sshPublicKey
   // with the specific service name, so the VM can register itself.
   const rbacRecord = {
@@ -638,7 +785,7 @@ export async function marketRFPSubmitWorkflow(
   const rbacRef = await atprotoCreateRecord(agent, RBAC_NSID, rbacRecord);
   log("com.fedproxy.rbac created", { uri: rbacRef.uri, subject: agentDid, serviceName });
 
-  // Step 9: Submit to bidder's x402 receipt endpoint (creates market.receipt)
+  // Submit to bidder's x402 receipt endpoint (creates market.receipt)
   const x402Payload = winner.payload;
   if (x402Payload) {
     const baseUrl = String(x402Payload.url ?? "");
@@ -661,7 +808,7 @@ export async function marketRFPSubmitWorkflow(
     }
   }
 
-  // Step 10: Watch jetstream for com.fedproxy.sshPublicKey with our service name
+  // Watch jetstream for com.fedproxy.sshPublicKey with our service name
   // This tells us the VM has booted, started the policy engine, and registered itself.
   const sshKeyEvent = await watchForSshKey(
     serviceName,
@@ -671,14 +818,14 @@ export async function marketRFPSubmitWorkflow(
   );
   log("VM registered SSH key", { serviceName, did: sshKeyEvent.did });
 
-  // Step 11: Derive policy engine URL from service name + handle + fedproxy host
+  // Derive policy engine URL from service name + handle + fedproxy host
   const peUrl = `https://${serviceName}--${config.handle.replace(/\./g, "-")}.${config.fedproxyHost}`;
   log("policy engine URL", { peUrl });
 
-  // Step 12: Poll until policy engine is ready
+  // Poll until policy engine is ready
   await waitForPolicyEngine(peUrl, config.peReadyTimeoutMs, log);
 
-  // Step 13: Submit workflow to the remote policy engine
+  // Submit workflow to the remote policy engine
   const req = {
     workflow: workflowObj,
     context: {

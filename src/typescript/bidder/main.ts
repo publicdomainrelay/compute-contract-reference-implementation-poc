@@ -30,6 +30,7 @@ const BID_NSID = "com.publicdomainrelay.temp.market.bid";
 const BIDS_X402_NSID = "com.publicdomainrelay.temp.market.bids.x402";
 const ACCEPT_NSID = "com.publicdomainrelay.temp.market.accept";
 const RECEIPT_NSID = "com.publicdomainrelay.temp.market.receipt";
+const OFFERING_NSID = "com.publicdomainrelay.temp.market.offering";
 const RBAC_NSID = "com.fedproxy.rbac";
 
 const ACCEPT_PATH_RECORD = "$HOME/secrets/publicdomainrelay.com/market/accept.json";
@@ -459,6 +460,36 @@ async function configureAccountAuthRbac(): Promise<void> {
   console.error(`[com.fedproxy.rbac] account.auth record created`);
 }
 
+// Ensure the bidder's own offering record exists for com.publicdomainrelay.temp.compute.vm.
+// If none found, create one pointing to BASE_URL.
+async function ensureOfferingRecord(): Promise<void> {
+  const listRes = await agent.com.atproto.repo.listRecords({
+    repo: agentDid,
+    collection: OFFERING_NSID,
+    limit: 100,
+  });
+  const existing = listRes.data.records.find((r) => {
+    const value = r.value as Record<string, unknown>;
+    const appliesTo = value.appliesTo as string[] | undefined;
+    return Array.isArray(appliesTo) && appliesTo.includes(VM_NSID);
+  });
+  if (existing) {
+    log("info", "offering record exists", { uri: existing.uri });
+    return;
+  }
+  if (!BASE_URL) {
+    log("warn", "BASE_URL not set, skipping offering record creation");
+    return;
+  }
+  const ref = await atprotoCreateRecord(agent, OFFERING_NSID, {
+    $type: OFFERING_NSID,
+    endpointUrl: BASE_URL,
+    appliesTo: [VM_NSID],
+    createdAt: new Date().toISOString(),
+  });
+  log("info", "offering record created", { uri: ref.uri });
+}
+
 function injectAcceptBundle(userData: string, bundle: Record<string, unknown>): string {
   // deno-lint-ignore no-explicit-any
   let obj: Record<string, any> = {};
@@ -661,6 +692,87 @@ app.get("/receipt/*", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// Shared bid-creation logic used by /hook/rfp and /xrpc/…submitRfp.
+// ---------------------------------------------------------------------------
+
+async function createAndSubmitBid(
+  rfpUri: string,
+  rfpCid: string,
+  rfpRecord: RFP,
+  receiptUrl: string,
+): Promise<{ configUri: string; configCid: string; payloadUri: string; payloadCid: string; bidUri: string; bidCid: string }> {
+  const nowIso = new Date().toISOString();
+  const doctx = await makeDoctx();
+
+  const configRecord = await agent.com.atproto.repo.createRecord({
+    repo: agent.assertDid,
+    collection: WIF_SIMPLE_NSID,
+    record: {
+      $type: WIF_SIMPLE_NSID,
+      accept_path: ACCEPT_PATH_RECORD,
+      issuer_uri: `${DIGITALOCEAN_BASE_URL}`,
+      to_issue: "exchange-custom-droplet-oidc-poc",
+      actx: doctx.teamUuid,
+      actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
+      token_path: "/root/secrets/digitalocean.com/serviceaccount/token",
+      url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
+      url_route: "/v1/oidc/issue",
+      subject: "actx:{actx}:plc:{did-plc-key}:role:{role}",
+      createdAt: nowIso,
+    },
+  });
+
+  const payloadRecord = await agent.com.atproto.repo.createRecord({
+    repo: agent.assertDid,
+    collection: BIDS_X402_NSID,
+    record: {
+      $type: BIDS_X402_NSID,
+      cost: 1,
+      currency: "USDC",
+      frequency: "monthly",
+      prepay: true,
+      url: receiptUrl,
+      createdAt: nowIso,
+    },
+  });
+
+  const bidRecord = await agent.com.atproto.repo.createRecord({
+    repo: agent.assertDid,
+    collection: BID_NSID,
+    record: {
+      $type: BID_NSID,
+      rfp: { $type: "com.atproto.repo.strongRef", uri: rfpUri, cid: rfpCid },
+      config: { $type: "com.atproto.repo.strongRef", uri: configRecord.data.uri, cid: configRecord.data.cid },
+      payload: { $type: "com.atproto.repo.strongRef", uri: payloadRecord.data.uri, cid: payloadRecord.data.cid },
+      createdAt: nowIso,
+    },
+  });
+
+  if (rfpRecord.sendBid) {
+    try {
+      const res = await fetch(rfpRecord.sendBid, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uri: bidRecord.data.uri, cid: bidRecord.data.cid, rfpUri }),
+        signal: AbortSignal.timeout(10000),
+      });
+      log("info", "sendBid POST", { url: rfpRecord.sendBid, status: res.status });
+    } catch (err) {
+      log("warn", "sendBid POST failed", { url: rfpRecord.sendBid, err: String(err) });
+    }
+  }
+
+  return {
+    configUri: configRecord.data.uri,
+    configCid: configRecord.data.cid,
+    payloadUri: payloadRecord.data.uri,
+    payloadCid: payloadRecord.data.cid,
+    bidUri: bidRecord.data.uri,
+    bidCid: bidRecord.data.cid,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // POST /hook/rfp  (firehose-style webhook envelope)
 // ---------------------------------------------------------------------------
 
@@ -694,81 +806,56 @@ app.post("/hook/rfp", async (c) => {
   const rfpAtUri = `at://${payload.event.did}/${commit.collection}/${commit.rkey}`;
   const rfpCid = commit.cid;
 
-  // sanity-resolve the RFP
-  await resolveAs<RFP>(rfpAtUri, rfpCid);
-
-  const nowIso = new Date().toISOString();
-
-  const doctx = await makeDoctx();
-
-  const configRecord = await agent.com.atproto.repo.createRecord({
-    repo: agent.assertDid,
-    collection: WIF_SIMPLE_NSID,
-    record: {
-      $type: WIF_SIMPLE_NSID,
-      accept_path: ACCEPT_PATH_RECORD,
-      issuer_uri: `${DIGITALOCEAN_BASE_URL}`,
-      // TODO policy to_issue = `ex-${slug}`
-      to_issue: "exchange-custom-droplet-oidc-poc",
-      // TODO This should be updated in fedproxy-client and lexicon
-      actx: doctx.teamUuid,
-      actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
-      token_path: "/root/secrets/digitalocean.com/serviceaccount/token",
-      url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
-      url_route: "/v1/oidc/issue",
-      subject: "actx:{actx}:plc:{did-plc-key}:role:{role}",
-      createdAt: nowIso,
-    },
-  });
-
-  const payloadRecord = await agent.com.atproto.repo.createRecord({
-    repo: agent.assertDid,
-    collection: BIDS_X402_NSID,
-    record: {
-      $type: BIDS_X402_NSID,
-      cost: 1,
-      currency: "USDC",
-      frequency: "monthly",
-      prepay: true,
-      url: x402UrlTemplate(c.req.url),
-      createdAt: nowIso,
-    },
-  });
-
-  const bidRecord = await agent.com.atproto.repo.createRecord({
-    repo: agent.assertDid,
-    collection: BID_NSID,
-    record: {
-      $type: BID_NSID,
-      rfp: { $type: "com.atproto.repo.strongRef", uri: rfpAtUri, cid: rfpCid },
-      config: { $type: "com.atproto.repo.strongRef", uri: configRecord.data.uri, cid: configRecord.data.cid },
-      payload: { $type: "com.atproto.repo.strongRef", uri: payloadRecord.data.uri, cid: payloadRecord.data.cid },
-      createdAt: nowIso,
-    },
-  });
-
   const rfpRecord = await resolveAs<RFP>(rfpAtUri, rfpCid);
-  if (rfpRecord.sendBid) {
-    try {
-      const res = await fetch(rfpRecord.sendBid, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uri: bidRecord.data.uri, cid: bidRecord.data.cid, rfpUri: rfpAtUri }),
-        signal: AbortSignal.timeout(10000),
-      });
-      log("info", "sendBid POST", { url: rfpRecord.sendBid, status: res.status });
-    } catch (err) {
-      log("warn", "sendBid POST failed", { url: rfpRecord.sendBid, err: String(err) });
-    }
-  }
+
+  const { configUri, configCid, payloadUri, payloadCid, bidUri, bidCid } =
+    await createAndSubmitBid(rfpAtUri, rfpCid, rfpRecord, x402UrlTemplate(c.req.url));
 
   return c.json({
     success: true,
     rfp: { uri: rfpAtUri, cid: rfpCid },
-    bid: { $type: "com.atproto.repo.strongRef", uri: bidRecord.data.uri, cid: bidRecord.data.cid },
-    bid_payload: { $type: "com.atproto.repo.strongRef", uri: payloadRecord.data.uri, cid: payloadRecord.data.cid },
-    bid_config: { $type: "com.atproto.repo.strongRef", uri: configRecord.data.uri, cid: configRecord.data.cid },
+    bid: { $type: "com.atproto.repo.strongRef", uri: bidUri, cid: bidCid },
+    bid_payload: { $type: "com.atproto.repo.strongRef", uri: payloadUri, cid: payloadCid },
+    bid_config: { $type: "com.atproto.repo.strongRef", uri: configUri, cid: configCid },
   });
+});
+
+// ---------------------------------------------------------------------------
+// POST /xrpc/com.publicdomainrelay.temp.market.submitRfp  { rfpUri, rfpCid }
+// ---------------------------------------------------------------------------
+
+app.post("/xrpc/com.publicdomainrelay.temp.market.submitRfp", async (c) => {
+  let body: { rfpUri?: string; rfpCid?: string };
+  try { body = await c.req.json(); } catch { return c.json({ error: "InvalidRequest", message: "invalid JSON" }, 400); }
+  const { rfpUri, rfpCid } = body;
+  if (!rfpUri || !rfpCid) return c.json({ error: "InvalidRequest", message: "missing rfpUri or rfpCid" }, 400);
+
+  log("info", "submitRfp received", { rfpUri, rfpCid });
+
+  const rfpRecord = await resolveAs<RFP>(rfpUri, rfpCid);
+
+  // Check that our offering covers the RFP payload type — best-effort; proceed if unknown.
+  const payloadNsid = rfpRecord.payload?.$type ?? (rfpRecord.payload?.uri ?? "").split("/")[3];
+
+  const listRes = await agent.com.atproto.repo.listRecords({ repo: agentDid, collection: OFFERING_NSID, limit: 100 });
+  const applicable = listRes.data.records.some((r) => {
+    const v = r.value as Record<string, unknown>;
+    const appliesTo = v.appliesTo as string[] | undefined;
+    return Array.isArray(appliesTo) && (appliesTo.includes(payloadNsid) || appliesTo.includes(VM_NSID));
+  });
+  if (!applicable) {
+    log("info", "submitRfp not applicable", { rfpUri, payloadNsid });
+    return c.json({ error: "NotApplicable", message: `no offering for ${payloadNsid}` }, 400);
+  }
+
+  const { did: rfpOwnerDid } = parseAtUri(rfpUri);
+
+  const { bidUri, bidCid } =
+    await createAndSubmitBid(rfpUri, rfpCid, rfpRecord, `${BASE_URL}/receipt`);
+
+  log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
+
+  return c.json({ ok: true, bidUri, bidCid });
 });
 
 // ---------------------------------------------------------------------------
@@ -780,6 +867,7 @@ const main = async () => {
   await loadReadme();
   await loginAgent();
   await configureAccountAuthRbac();
+  await ensureOfferingRecord();
   const port = Number(Deno.env.get("PORT") ?? 4021);
   Deno.serve({ port, hostname: "0.0.0.0", onListen: ({ port, hostname }) => {
     console.error(`[server] listening on http://${hostname}:${port}`);
