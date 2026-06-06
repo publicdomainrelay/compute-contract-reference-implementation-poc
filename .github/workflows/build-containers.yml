@@ -14,22 +14,20 @@ jobs:
 
       - name: Print all files
         run: |
-          echo "=== WORKSPACE ==="
           find .
-          echo "=== DONE ==="
+
+      - uses: dorny/paths-filter@v4
+        id: qemu-changes
+        with:
+          filters: |
+            qemu:
+              - 'src/typescript/qemu/qemu-*'
 
       - name: Build qemu runner container
+        if: steps.changes.outputs.qemu == 'true'
         run: |
           set -x
           set +e
-          export DEBIAN_FRONTEND=noninteractive
-          which findmnt
-          sudo apt-get update
-          sudo apt-get install -y util-linux
-          which findmnt
-
-          sudo findmnt /var/lib/docker
-          sudo findmnt /var/lib/containerd
 
           cd src/typescript/qemu/
           # --push
