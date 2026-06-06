@@ -1,0 +1,46 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.submitBid",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Submit the AT-URI and CID of a bid record directly to the RFP issuer, bypassing the firehose. Used when the RFP includes a sendBid endpoint.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["uri", "cid", "rfpUri"],
+          "properties": {
+            "uri": {
+              "type": "string",
+              "description": "AT-URI of the bid record."
+            },
+            "cid": {
+              "type": "string",
+              "description": "CID of the bid record."
+            },
+            "rfpUri": {
+              "type": "string",
+              "description": "AT-URI of the RFP this bid is for."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["ok"],
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      "errors": [
+        { "name": "InvalidRequest" }
+      ]
+    }
+  }
+}

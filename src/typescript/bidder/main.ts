@@ -68,7 +68,7 @@ type VM = {
   _cid?: string;
 };
 
-type RFP = { payload: StrongRef; _uri?: string; _cid?: string };
+type RFP = { payload: StrongRef; sendBid?: string; _uri?: string; _cid?: string };
 type Bid = { rfp: StrongRef; payload: StrongRef; config?: StrongRef; _uri?: string; _cid?: string };
 type Accept = { rfp: StrongRef; bid: StrongRef; payload?: StrongRef; _uri?: string; _cid?: string };
 type BidsX402 = { cost: unknown; currency: string; frequency: string; prepay: boolean; url: string; _uri?: string; _cid?: string };
@@ -746,6 +746,21 @@ app.post("/hook/rfp", async (c) => {
       createdAt: nowIso,
     },
   });
+
+  const rfpRecord = await resolveAs<RFP>(rfpAtUri, rfpCid);
+  if (rfpRecord.sendBid) {
+    try {
+      const res = await fetch(rfpRecord.sendBid, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uri: bidRecord.data.uri, cid: bidRecord.data.cid, rfpUri: rfpAtUri }),
+        signal: AbortSignal.timeout(10000),
+      });
+      log("info", "sendBid POST", { url: rfpRecord.sendBid, status: res.status });
+    } catch (err) {
+      log("warn", "sendBid POST failed", { url: rfpRecord.sendBid, err: String(err) });
+    }
+  }
 
   return c.json({
     success: true,

@@ -72,6 +72,10 @@ type CollectedBid = {
   config?: Record<string, unknown>;
 };
 
+// Per-RFP queue for bids submitted directly via HTTP (sendBid endpoint).
+// Keyed by rfp AT-URI. Spindle's XRPC route pushes here; collectBidsForRfp drains it.
+export const pendingBids: Map<string, CollectedBid[]> = new Map();
+
 export interface MarketRFPConfig {
   pdsUrl: string;
   handle: string;
@@ -266,7 +270,14 @@ async function collectBidsForRfp(
   const bids: CollectedBid[] = [];
   const seen = new Set<string>();
 
-  log("collecting bids", { rfpUri, windowMs });
+  // Pre-seed from any bids already submitted via sendBid HTTP route.
+  const pre = pendingBids.get(rfpUri) ?? [];
+  for (const b of pre) {
+    if (!seen.has(b.uri)) { seen.add(b.uri); bids.push(b); }
+  }
+  pendingBids.delete(rfpUri);
+
+  log("collecting bids", { rfpUri, windowMs, preSeedCount: bids.length });
 
   return new Promise((resolve) => {
     const url = new URL(jetstreamUrl);
@@ -275,6 +286,12 @@ async function collectBidsForRfp(
     let ws: WebSocket;
     const timer = setTimeout(() => {
       try { ws.close(); } catch { /* ignore */ }
+      // Drain any bids that arrived via sendBid during the window.
+      const direct = pendingBids.get(rfpUri) ?? [];
+      for (const b of direct) {
+        if (!seen.has(b.uri)) { seen.add(b.uri); bids.push(b); }
+      }
+      pendingBids.delete(rfpUri);
       log("bid window closed", { rfpUri, bids: bids.length });
       resolve(bids);
     }, windowMs);
@@ -491,13 +508,7 @@ export async function marketRFPSubmitWorkflow(
   log("atproto authenticated", { did: agentDid, handle: config.handle });
 
   // Step 3: Build user_data with policy-engine bootstrap
-  const userData = buildUserData(
-    serviceName,
-    config.atpRelayUrl,
-    agentDid,
-    config.handle,
-    config.password,
-  );
+  const userData = buildUserData(serviceName);
 
   // Step 4: Create compute.vm record
   const vmRecord = {
@@ -515,12 +526,16 @@ export async function marketRFPSubmitWorkflow(
   log("compute.vm created", { uri: vmRef.uri });
 
   // Step 5: Create market.rfp record wrapping the VM
-  const rfpRecord = {
+  const sendBidUrl = spindleHostname
+    ? `https://${spindleHostname}/xrpc/com.publicdomainrelay.temp.market.submitBid`
+    : undefined;
+  const rfpRecord: Record<string, unknown> = {
     $type: RFP_NSID,
     domain: "compute",
     payload: vmRef,
     createdAt: new Date().toISOString(),
   };
+  if (sendBidUrl) rfpRecord.sendBid = sendBidUrl;
   const rfpRef = await atprotoCreateRecord(agent, RFP_NSID, rfpRecord);
   log("market.rfp created", { uri: rfpRef.uri });
 

@@ -28,7 +28,7 @@
 
 import { Hono } from "jsr:@hono/hono";
 import { parse as parseYaml } from "jsr:@std/yaml";
-import { marketRFPSubmitWorkflow, marketRFPConfigFromEnv } from "./marketRFP.ts";
+import { marketRFPSubmitWorkflow, marketRFPConfigFromEnv, pendingBids } from "./marketRFP.ts";
 
 // ---------------------------------------------------------------------------
 // Structured logger — JSON to stderr
@@ -1016,6 +1016,7 @@ Routes:
   GET  /xrpc/sh.tangled.repo.listSecrets?repo=DID  list secrets (keys only)
   POST /xrpc/sh.tangled.repo.addSecret             add secret { repo, key, value }
   POST /xrpc/sh.tangled.repo.removeSecret          remove secret { repo, key }
+  POST /xrpc/com.publicdomainrelay.temp.market.submitBid  submit bid { uri, cid } directly
 
 Spindle hostname : ${HOSTNAME}
 Owner DID        : ${OWNER_DID}
@@ -1381,6 +1382,33 @@ app.post("/xrpc/sh.tangled.repo.removeSecret", async (c) => {
   if (!m?.has(key)) return c.json({ error: "InvalidRequest", message: "key not found" }, 404);
   m.delete(key);
   return c.body(null, 200);
+});
+
+// /xrpc/com.publicdomainrelay.temp.market.submitBid  { uri, cid, rfpUri }
+// Bidders POST here when RFP.sendBid is set, bypassing the firehose.
+// uri+cid identify the bid AT record; rfpUri routes it to the right collector.
+app.post("/xrpc/com.publicdomainrelay.temp.market.submitBid", async (c) => {
+  let body: { uri?: string; cid?: string; rfpUri?: string };
+  try { body = await c.req.json(); } catch { return c.json({ error: "InvalidRequest", message: "invalid JSON" }, 400); }
+  const { uri, cid, rfpUri } = body;
+  if (!uri || !cid || !rfpUri) return c.json({ error: "InvalidRequest", message: "missing uri, cid, or rfpUri" }, 400);
+
+  const did = uri.replace("at://", "").split("/")[0];
+  const queue = pendingBids.get(rfpUri) ?? [];
+  queue.push({
+    did,
+    uri,
+    cid,
+    record: {
+      $type: "com.publicdomainrelay.temp.market.bid",
+      rfp: { $type: "com.atproto.repo.strongRef", uri: rfpUri, cid: "" },
+      payload: { $type: "com.atproto.repo.strongRef", uri: "", cid: "" },
+    },
+  });
+  pendingBids.set(rfpUri, queue);
+
+  log("info", "submitBid received", { uri, cid, rfpUri });
+  return c.json({ ok: true });
 });
 
 // /trigger — accept a pipeline trigger and kick off workflow execution.
