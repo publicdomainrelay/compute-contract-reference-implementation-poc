@@ -1,0 +1,290 @@
+#cloud-config
+users:
+  - name: agent
+    gecos: Policy Engine Agent
+    primary_group: agent
+    groups:
+      - users
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    no_user_group: false
+
+write_files:
+  - path: /etc/systemd/system/fedproxy-client.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=FedProxy Client Service
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=root
+      WorkingDirectory=/root
+      Environment="SERVICE=policy-engine-a760684121f92cf5"
+      Environment="PORT=8080"
+      Environment="ATPRP_URL=https://rp.fedproxy.com"
+      Environment="AUTH_PLUGIN=oidc"
+      Environment="MARKET_ACCEPT_JSON_PATH=/root/secrets/publicdomainrelay.com/market/accept.json"
+      ExecStart=/usr/local/bin/fedproxy-client
+      Restart=always
+      RestartSec=5
+      TimeoutStopSec=10
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/policy-engine.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Policy Engine Service
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=agent
+      Group=agent
+      WorkingDirectory=/home/agent
+      Environment="BUNDLED_ACTIONS_DIR=/home/agent/bundled-actions"
+      ExecStart=/usr/local/bin/policy_engine --log-level trace api --bind 127.0.0.1:8080
+      Restart=always
+      RestartSec=5
+      TimeoutStopSec=10
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /usr/local/bin/wait-for-health
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -x
+      set -euo pipefail
+      URL="$1/health"
+      ENDPOINT="$1"
+      MAX_ATTEMPTS=30
+      ATTEMPT=0
+      WAIT_SECS=0.1
+
+      tee /home/agent/workflow.yml <<'EOF'
+      name: 'build: containers'
+
+      on:
+        push:
+          branches:
+            - main
+
+      jobs:
+        check:
+          runs-on: ubuntu-latest
+          steps:
+            - name: checkout
+              # uses: actions/checkout@v4
+              run: |
+                set -x
+                set +e
+                git clone https://github.com/publicdomainrelay/compute-contract-reference-implementation-poc
+
+            - name: Print all files
+              run: |
+                echo "=== WORKSPACE ==="
+                find .
+                echo "=== DONE ==="
+
+            - name: Build qemu runner container
+              run: |
+                set -x
+                set +e
+                export DEBIAN_FRONTEND=noninteractive
+                which findmnt
+                sudo apt-get update
+                sudo apt-get install -y util-linux
+                which findmnt
+
+                sudo findmnt /var/lib/docker
+                sudo findmnt /var/lib/containerd
+
+                cd compute-contract-reference-implementation-poc
+                cd src/typescript/qemu/
+                # --push
+                sudo docker build --pull --progress plain -f qemu-runner.Dockerfile -t atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner .
+      EOF
+
+      while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+        if curl -sf "$URL" | grep -q '"status":"ok"'; then
+          echo "Health check passed"
+
+          cat /home/agent/workflow.yml
+
+          # FIXED: Changed from my_workflow.yml to workflow.yml to match the write_files destination
+          TASK_ID=$(/usr/local/bin/policy_engine client -e "$ENDPOINT" create \
+            -w /home/agent/workflow.yml -R myorg/myrepo \
+            -i key=value \
+            | jq -r '.detail.id')
+
+          # Stream console output in real time (follows until done)
+          /usr/local/bin/policy_engine client -e "$ENDPOINT" output \
+            -t "$TASK_ID" --follow
+
+          # Check the final status (poll until complete)
+          /usr/local/bin/policy_engine client -e "$ENDPOINT" status \
+            -t "$TASK_ID" --wait
+
+          # Or get the status as YAML
+          /usr/local/bin/policy_engine client -e "$ENDPOINT" status \
+            -t "$TASK_ID" --wait --output-format yaml | tee /home/agent/workflow-status.yaml
+
+          exit 0
+        fi
+        ATTEMPT=$((ATTEMPT + 1))
+        echo "Health check attempt $ATTEMPT/$MAX_ATTEMPTS failed, retrying..."
+        sleep $WAIT_SECS
+      done
+
+      echo "Health check failed after $MAX_ATTEMPTS attempts"
+      exit 1
+
+  - path: /root/secrets/publicdomainrelay.com/market/accept.json
+    owner: root:root
+    permissions: '0600'
+    content: |-
+      {
+        "$type": "com.publicdomainrelay.temp.market.accept",
+        "accept": {
+          "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.accept/3mnjqglav642y",
+          "cid": "bafyreifru2amii6gndn6i4tpdo7pliyqpl6tsnbc2inbnd7pr4jvflua7i",
+          "value": {
+            "bid": {
+              "cid": "bafyreic7nlvv74dhhhzkmacti7batng3zheyisfzxd7lhr3hfhwxwgnn4e",
+              "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.bid/3mnjqggs2j52z",
+              "$type": "com.atproto.repo.strongRef"
+            },
+            "rfp": {
+              "cid": "bafyreiaav67dvgilzpobamqqsqitohuolord7rdlot52ri3ktkk45743pe",
+              "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.rfp/3mnjqgekels2m",
+              "$type": "com.atproto.repo.strongRef"
+            },
+            "$type": "com.publicdomainrelay.temp.market.accept",
+            "createdAt": "2026-06-05T08:39:24.430Z"
+          }
+        },
+        "rfp": {
+          "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.rfp/3mnjqgekels2m",
+          "cid": "bafyreiaav67dvgilzpobamqqsqitohuolord7rdlot52ri3ktkk45743pe",
+          "value": {
+            "$type": "com.publicdomainrelay.temp.market.rfp",
+            "domain": "compute",
+            "payload": {
+              "cid": "bafyreibwsqllrb7e2ha4v6cdztbav5elvtd77uwqrwnipstasohifjj224",
+              "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.compute.vm/3mnjqgeeqzi24",
+              "$type": "com.atproto.repo.strongRef"
+            },
+            "createdAt": "2026-06-05T08:39:17.307Z"
+          }
+        },
+        "bid": {
+          "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.bid/3mnjqggs2j52z",
+          "cid": "bafyreic7nlvv74dhhhzkmacti7batng3zheyisfzxd7lhr3hfhwxwgnn4e",
+          "value": {
+            "rfp": {
+              "cid": "bafyreiaav67dvgilzpobamqqsqitohuolord7rdlot52ri3ktkk45743pe",
+              "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.rfp/3mnjqgekels2m",
+              "$type": "com.atproto.repo.strongRef"
+            },
+            "$type": "com.publicdomainrelay.temp.market.bid",
+            "config": {
+              "cid": "bafyreiei5lz2p6yfbjn2kvdwm2nhv23qwqgtetlekdzhsnu5dl4uxxdyb4",
+              "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.compute.config.wif.simple/3mnjqggmjro24",
+              "$type": "com.atproto.repo.strongRef"
+            },
+            "payload": {
+              "cid": "bafyreibnx5nynoq5mmui4bugf5oczkumsjqmbqw4bww4b55vzv6apu25da",
+              "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.bids.x402/3mnjqggp2sk2o",
+              "$type": "com.atproto.repo.strongRef"
+            },
+            "createdAt": "2026-06-05T08:39:18.402Z"
+          }
+        },
+        "bid_payload": {
+          "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.bids.x402/3mnjqggp2sk2o",
+          "cid": "bafyreibnx5nynoq5mmui4bugf5oczkumsjqmbqw4bww4b55vzv6apu25da",
+          "value": {
+            "url": "http://bob-bid-0001--johnandersen777-bsky-social.fedproxy.com/receipt",
+            "cost": 1,
+            "$type": "com.publicdomainrelay.temp.market.bids.x402",
+            "prepay": true,
+            "currency": "USDC",
+            "createdAt": "2026-06-05T08:39:18.402Z",
+            "frequency": "monthly"
+          }
+        },
+        "bid_config": {
+          "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.compute.config.wif.simple/3mnjqggmjro24",
+          "cid": "bafyreiei5lz2p6yfbjn2kvdwm2nhv23qwqgtetlekdzhsnu5dl4uxxdyb4",
+          "value": {
+            "actx": "5svqtrhheairglgiiyvutzik",
+            "$type": "com.publicdomainrelay.temp.compute.config.wif.simple",
+            "subject": "actx:{actx}:plc:{did-plc-key}:role:{role}",
+            "to_issue": "exchange-custom-droplet-oidc-poc",
+            "url_path": "/root/secrets/digitalocean.com/serviceaccount/base_url",
+            "actx_path": "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
+            "createdAt": "2026-06-05T08:39:18.402Z",
+            "url_route": "/v1/oidc/issue",
+            "issuer_uri": "https://mini-cloud-0001.fedfork.com",
+            "token_path": "/root/secrets/digitalocean.com/serviceaccount/token",
+            "accept_path": "$HOME/secrets/publicdomainrelay.com/market/accept.json"
+          }
+        },
+        "vm": {
+          "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.compute.vm/3mnjqgeeqzi24",
+          "cid": "bafyreibwsqllrb7e2ha4v6cdztbav5elvtd77uwqrwnipstasohifjj224",
+          "value": {
+            "mem": "4G",
+            "cpus": 2,
+            "disk": "40G",
+            "role": "policy-engine-a760684121f92cf5",
+            "$type": "com.publicdomainrelay.temp.compute.vm",
+            "network": "500G",
+            "location": {
+              "region": "west",
+              "country": "USA"
+            },
+            "createdAt": "2026-06-05T08:39:17.001Z",
+            "user_data": "#cloud-config\n\nusers:\n  - name: agent\n    gecos: Policy Engine Agent\n    primary_group: agent\n    groups: [users]\n    shell: /bin/bash\n    sudo: \"ALL=(ALL) NOPASSWD:ALL\"\n    lock_passwd: true\n    no_user_group: false\n\nwrite_files:\n  - path: /etc/systemd/system/fedproxy-client.service\n    owner: root:root\n    permissions: '0644'\n    content: |\n      [Unit]\n      Description=FedProxy Client Service\n      After=network-online.target\n      Wants=network-online.target\n\n      [Service]\n      Type=simple\n      User=root\n      WorkingDirectory=/root\n      Environment=\"SERVICE=policy-engine-a760684121f92cf5\"\n      Environment=\"PORT=8080\"\n      Environment=\"ATPRP_URL=https://rp.fedproxy.com\"\n      Environment=\"AUTH_PLUGIN=oidc\"\n      Environment=\"MARKET_ACCEPT_JSON_PATH=/root/secrets/publicdomainrelay.com/market/accept.json\"\n      ExecStart=/usr/local/bin/fedproxy-client\n      Restart=always\n      RestartSec=5\n      TimeoutStopSec=10\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n\n  - path: /etc/systemd/system/policy-engine.service\n    owner: root:root\n    permissions: '0644'\n    content: |\n      [Unit]\n      Description=Policy Engine Service\n      After=network-online.target\n      Wants=network-online.target\n\n      [Service]\n      Type=simple\n      User=agent\n      Group=agent\n      WorkingDirectory=/home/agent\n      Environment=\"BUNDLED_ACTIONS_DIR=/home/agent/bundled-actions\"\n      ExecStart=/usr/local/bin/policy_engine api --bind 127.0.0.1:8080\n      Restart=always\n      RestartSec=5\n      TimeoutStopSec=10\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n\nruncmd:\n  - |\n      set -x\n\n      curl -sfL 'https://github.com/publicdomainrelay/sshai/releases/download/latest/policy_engine_0.0.1-next_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin\n      curl -sfL 'https://github.com/publicdomainrelay/atproto-reverse-proxy/releases/download/latest/atproto-reverse-proxy_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin\n\n      mkdir -pv /home/agent/\n      cd $(mktemp -d)\n      curl -L https://github.com/publicdomainrelay/sshai/archive/main.tar.gz | tar xz --wildcards --no-anchored 'src/policy_engine/bundled-actions/*' --strip-components=1\n      mv -v $(find . -name bundled-actions -type d) /home/agent/bundled-actions\n      chown -R agent:agent /home/agent/bundled-actions\n      cd -\n\n      systemctl start --no-block policy-engine.service\n      systemctl enable policy-engine.service\n      systemctl start --no-block fedproxy-client.service\n      systemctl enable fedproxy-client.service\n      systemctl daemon-reload\n"
+          }
+        }
+      }
+
+runcmd:
+  - ["sh", "-c", "install -d -m 0700 -o root -g root /root/secrets/publicdomainrelay.com/market"]
+  - |
+    set -x
+
+    # curl -sfL -o /usr/local/bin/policy_engine 'https://bin--johnandersen777-bsky-social.fedproxy.com/policy-engine'
+    # chmod 755 /usr/local/bin/policy_engine
+    curl -sfL 'https://github.com/publicdomainrelay/sshai/releases/download/latest/policy_engine_0.0.1-next_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin
+    curl -sfL 'https://github.com/publicdomainrelay/atproto-reverse-proxy/releases/download/latest/atproto-reverse-proxy_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin
+
+    mkdir -pv /home/agent/
+    cd $(mktemp -d)
+    curl -L https://github.com/publicdomainrelay/sshai/archive/main.tar.gz | tar xz --wildcards --no-anchored 'src/policy_engine/bundled-actions/*' --strip-components=1
+    mv -v $(find . -name bundled-actions -type d) /home/agent/bundled-actions
+    chown -R agent:agent /home/agent
+    cd -
+
+    systemctl enable policy-engine.service
+    systemctl start --no-block policy-engine.service
+    bash -xe /usr/local/bin/wait-for-health http://127.0.0.1:8080 &
+    systemctl start --no-block fedproxy-client.service
+    systemctl enable fedproxy-client.service

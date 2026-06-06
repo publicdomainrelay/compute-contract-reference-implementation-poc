@@ -73,6 +73,32 @@ async function runCapture(cmd: string, args: string[]): Promise<string> {
   return new TextDecoder().decode(stdout).trim();
 }
 
+// Run a shell command inside the chroot via plain chroot + bind mounts.
+// We deliberately avoid systemd-nspawn: inside a container without systemd/dbus
+// (e.g. the qemu-builder image) nspawn aborts with "Failed to open system bus"
+// because it can't allocate a machine scope. chroot needs no bus and works both
+// in a privileged container and on the host. Requires root (sudo) and
+// CAP_SYS_ADMIN (docker --privileged) to bind-mount /proc, /sys, /dev.
+async function inChroot(chrootDir: string, cmd: string): Promise<void> {
+  console.log(`\n[CHROOT ${chrootDir}] ${cmd}`);
+  const script =
+    `cd="$1"
+mkdir -p "$cd/proc" "$cd/sys" "$cd/dev" "$cd/run"
+mountpoint -q "$cd/proc" || mount -t proc proc "$cd/proc"
+mountpoint -q "$cd/sys"  || mount -t sysfs sys "$cd/sys"
+mountpoint -q "$cd/dev"  || mount --rbind /dev "$cd/dev"
+mountpoint -q "$cd/run"  || mount -t tmpfs tmpfs "$cd/run"
+# Installing systemd/resolved turns the chroot's /etc/resolv.conf into a
+# dangling symlink to /run/systemd/resolve/stub-resolv.conf; drop it first so
+# we write a real resolv.conf each time and DNS keeps working across calls.
+rm -f "$cd/etc/resolv.conf" 2>/dev/null || true
+cp -fL /etc/resolv.conf "$cd/etc/resolv.conf" 2>/dev/null || true
+chroot "$cd" /bin/sh -c "$2"; rc=$?
+umount -R "$cd/run" "$cd/dev" "$cd/sys" "$cd/proc" 2>/dev/null || true
+exit $rc`;
+  await run("sudo", ["sh", "-c", script, "_", chrootDir, cmd]);
+}
+
 async function getLatestKernelVersion(chrootDir: string): Promise<string> {
   const modulesDir = `${chrootDir}/lib/modules`;
   const entries = [];
@@ -101,33 +127,13 @@ async function readStdin(): Promise<string> {
 // --- Distro configs ---
 
 async function installFedora(chrootDir: string): Promise<void> {
-  await run("sudo", [
-    "systemd-nspawn",
-    "-D",
-    chrootDir,
-    "dnf",
-    "-y",
-    "install",
-    "systemd",
-    "kernel-core",
-    "cloud-init",
-    "dracut",
-    "dracut-live",
-    "dracut-network",
-    "btrfs-progs",
-    "util-linux",
-    "rsyslog",
-    "openssh-server",
-    "vim",
-    "tmux",
-    "sudo",
-    "jq",
-  ]);
+  await inChroot(chrootDir,
+    "dnf -y install systemd kernel-core cloud-init dracut dracut-live " +
+    "dracut-network btrfs-progs util-linux rsyslog openssh-server vim tmux sudo jq");
 }
 
 async function installUbuntu(chrootDir: string): Promise<void> {
-  const nspawn = (cmd: string) =>
-    run("sudo", ["systemd-nspawn", "--timezone=off", "--bind-ro=/etc/resolv.conf", "-D", chrootDir, "sh", "-c", cmd]);
+  const nspawn = (cmd: string) => inChroot(chrootDir, cmd);
 
   await nspawn(
     "ln -sf /usr/share/zoneinfo/UTC /etc/localtime && " +
@@ -149,28 +155,15 @@ async function installUbuntu(chrootDir: string): Promise<void> {
     "DEBIAN_FRONTEND=noninteractive apt-get update && " +
     "DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
   );
-  // The live root is an overlayfs. Docker/buildkit overlayfs snapshots cannot
-  // be stacked on top of an overlayfs lowerdir (nested overlay -> mount fails
-  // with "invalid argument"). Mount /var/lib/docker and /var/lib/containerd on
-  // dedicated ext4 data disks (LABEL=DOCKERDATA on /dev/vdc, CTRDDATA on
-  // /dev/vdd, created at run time) so the storage drivers sit on a real fs.
-  // nofail: boot still succeeds if the disks are absent. RequiresMountsFor
-  // ordering guarantees the mounts land before the daemons start their stores.
-  await nspawn(
-    "mkdir -p /var/lib/docker /var/lib/containerd && " +
-    "printf 'LABEL=DOCKERDATA /var/lib/docker ext4 defaults,nofail 0 2\\nLABEL=CTRDDATA /var/lib/containerd ext4 defaults,nofail 0 2\\n' >> /etc/fstab && " +
-    "mkdir -p /etc/systemd/system/docker.service.d /etc/systemd/system/containerd.service.d && " +
-    "printf '[Unit]\\nRequiresMountsFor=/var/lib/docker /var/lib/containerd\\n' > /etc/systemd/system/docker.service.d/10-storage.conf && " +
-    "printf '[Unit]\\nRequiresMountsFor=/var/lib/containerd\\n' > /etc/systemd/system/containerd.service.d/10-storage.conf",
-  );
   // DHCP on all ethernet so systemd-resolved gets upstream DNS at boot.
-  // Must run WITHOUT --bind-ro=/etc/resolv.conf so we can replace the symlink.
-  await run("sudo", ["systemd-nspawn", "--timezone=off", "-D", chrootDir, "sh", "-c",
+  // The trailing rm/ln replaces the resolv.conf we copied in with the
+  // resolved stub symlink that the booted VM uses.
+  await nspawn(
     "mkdir -p /etc/systemd/network && " +
     "printf '[Match]\\nName=e*\\n\\n[Network]\\nDHCP=yes\\n\\n[DHCP]\\nUseDNS=yes\\nUseDomains=yes\\n' > /etc/systemd/network/20-wired.network && " +
     "systemctl enable systemd-networkd systemd-resolved && " +
     "rm -f /etc/resolv.conf && ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf",
-  ]);
+  );
 }
 
 async function findKernelFedora(chrootDir: string): Promise<string> {
@@ -218,11 +211,18 @@ const DISTRO_CONFIGS: Record<Distro, DistroConfig> = {
     ociSource: "docker://docker.io/library/ubuntu:latest",
     install: installUbuntu,
     findKernel: findKernelUbuntu,
-    // dracut-ng 110 (Ubuntu): rd.overlay=<dev> both enables overlayfs and names
-    // the backing device. The 70overlayfs module auto-creates the overlay on a
-    // bare ext4 vdb. rd.live.overlay.nouserconfirmprompt suppresses the legacy
-    // dmsquash-live "Press [Enter]" prompt that otherwise blocks an automated boot.
-    kernelAppend: "console=ttyS0 root=live:LABEL=LIVEOS rd.live.image rd.overlay=/dev/vdb rd.live.overlay.nouserconfirmprompt init=/usr/lib/systemd/systemd",
+    // rd.overlay is deliberately OMITTED. When it names a device (rd.overlay=/dev/vdb)
+    // BOTH dmsquash-live-root and 70overlayfs honor it and race to mount that device:
+    // dmsquash mounts it at /run/initramfs/overlayfs first, then 70overlayfs fails to
+    // mount it at /run/overlayfs-backing ("already mounted") and silently falls back to
+    // a tmpfs overlay. A tmpfs root overlay then makes /var/lib/{docker,containerd}
+    // overlay-on-overlay and the in-VM container build dies ("not supported as upperdir").
+    // Instead our custom 90pdroverlay dracut module (injected at build time) owns the
+    // overlay backing on LABEL=OVERLAY. dmsquash still forces overlayfs=required because
+    // the squashfs root contains /usr, and its generator mounts the overlay onto /sysroot
+    // using the /run/overlayfs + /run/ovlwork symlinks our module creates.
+    // rd.live.overlay.nouserconfirmprompt suppresses the legacy dmsquash "Press [Enter]".
+    kernelAppend: "console=ttyS0 root=live:LABEL=LIVEOS rd.live.image rd.live.overlay.nouserconfirmprompt init=/usr/lib/systemd/systemd",
   },
 };
 
@@ -285,7 +285,109 @@ async function buildCommand(distro: Distro) {
     `echo "${journalConf}" > ${CHROOT_DIR}/etc/systemd/journald.conf.d/serial.conf`,
   ]);
 
+  // 2b. Docker/containerd storage on dedicated ext4 disks (ubuntu only).
+  // The live root is overlayfs; docker + buildkit cannot stack an overlay
+  // on top of an overlayfs lowerdir (nested overlay -> mount fails with
+  // "invalid argument"). Bind /var/lib/docker and /var/lib/containerd to ext4
+  // data disks (LABEL=DOCKERDATA, CTRDDATA) created at run time so the storage
+  // drivers sit on a real fs. Run unconditionally (idempotent) so an existing
+  // chroot picks this up after just deleting the cached liveos img.
+  // RequiresMountsFor orders the mounts before the daemons touch their stores.
+  if (distro === "ubuntu") {
+    console.log("==> Configuring docker/containerd storage disks...");
+    const fstabLines =
+      "LABEL=DOCKERDATA /var/lib/docker ext4 defaults,nofail 0 2\n" +
+      "LABEL=CTRDDATA /var/lib/containerd ext4 defaults,nofail 0 2\n";
+    await run("sudo", [
+      "sh",
+      "-c",
+      `set -e; ` +
+      `mkdir -p ${CHROOT_DIR}/var/lib/docker ${CHROOT_DIR}/var/lib/containerd ` +
+      `${CHROOT_DIR}/etc/systemd/system/docker.service.d ` +
+      `${CHROOT_DIR}/etc/systemd/system/containerd.service.d; ` +
+      // strip any prior entries, then re-append (idempotent)
+      `sed -i '/LABEL=DOCKERDATA/d;/LABEL=CTRDDATA/d' ${CHROOT_DIR}/etc/fstab 2>/dev/null || true; ` +
+      // %b (not %s) so the \n escapes in fstabLines become real newlines;
+      // %s wrote a literal "\n" and collapsed both entries onto one unparsable
+      // line, so systemd generated no .mount units and the disks never mounted.
+      `printf '%b' ${JSON.stringify(fstabLines)} >> ${CHROOT_DIR}/etc/fstab; ` +
+      `printf '[Unit]\\nRequiresMountsFor=/var/lib/docker /var/lib/containerd\\n' ` +
+      `> ${CHROOT_DIR}/etc/systemd/system/docker.service.d/10-storage.conf; ` +
+      `printf '[Unit]\\nRequiresMountsFor=/var/lib/containerd\\n' ` +
+      `> ${CHROOT_DIR}/etc/systemd/system/containerd.service.d/10-storage.conf`,
+    ]);
+  }
+
+  // 2c. Inject custom dracut module 90pdroverlay (ubuntu only).
+  // It runs as a pre-mount hook BEFORE 70overlayfs and deterministically mounts
+  // the LABEL=OVERLAY ext4 disk as the live root overlay backing, creating the
+  // /run/overlayfs + /run/ovlwork symlinks that dmsquash's generated sysroot.mount
+  // (Type=overlay) consumes. This replaces the rd.overlay=<device> path that races
+  // dmsquash vs 70overlayfs and degrades to a tmpfs root overlay. See kernelAppend.
+  if (distro === "ubuntu") {
+    console.log("==> Injecting 90pdroverlay dracut module...");
+    const moduleSetup = `#!/bin/bash
+# 90pdroverlay - deterministic persistent root overlay backing.
+# Owns /run/overlayfs + /run/ovlwork (upper/work on the ext4 disk labelled
+# OVERLAY) so the live root overlay is backed by a real disk, not the tmpfs
+# fallback dmsquash-live/70overlayfs hit when they race for the device.
+check() { return 0; }
+depends() { echo base; }
+installkernel() { hostonly="" instmods overlay ext4; }
+install() {
+    inst_multiple mount mkdir ln udevadm
+    inst_hook pre-mount 00 "$moddir/pdr-overlay.sh"
+}
+`;
+    const pdrOverlay = `#!/bin/sh
+command -v getarg > /dev/null || . /lib/dracut-lib.sh
+
+# Run before 70overlayfs (pre-mount 01) so we own the overlay backing.
+# Idempotent across the pre-mount/pre-pivot passes.
+[ -h /run/overlayfs ] && return 0
+
+label="\${PDR_OVERLAY_LABEL:-OVERLAY}"
+dev="/dev/disk/by-label/$label"
+
+# Local virtio disk; present by pre-mount, but settle to be safe.
+i=0
+while [ ! -b "$dev" ] && [ "$i" -lt 50 ]; do
+    udevadm settle --timeout=1 2>/dev/null || sleep 0.1
+    i=$((i + 1))
+done
+
+if [ ! -b "$dev" ]; then
+    warn "pdroverlay: $dev not found; leaving overlay backing to default"
+    return 0
+fi
+
+mkdir -m 0755 -p /run/overlayfs-backing
+if mount -t ext4 "$dev" /run/overlayfs-backing; then
+    mkdir -m 0755 -p /run/overlayfs-backing/overlay /run/overlayfs-backing/ovlwork
+    ln -sf /run/overlayfs-backing/overlay /run/overlayfs
+    ln -sf /run/overlayfs-backing/ovlwork /run/ovlwork
+    info "pdroverlay: persistent root overlay on $dev"
+else
+    warn "pdroverlay: mount $dev failed; falling back to tmpfs overlay"
+fi
+return 0
+`;
+    // base64 the file bodies to avoid all shell quoting/expansion hazards.
+    const b64 = (s: string) => btoa(s);
+    await run("sudo", [
+      "sh",
+      "-c",
+      `set -e; d=${CHROOT_DIR}/usr/lib/dracut/modules.d/90pdroverlay; mkdir -p "$d"; ` +
+      `echo ${b64(moduleSetup)} | base64 -d > "$d/module-setup.sh"; ` +
+      `echo ${b64(pdrOverlay)} | base64 -d > "$d/pdr-overlay.sh"; ` +
+      `chmod 0755 "$d/module-setup.sh" "$d/pdr-overlay.sh"`,
+    ]);
+  }
+
   // 3. Build initrd with dmsquash-live
+  const dracutMods = distro === "ubuntu"
+    ? "dmsquash-live overlayfs pdroverlay"
+    : "dmsquash-live overlayfs";
   const initrdPath = `${CHROOT_DIR}/boot/initrd.img`;
   // The distro packages ship a stock /boot/initrd.img (without dmsquash-live),
   // so guard on our own marker rather than initrd.img existence — otherwise the
@@ -295,28 +397,17 @@ async function buildCommand(distro: Distro) {
   if (!(await exists(initrdMarker))) {
     console.log("==> Building initrd...");
     const liveConf =
-      `add_dracutmodules+=" dmsquash-live overlayfs "\nfilesystems+=" squashfs overlay ext4 "\ncompress="zstd"\nhostonly="no"\n`;
+      `add_dracutmodules+=" ${dracutMods} "\nfilesystems+=" squashfs overlay ext4 "\ncompress="zstd"\nhostonly="no"\n`;
     await run("sudo", [
       "sh",
       "-c",
-      `echo '${liveConf}' > ${CHROOT_DIR}/etc/dracut.conf.d/live.conf`,
+      `mkdir -p ${CHROOT_DIR}/etc/dracut.conf.d && echo '${liveConf}' > ${CHROOT_DIR}/etc/dracut.conf.d/live.conf`,
     ]);
 
     const kver = await getLatestKernelVersion(CHROOT_DIR);
-    await run("sudo", [
-      "systemd-nspawn",
-      "-D",
-      CHROOT_DIR,
-      "dracut",
-      "--force",
-      "--no-hostonly",
-      "--add",
-      "dmsquash-live overlayfs",
-      "--filesystems",
-      "squashfs overlay ext4",
-      "/boot/initrd.img",
-      kver,
-    ]);
+    await inChroot(CHROOT_DIR,
+      `dracut --force --no-hostonly --add '${dracutMods}' ` +
+      `--filesystems 'squashfs overlay ext4' /boot/initrd.img '${kver}'`);
     await run("sudo", ["touch", initrdMarker]);
 
     const user = Deno.env.get("USER");
