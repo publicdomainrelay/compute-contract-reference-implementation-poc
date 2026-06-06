@@ -368,7 +368,7 @@ async function discoverAndNotifyBidders(
   rfpCid: string,
   payloadNsid: string,
   log: RFPLogger,
-): Promise<void> {
+): Promise<Set<string>> {
   log("discovering bidders via vouches", { repoDid: trigger.repoDid, knot: trigger.knot });
 
   const accountsToCheck = new Set<string>([trigger.repoDid]);
@@ -393,6 +393,8 @@ async function discoverAndNotifyBidders(
       notifyBidderViaOffering(did, rfpUri, rfpCid, payloadNsid, log)
     ),
   );
+
+  return vouchedDids;
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +406,7 @@ async function collectBidsForRfp(
   jetstreamUrl: string,
   windowMs: number,
   log: RFPLogger,
+  allowedDids: Set<string>,
 ): Promise<CollectedBid[]> {
   const bids: CollectedBid[] = [];
   const seen = new Set<string>();
@@ -411,6 +414,10 @@ async function collectBidsForRfp(
   // Pre-seed from any bids already submitted via sendBid HTTP route.
   const pre = pendingBids.get(rfpUri) ?? [];
   for (const b of pre) {
+    if (!allowedDids.has(b.did)) {
+      log("bid rejected: DID not in allowed set", { did: b.did, uri: b.uri });
+      continue;
+    }
     if (!seen.has(b.uri)) { seen.add(b.uri); bids.push(b); }
   }
   pendingBids.delete(rfpUri);
@@ -427,6 +434,10 @@ async function collectBidsForRfp(
       // Drain any bids that arrived via sendBid during the window.
       const direct = pendingBids.get(rfpUri) ?? [];
       for (const b of direct) {
+        if (!allowedDids.has(b.did)) {
+          log("bid rejected: DID not in allowed set", { did: b.did, uri: b.uri });
+          continue;
+        }
         if (!seen.has(b.uri)) { seen.add(b.uri); bids.push(b); }
       }
       pendingBids.delete(rfpUri);
@@ -460,6 +471,11 @@ async function collectBidsForRfp(
       const bidUri = `at://${did}/${BID_NSID}/${commit.rkey}`;
       if (seen.has(bidUri)) return;
       seen.add(bidUri);
+
+      if (!did || !allowedDids.has(did)) {
+        log("bid rejected: DID not in allowed set", { did, bidUri });
+        return;
+      }
 
       log("bid received", { bidUri, did });
       bids.push({
@@ -679,7 +695,7 @@ export async function marketRFPSubmitWorkflow(
 
   // Discover vouched bidders and notify them about the RFP before opening the window.
   const rfpUri = rfpRef.uri;
-  await discoverAndNotifyBidders(
+  const allowedBidderDids = await discoverAndNotifyBidders(
     { repoDid: trigger.repoDid, knot: trigger.knot },
     rfpUri,
     rfpRef.cid,
@@ -687,8 +703,8 @@ export async function marketRFPSubmitWorkflow(
     log,
   );
 
-  // Listen for bids during the bid window
-  const bids = await collectBidsForRfp(rfpUri, config.jetstreamUrl, config.bidWindowMs, log);
+  // Listen for bids during the bid window — only accept from allowed DIDs.
+  const bids = await collectBidsForRfp(rfpUri, config.jetstreamUrl, config.bidWindowMs, log, allowedBidderDids);
 
   if (bids.length === 0) {
     throw new Error(`No bids received for RFP ${rfpUri} within ${config.bidWindowMs}ms`);
