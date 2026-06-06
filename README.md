@@ -4,3 +4,5 @@
 > it all is organized in a way that makes sense and lexicon makes sense
 
 Draft RFC: https://requested.fyi/d/did:plc:5svqtrhheairglgiiyvutzik/3mn3lewitmq2u
+
+[![asciicast](https://asciinema.org/a/1199578.svg)](https://asciinema.org/a/1199578)
