@@ -1,0 +1,44 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.agent.class",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "An agent class definition. Acts as a template that agents are instantiated from. The class is a named bundle of skills (strongRefs to com.publicdomainrelay.temp.agent.skill records) plus optional metadata. Instantiating an agent from a class means spawning a runtime (or sub-agent context) seeded with this skill set.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["name", "description", "skills", "createdAt"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Human-readable name of the agent class, e.g. 'compute-requester'."
+          },
+          "description": {
+            "type": "string",
+            "description": "Description of what agents instantiated from this class are for and what they can do."
+          },
+          "skills": {
+            "type": "array",
+            "description": "Strong references to com.publicdomainrelay.temp.agent.skill records that compose this class.",
+            "items": { "type": "ref", "ref": "com.atproto.repo.strongRef" }
+          },
+          "parent": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Optional strongRef to a parent agent.class. Instantiated agents inherit the parent's skills as well as this class's skills."
+          },
+          "spawnsSubAgent": {
+            "type": "boolean",
+            "description": "If true, agents of this class are intended to be spawned as sub-agents from a parent agent's flow rather than as a top-level runtime."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "ISO 8601 timestamp when this class record was created."
+          }
+        }
+      }
+    }
+  }
+}

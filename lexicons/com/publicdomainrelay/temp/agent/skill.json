@@ -1,0 +1,65 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.agent.skill",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "An agent skill record that describes a capability the agent can perform, with examples and property references.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["name", "description", "content", "createdAt"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Human-readable name of the skill."
+          },
+          "description": {
+            "type": "string",
+            "description": "Instructions for when and how to use this skill."
+          },
+          "content": {
+            "type": "string",
+            "description": "The skill itself."
+          },
+          "examples": {
+            "type": "array",
+            "description": "Strong references to example records demonstrating this skill.",
+            "items": {
+              "type": "ref",
+              "ref": "com.atproto.repo.strongRef"
+            }
+          },
+          "property_references": {
+            "type": "array",
+            "description": "Annotated path-value pairs describing fields within the example records. Each entry either carries a literal string value or a strongRef that resolves (recursively) to the value at that path.",
+            "items": {
+              "type": "ref",
+              "ref": "#propertyReference"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "ISO 8601 timestamp when this skill record was created."
+          }
+        }
+      }
+    },
+    "propertyReference": {
+      "type": "object",
+      "description": "A single path-annotated value reference within a skill's example records. Carries either a literal string or a strongRef pointing to the value.",
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "JSONPath-like dotted path into the resolved example tree, e.g. '.examples[].value.payload.value.user_data'."
+        },
+        "ref": {
+          "type": "ref",
+          "ref": "com.atproto.repo.strongRef",
+          "description": "Strong reference to a record that contains the example data."
+        }
+      }
+    }
+  }
+}

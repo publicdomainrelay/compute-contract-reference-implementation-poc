@@ -1,0 +1,43 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.bids.x402",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Includes pricing/payment terms and x402 endpoint for issuing a receipt against an accept.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "cost",
+          "currency",
+          "frequency",
+          "prepay",
+          "url"
+        ],
+        "properties": {
+          "cost": {
+            "type": "unknown",
+            "description": "Numeric price (integer or float) per the chosen frequency."
+          },
+          "currency": {
+            "type": "string",
+            "description": "Currency code, e.g. 'USDC'."
+          },
+          "frequency": {
+            "type": "string",
+            "description": "Billing frequency, e.g. 'monthly', 'hourly', 'one-time'."
+          },
+          "prepay": {
+            "type": "boolean",
+            "description": "Whether payment is required before compute starts."
+          },
+          "url": {
+            "type": "string",
+            "description": "x402 payment URL template (may contain {at} and {cid} placeholders for the com.publicdomainrelay.temp.market.accept AT URI/CID)."
+          }
+        }
+      }
+    }
+  }
+}

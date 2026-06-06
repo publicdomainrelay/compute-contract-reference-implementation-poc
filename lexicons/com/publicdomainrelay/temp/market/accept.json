@@ -1,0 +1,35 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.accept",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Acceptance of a bid on an RFP",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "rfp",
+          "bid"
+        ],
+        "properties": {
+          "rfp": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the rfp record (for example a com.publicdomainrelay.temp.market.rfp)."
+          },
+          "bid": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the bid record (for example a com.publicdomainrelay.temp.market.bid.x402)."
+          },
+          "payload": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the accept record if there is anything to note about the acceptance (for example a com.publicdomainrelay.temp.market.accept.x402)."
+          }
+        }
+      }
+    }
+  }
+}

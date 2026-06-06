@@ -1,0 +1,67 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.compute.vm",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Descibes a virtual machine",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "cpus",
+          "mem",
+          "disk",
+          "network",
+          "role",
+          "user_data"
+        ],
+        "properties": {
+          "cpus": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Number of vCPUs requested."
+          },
+          "mem": {
+            "type": "string",
+            "description": "Memory request, e.g. '512M', '4G'."
+          },
+          "disk": {
+            "type": "string",
+            "description": "Disk request, e.g. '10G'."
+          },
+          "network": {
+            "type": "string",
+            "description": "Network throughput / quota, e.g. '500G'."
+          },
+          "location": {
+            "type": "ref",
+            "ref": "#location"
+          },
+          "role": {
+            "type": "string",
+            "description": "RBAC role the compute should run under. The requester's did:plc may set this freely, so agents must use their own accounts since we scope roles under accounts."
+          },
+          "user_data": {
+            "type": "string",
+            "description": "cloud-init user data to bootstrap the compute."
+          }
+        }
+      }
+    },
+    "location": {
+      "type": "object",
+      "description": "Geographic placement constraint for the requested compute.",
+      "properties": {
+        "country": {
+          "type": "string",
+          "description": "ISO 3166-1 alpha-3 country code or human-readable country name."
+        },
+        "region": {
+          "type": "string",
+          "description": "Region within the country, e.g. 'west'."
+        }
+      }
+    }
+  }
+}
