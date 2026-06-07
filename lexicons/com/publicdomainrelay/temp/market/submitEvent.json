@@ -1,0 +1,47 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.submitEvent",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Submit the AT-URI and CID of an event record directly to the counterparty, bypassing the firehose. Used when the accept or receipt includes a submitEvent endpoint — e.g. so a requester can tell a bidder to delete a VM whose workflow finished, or whose policy engine never came up, since the bidder treats the VM as a black box.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["uri", "cid", "record"],
+          "properties": {
+            "uri": {
+              "type": "string",
+              "description": "AT-URI of the event record."
+            },
+            "cid": {
+              "type": "string",
+              "description": "CID of the event record."
+            },
+            "record": {
+              "type": "ref",
+              "ref": "com.publicdomainrelay.temp.market.event",
+              "description": "The event record itself, including a strong reference to the receipt it pertains to."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["ok"],
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      "errors": [
+        { "name": "InvalidRequest" }
+      ]
+    }
+  }
+}

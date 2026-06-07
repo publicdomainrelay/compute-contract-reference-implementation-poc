@@ -1,0 +1,28 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.compute.events.vm.delete",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Requests that the provider delete/tear down a provisioned VM — e.g. because its workflow finished, or because its policy engine never came up. Sent by the requester, since the provider treats the VM as a black box and cannot observe these conditions itself.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "reason",
+          "createdAt"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Why the VM should be deleted, e.g. 'workflow_complete' or 'policy_engine_never_came_up'."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

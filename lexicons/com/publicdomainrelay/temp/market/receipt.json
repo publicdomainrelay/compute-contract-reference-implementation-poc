@@ -33,6 +33,10 @@
             "type": "ref",
             "ref": "com.atproto.repo.strongRef",
             "description": "Strong reference to the receipt record if there is anything to note about the receipt (for example a com.publicdomainrelay.temp.market.receipt.x402)."
+          },
+          "submitEvent": {
+            "type": "string",
+            "description": "Endpoint to send AT-URI and CID of com.publicdomainrelay.temp.market.event records to, scoped to this receipt's strongRef. Used by the requester to report lifecycle events the provider cannot observe itself (e.g. compute.events.vm.delete when a workflow finishes or its policy engine never comes up), since the provider treats provisioned resources as a black box."
           }
         }
       }

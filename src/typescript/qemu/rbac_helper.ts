@@ -411,8 +411,14 @@ export async function raiseIfUnauthorizedServiceAuth(
   token: string,
   path: string,
   method: string,
+  // TODO validIss
+  validIss: callback,
 ): Promise<AuthToken> {
   const { iss, sub, payload } = await validateATProtoServiceAuth(token, service);
+  if (!await validIss()) {
+  //
+    throw new UnauthorizedException(`unable to authorize: rbac lookup failed for actx=${actx}: ${String(err)}`);
+
   const pdsURL = await resolvePDS(iss);
   const rbac = await getRBACRecord(pdsURL, iss, service, scope);
   checkRBACPolicy(rbac, sub, path, method);

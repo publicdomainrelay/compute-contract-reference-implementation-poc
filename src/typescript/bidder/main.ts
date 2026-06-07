@@ -32,14 +32,24 @@ const BIDS_X402_NSID = "com.publicdomainrelay.temp.market.bids.x402";
 const ACCEPT_NSID = "com.publicdomainrelay.temp.market.accept";
 const RECEIPT_NSID = "com.publicdomainrelay.temp.market.receipt";
 const OFFERING_NSID = "com.publicdomainrelay.temp.market.offering";
+const EVENT_NSID = "com.publicdomainrelay.temp.market.event";
+const SUBMIT_EVENT_NSID = "com.publicdomainrelay.temp.market.submitEvent";
+const VM_DELETE_EVENT_NSID = "com.publicdomainrelay.temp.compute.events.vm.delete";
 const RBAC_NSID = "com.fedproxy.rbac";
+
+// Maps `${receiptUri}#${receiptCid}` -> DigitalOcean droplet id, so that when
+// the requester reports a com.publicdomainrelay.temp.compute.events.vm.delete
+// event (workflow finished, or the policy engine never came up — things only
+// the requester can observe, since the bidder treats VMs as a black box) we
+// know which droplet to tear down.
+const receiptDroplets = new Map<string, number | string>();
 
 const ACCEPT_PATH_RECORD = "$HOME/secrets/publicdomainrelay.com/market/accept.json";
 const ACCEPT_PATH_VM = "/root/secrets/publicdomainrelay.com/market/accept.json";
 
 const CID_RE = /^(bafy|z)[A-Za-z0-9]+$/;
 
-// SECURITY (SSRF): rfp.sendBid is an attacker-controllable URL read from an RFP
+// SECURITY (SSRF): rfp.submitBid is an attacker-controllable URL read from an RFP
 // record. Block non-http(s) schemes and cloud metadata hosts unconditionally;
 // block private/loopback ranges when MARKET_BLOCK_PRIVATE_EGRESS is set (off by
 // default so localhost dev/e2e keeps working).
@@ -89,9 +99,11 @@ type VM = {
   _cid?: string;
 };
 
-type RFP = { payload: StrongRef; sendBid?: string; _uri?: string; _cid?: string };
+type RFP = { payload: StrongRef; submitBid?: string; _uri?: string; _cid?: string };
 type Bid = { rfp: StrongRef; payload: StrongRef; config?: StrongRef; _uri?: string; _cid?: string };
-type Accept = { rfp: StrongRef; bid: StrongRef; payload?: StrongRef; _uri?: string; _cid?: string };
+type Accept = { rfp: StrongRef; bid: StrongRef; payload?: StrongRef; submitEvent?: string; _uri?: string; _cid?: string };
+type Event = { receipt: StrongRef; payload: StrongRef; _uri?: string; _cid?: string };
+type VMDeleteEvent = { reason: string; _uri?: string; _cid?: string };
 type BidsX402 = { cost: unknown; currency: string; frequency: string; prepay: boolean; url: string; _uri?: string; _cid?: string };
 type WIFSimple = Record<string, unknown> & { _uri?: string; _cid?: string };
 
@@ -561,6 +573,21 @@ async function createDroplet(vm: VM, requesterDid: string): Promise<unknown> {
   return json;
 }
 
+async function deleteDroplet(dropletId: number | string, reason: string): Promise<void> {
+  log("info", "deleting droplet", { dropletId, reason });
+  const token = await getServiceAuthToken();
+  const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/droplets/${dropletId}`, {
+    method: "DELETE",
+    headers: { "Authorization": `Bearer ${token}` },
+  });
+  if (res.status >= 400 && res.status !== 404) {
+    const body = await res.text();
+    log("error", "DO delete droplet failed", { dropletId, status: res.status, body });
+    return;
+  }
+  log("info", "droplet deleted", { dropletId, reason });
+}
+
 // ---------------------------------------------------------------------------
 // hono app
 // ---------------------------------------------------------------------------
@@ -696,7 +723,17 @@ app.get("/receipt/*", async (c) => {
 
   const { repo: requesterDid } = parseAtUri(accept._uri);
   // TODO retry droplet creation on failure
-  await createDroplet(vm, requesterDid);
+  const dropletJson = await createDroplet(vm, requesterDid) as { droplet?: { id?: number | string } };
+  const dropletId = dropletJson.droplet?.id;
+
+  // The bidder treats the VM as a black box — it has no visibility into the
+  // policy engine running inside it. The requester is the one watching the VM
+  // come up and the workflow run to completion, so it reports back via
+  // submitEvent (compute.events.vm.delete) when the droplet should be torn
+  // down — either because the workflow finished or the policy engine never
+  // came up. submitEventUrl is handed back below so the caller knows where to
+  // send those events, keyed by a strongRef to this receipt.
+  const submitEventUrl = `${BASE_URL}/xrpc/${SUBMIT_EVENT_NSID}`;
 
   const res = await agent.com.atproto.repo.createRecord({
     repo: agent.assertDid,
@@ -706,12 +743,21 @@ app.get("/receipt/*", async (c) => {
       rfp: { $type: "com.atproto.repo.strongRef", uri: accept.rfp.uri, cid: accept.rfp.cid },
       bid: { $type: "com.atproto.repo.strongRef", uri: bid._uri, cid: bid._cid },
       accept: { $type: "com.atproto.repo.strongRef", uri: acceptAtUri, cid: acceptCid },
+      submitEvent: submitEventUrl,
       createdAt: new Date().toISOString(),
     },
   });
 
   const id = res.data.uri.split("/").slice(-1)[0];
-  return c.json({ id, uri: res.data.uri, cid: res.data.cid });
+
+  if (dropletId !== undefined) {
+    receiptDroplets.set(`${res.data.uri}#${res.data.cid}`, dropletId);
+    log("info", "tracking droplet for receipt", { receiptUri: res.data.uri, receiptCid: res.data.cid, dropletId });
+  } else {
+    log("warn", "no droplet id returned, cannot map receipt to droplet for cleanup", { dropletJson });
+  }
+
+  return c.json({ id, uri: res.data.uri, cid: res.data.cid, submitEvent: submitEventUrl });
 });
 
 // ---------------------------------------------------------------------------
@@ -775,18 +821,18 @@ async function createAndSubmitBid(
 
   log("info", "bidRecord", { bidRecord: bidRecord });
 
-  if (rfpRecord.sendBid) {
+  if (rfpRecord.submitBid) {
     try {
-      assertSafeEgressUrl(rfpRecord.sendBid);
-      const res = await fetch(rfpRecord.sendBid, {
+      assertSafeEgressUrl(rfpRecord.submitBid);
+      const res = await fetch(rfpRecord.submitBid, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ uri: bidRecord.data.uri, cid: bidRecord.data.cid, record: bid }),
         signal: AbortSignal.timeout(10000),
       });
-      log("info", "sendBid POST", { url: rfpRecord.sendBid, status: res.status });
+      log("info", "submitBid POST", { url: rfpRecord.submitBid, status: res.status });
     } catch (err) {
-      log("warn", "sendBid POST failed", { url: rfpRecord.sendBid, err: String(err) });
+      log("warn", "submitBid POST failed", { url: rfpRecord.submitBid, err: String(err) });
     }
   }
 
@@ -884,6 +930,49 @@ app.post("/xrpc/com.publicdomainrelay.temp.market.submitRfp", async (c) => {
   log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
 
   return c.json({ ok: true, bidUri, bidCid });
+});
+
+// ---------------------------------------------------------------------------
+// POST /xrpc/com.publicdomainrelay.temp.market.submitEvent  { uri, cid, record }
+//
+// The bidder treats provisioned VMs as a black box — it never talks to the
+// policy engine running inside one. Only the requester can observe whether
+// the workload finished or whether the policy engine ever came up at all, so
+// it reports that back here as a com.publicdomainrelay.temp.market.event
+// wrapping a com.publicdomainrelay.temp.compute.events.vm.delete payload. We
+// resolve the event's strongRef to the receipt we minted for this contract
+// and tear down the matching droplet.
+// ---------------------------------------------------------------------------
+
+app.post(`/xrpc/${SUBMIT_EVENT_NSID}`, async (c) => {
+  let body: { uri?: string; cid?: string; record?: Event };
+  try { body = await c.req.json(); } catch { return c.json({ error: "InvalidRequest", message: "invalid JSON" }, 400); }
+  const { uri, cid, record } = body;
+  if (!uri || !cid || !record) return c.json({ error: "InvalidRequest", message: "missing uri, cid, or record" }, 400);
+
+  log("info", "submitEvent received", { uri, cid });
+
+  const eventRecord = await resolveAs<Event & { $type?: string }>(uri, cid);
+  if (eventRecord.$type !== EVENT_NSID) return c.json({ error: "InvalidRequest", message: `expected ${EVENT_NSID}` }, 400);
+  const receiptKey = `${eventRecord.receipt.uri}#${eventRecord.receipt.cid}`;
+  const dropletId = receiptDroplets.get(receiptKey);
+  if (dropletId === undefined) {
+    log("warn", "submitEvent: no droplet tracked for receipt", { receipt: eventRecord.receipt });
+    return c.json({ error: "InvalidRequest", message: "unknown receipt" }, 400);
+  }
+
+  const payload = await resolveAs<Record<string, unknown>>(eventRecord.payload.uri, eventRecord.payload.cid);
+  const payloadNsid = (payload as { $type?: string }).$type ?? eventRecord.payload.uri.split("/")[3];
+  if (payloadNsid !== VM_DELETE_EVENT_NSID) {
+    log("info", "submitEvent: ignoring non-delete event", { payloadNsid });
+    return c.json({ ok: true });
+  }
+
+  const deleteEvent = payload as unknown as VMDeleteEvent;
+  await deleteDroplet(dropletId, deleteEvent.reason ?? "vm.delete event received");
+  receiptDroplets.delete(receiptKey);
+
+  return c.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------

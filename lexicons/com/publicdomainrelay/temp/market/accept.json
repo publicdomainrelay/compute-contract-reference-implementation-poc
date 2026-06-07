@@ -27,6 +27,10 @@
             "type": "ref",
             "ref": "com.atproto.repo.strongRef",
             "description": "Strong reference to the accept record if there is anything to note about the acceptance (for example a com.publicdomainrelay.temp.market.accept.x402)."
+          },
+          "submitEvent": {
+            "type": "string",
+            "description": "Endpoint to send AT-URI and CID of com.publicdomainrelay.temp.market.event records to. Optional but bypasses need for events to be seen in firehose since they are sent directly."
           }
         }
       }

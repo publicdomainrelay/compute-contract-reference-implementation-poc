@@ -17,7 +17,7 @@
             "ref": "com.atproto.repo.strongRef",
             "description": "Strong reference to the domain-specific payload record (for example a com.publicdomainrelay.temp.compute.vm)."
           },
-          "sendBid": {
+          "submitBid": {
             "type": "string",
             "description": "Endpoint to send AT-URI and CID of bid to. Optional but bypasses need for bids to be seen in firehose since they are sent directly"
           }

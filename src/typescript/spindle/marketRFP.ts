@@ -47,6 +47,8 @@ const RECEIPT_NSID = "com.publicdomainrelay.temp.market.receipt";
 const BIDS_X402_NSID = "com.publicdomainrelay.temp.market.bids.x402";
 const RBAC_NSID   = "com.fedproxy.rbac";
 const SSH_KEY_NSID = "com.fedproxy.sshPublicKey";
+const EVENT_NSID = "com.publicdomainrelay.temp.market.event";
+const VM_DELETE_EVENT_NSID = "com.publicdomainrelay.temp.compute.events.vm.delete";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -74,7 +76,7 @@ type CollectedBid = {
   config?: Record<string, unknown>;
 };
 
-// Per-RFP queue for bids submitted directly via HTTP (sendBid endpoint).
+// Per-RFP queue for bids submitted directly via HTTP (submitBid endpoint).
 // Keyed by rfp AT-URI. Spindle's XRPC route pushes here; collectBidsForRfp drains it.
 export const pendingBids: Map<string, CollectedBid[]> = new Map();
 
@@ -101,6 +103,11 @@ export interface MarketRFPConfig {
 export interface MarketRFPResult {
   taskId: string;
   peUrl: string;
+  // Reports a compute.events.vm.delete event to the provider's submitEvent
+  // endpoint (workflow finished, or — when called from the catch around
+  // waitForPolicyEngine — the policy engine never came up). The provider
+  // can't see either condition itself since it treats the VM as a black box.
+  reportVmDelete: (reason: string) => Promise<void>;
 }
 
 export interface PolicyEngineRequest {
@@ -448,7 +455,7 @@ async function collectBidsForRfp(
   const bids: CollectedBid[] = [];
   const seen = new Set<string>();
 
-  // Pre-seed from any bids already submitted via sendBid HTTP route.
+  // Pre-seed from any bids already submitted via submitBid HTTP route.
   const pre = pendingBids.get(rfpUri) ?? [];
   for (const b of pre) {
     if (!allowedDids.has(b.did)) {
@@ -468,7 +475,7 @@ async function collectBidsForRfp(
     let ws: WebSocket;
     const timer = setTimeout(() => {
       try { ws.close(); } catch { /* ignore */ }
-      // Drain any bids that arrived via sendBid during the window.
+      // Drain any bids that arrived via submitBid during the window.
       const direct = pendingBids.get(rfpUri) ?? [];
       for (const b of direct) {
         if (!allowedDids.has(b.did)) {
@@ -718,7 +725,7 @@ export async function marketRFPSubmitWorkflow(
   log("compute.vm created", { uri: vmRef.uri });
 
   // Create market.rfp record wrapping the VM
-  const sendBidUrl = spindleHostname
+  const submitBidUrl = spindleHostname
     ? `https://${spindleHostname}/xrpc/com.publicdomainrelay.temp.market.submitBid`
     : undefined;
   const rfpRecord: Record<string, unknown> = {
@@ -727,7 +734,7 @@ export async function marketRFPSubmitWorkflow(
     payload: vmRef,
     createdAt: new Date().toISOString(),
   };
-  if (sendBidUrl) rfpRecord.sendBid = sendBidUrl;
+  if (submitBidUrl) rfpRecord.submitBid = submitBidUrl;
   const rfpRef = await atprotoCreateRecord(agent, RFP_NSID, rfpRecord);
   log("market.rfp created", { uri: rfpRef.uri });
 
@@ -769,13 +776,18 @@ export async function marketRFPSubmitWorkflow(
     cid: winner.cid,
   };
 
-  // Accept the winning bid
-  const acceptRecord = {
+  // Accept the winning bid. submitEvent tells the bidder where it can report
+  // events about the resource it provisions (e.g. compute.events.vm.started,
+  // .onNetwork) directly, bypassing the firehose — mirrors rfp.submitBid.
+  const acceptRecord: Record<string, unknown> = {
     $type: ACCEPT_NSID,
     rfp: rfpRef,
     bid: bidRef,
     createdAt: new Date().toISOString(),
   };
+  if (spindleHostname) {
+    acceptRecord.submitEvent = `https://${spindleHostname}/xrpc/com.publicdomainrelay.temp.market.submitEvent`;
+  }
   const acceptRef = await atprotoCreateRecord(agent, ACCEPT_NSID, acceptRecord);
   log("market.accept created", { uri: acceptRef.uri });
 
@@ -847,7 +859,12 @@ export async function marketRFPSubmitWorkflow(
   const rbacRef = await atprotoCreateRecord(agent, RBAC_NSID, rbacRecord);
   log("com.fedproxy.rbac created", { uri: rbacRef.uri, subject: agentDid, serviceName });
 
-  // Submit to bidder's x402 receipt endpoint (creates market.receipt)
+  // Submit to bidder's x402 receipt endpoint (creates market.receipt). The
+  // response carries a strongRef to the receipt plus the bidder's submitEvent
+  // endpoint — the channel we use to tell it to delete the VM later, since the
+  // bidder treats provisioned VMs as a black box and can't observe that itself.
+  let receiptRef: StrongRef | undefined;
+  let providerSubmitEventUrl: string | undefined;
   const x402Payload = winner.payload;
   if (x402Payload) {
     const baseUrl = String(x402Payload.url ?? "");
@@ -865,7 +882,12 @@ export async function marketRFPSubmitWorkflow(
           signal: AbortSignal.timeout(30000),
         });
         if (res.ok) {
-          log("x402 receipt submitted", { status: res.status });
+          const body = await res.json() as { uri?: string; cid?: string; submitEvent?: string };
+          if (body.uri && body.cid) {
+            receiptRef = { $type: "com.atproto.repo.strongRef", uri: body.uri, cid: body.cid };
+          }
+          providerSubmitEventUrl = body.submitEvent;
+          log("x402 receipt submitted", { status: res.status, receiptRef, providerSubmitEventUrl });
         } else {
           log("x402 receipt non-ok", { status: res.status });
         }
@@ -874,6 +896,41 @@ export async function marketRFPSubmitWorkflow(
       }
     }
   }
+
+  // Reports a compute.events.vm.delete event back to the provider's
+  // submitEvent endpoint — used both when the workflow finishes and when the
+  // policy engine never comes up, so the provider knows to tear the VM down.
+  const reportVmDelete = async (reason: string): Promise<void> => {
+    if (!receiptRef || !providerSubmitEventUrl) {
+      log("cannot report vm.delete: missing receipt strongRef or provider submitEvent endpoint", { receiptRef, providerSubmitEventUrl, reason });
+      return;
+    }
+    try {
+      assertSafeEgressUrl(providerSubmitEventUrl);
+      const nowIso = new Date().toISOString();
+      const deletePayloadRef = await atprotoCreateRecord(agent, VM_DELETE_EVENT_NSID, {
+        $type: VM_DELETE_EVENT_NSID,
+        reason,
+        createdAt: nowIso,
+      });
+      const eventRecord = {
+        $type: EVENT_NSID,
+        receipt: receiptRef,
+        payload: deletePayloadRef,
+        createdAt: nowIso,
+      };
+      const eventRef = await atprotoCreateRecord(agent, EVENT_NSID, eventRecord);
+      const res = await fetch(providerSubmitEventUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uri: eventRef.uri, cid: eventRef.cid, record: eventRecord }),
+        signal: AbortSignal.timeout(10000),
+      });
+      log("submitEvent vm.delete POST", { url: providerSubmitEventUrl, reason, status: res.status });
+    } catch (err) {
+      log("submitEvent vm.delete POST failed", { url: providerSubmitEventUrl, reason, err: String(err) });
+    }
+  };
 
   // Watch jetstream for com.fedproxy.sshPublicKey with our service name
   // This tells us the VM has booted, started the policy engine, and registered itself.
@@ -889,8 +946,15 @@ export async function marketRFPSubmitWorkflow(
   const peUrl = `https://${serviceName}--${config.handle.replace(/\./g, "-")}.${config.fedproxyHost}`;
   log("policy engine URL", { peUrl });
 
-  // Poll until policy engine is ready
-  await waitForPolicyEngine(peUrl, config.peReadyTimeoutMs, log);
+  // Poll until policy engine is ready — if it never comes up, the bidder has
+  // no way to know (it never talks to the policy engine), so we tell it to
+  // delete the VM ourselves before giving up on the workflow.
+  try {
+    await waitForPolicyEngine(peUrl, config.peReadyTimeoutMs, log);
+  } catch (err) {
+    await reportVmDelete("policy_engine_never_came_up");
+    throw err;
+  }
 
   // Submit workflow to the remote policy engine
   const req = {
@@ -928,7 +992,7 @@ export async function marketRFPSubmitWorkflow(
   if (!taskId) throw new Error("Remote PE returned no task ID");
 
   log("workflow submitted to remote PE", { taskId, peUrl });
-  return { taskId, peUrl };
+  return { taskId, peUrl, reportVmDelete };
 }
 
 // ---------------------------------------------------------------------------

@@ -184,6 +184,10 @@ interface Run {
   startedAt: Date;
   status: PolicyEngineStatus["status"];
   peUrl: string;
+  // Set for COMPUTE_PROVIDER=market.rfp runs — reports compute.events.vm.delete
+  // to the bidder when the workflow finishes, since the bidder treats the VM
+  // as a black box and has no other way to know it's done.
+  reportVmDelete?: (reason: string) => Promise<void>;
 }
 
 // runKey(knot, pipelineRkey, workflow) → Run
@@ -942,6 +946,12 @@ async function trackRun(run: Run): Promise<void> {
 
     if (terminal) {
       log("info", "trackRun terminal", { taskId: run.taskId, workflow: run.workflow, status: status.status, exitStatus });
+      // Tell the bidder to delete the VM — it can't see the workflow finish itself.
+      if (run.reportVmDelete) {
+        run.reportVmDelete("workflow_complete").catch((err) =>
+          log("error", "reportVmDelete failed", { taskId: run.taskId, workflow: run.workflow, err: String(err) })
+        );
+      }
       // Persist console output so /logs works after a server restart.
       const key = runKey(run.knot, run.pipelineRkey, run.workflow);
       try {
@@ -976,6 +986,7 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
 
       let taskId: string;
       let peUrl: string = POLICY_ENGINE_URL;
+      let reportVmDelete: ((reason: string) => Promise<void>) | undefined;
       broadcastStatus(rkey, stem, "submitted", undefined, trigger.knot, trigger.pipelineRkey);
       try {
         if (COMPUTE_PROVIDER === "market.rfp") {
@@ -985,6 +996,7 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
           const result = await marketRFPSubmitWorkflow(wfObj, trigger, rfpConfig, hostnameForRepo(trigger.repoDid), (line) => preLogs.push(line));
           taskId = result.taskId;
           peUrl = result.peUrl;
+          reportVmDelete = result.reportVmDelete;
         } else {
           taskId = await submitWorkflow(wfObj, trigger);
         }
@@ -1011,6 +1023,7 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
         startedAt: new Date(),
         status: "submitted",
         peUrl,
+        reportVmDelete,
       };
       runs.set(key, run);
       db.runs[key] = {
@@ -1462,7 +1475,7 @@ app.post("/xrpc/sh.tangled.repo.removeSecret", async (c) => {
 });
 
 // /xrpc/com.publicdomainrelay.temp.market.submitBid  { uri, cid, rfpUri }
-// Bidders POST here when RFP.sendBid is set, bypassing the firehose.
+// Bidders POST here when RFP.submitBid is set, bypassing the firehose.
 // uri+cid identify the bid AT record; rfpUri routes it to the right collector.
 app.post("/xrpc/com.publicdomainrelay.temp.market.submitBid", async (c) => {
   let body: { uri?: string; cid?: string; rfpUri?: string };
@@ -1483,6 +1496,23 @@ app.post("/xrpc/com.publicdomainrelay.temp.market.submitBid", async (c) => {
   pendingBids.set(rfpUri, queue);
 
   log("info", "submitBid received", { uri, cid, rfpUri });
+  return c.json({ ok: true });
+});
+
+// /xrpc/com.publicdomainrelay.temp.market.submitEvent  { uri, cid, record }
+// Bidders POST here when accept.submitEvent is set, bypassing the firehose,
+// to report lifecycle events about the VM they provisioned for us (e.g.
+// compute.events.vm.started / .onNetwork — things they can observe about the
+// resource itself, as opposed to the workflow running inside it).
+app.post("/xrpc/com.publicdomainrelay.temp.market.submitEvent", async (c) => {
+  let body: { uri?: string; cid?: string; record?: { receipt?: { uri?: string; cid?: string }; payload?: { uri?: string; cid?: string } } };
+  try { body = await c.req.json(); } catch { return c.json({ error: "InvalidRequest", message: "invalid JSON" }, 400); }
+  const { uri, cid, record } = body;
+  if (!uri || !cid || !record?.receipt || !record?.payload) {
+    return c.json({ error: "InvalidRequest", message: "missing uri, cid, or record" }, 400);
+  }
+
+  log("info", "submitEvent received", { uri, cid, receipt: record.receipt, payload: record.payload });
   return c.json({ ok: true });
 });
 

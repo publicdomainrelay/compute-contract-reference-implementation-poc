@@ -1,0 +1,23 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.compute.events.vm.started",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Reports that a provisioned VM has started booting.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}
