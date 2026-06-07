@@ -34,6 +34,7 @@ import { ProvisioningData, validate as provisioningValidate } from "./provisioni
 // ---------------------------------------------------------------------------
 
 const PORT = Number(Deno.env.get("PORT") ?? 8080);
+const OPERATOR_HANDLE = Deno.env.get("OPERATOR_HANDLE") ?? "";
 const VM_IMAGE = Deno.env.get("VM_IMAGE") ?? "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner";
 const CACHE_DIR = `${Deno.env.get("HOME")}/.cache/simple-qemu`;
 
@@ -260,7 +261,7 @@ app.use("/v2/account", async (c, next) => {
   try {
     const token = extractBearer(c.req.header("Authorization"));
     const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
-    const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", token, "/v2/account", c.req.method);
+    const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", OPERATOR_HANDLE, token, "/v2/account", c.req.method);
     c.set("authToken", authToken);
     await next();
   } catch (err) {
@@ -273,7 +274,7 @@ app.use("/v2/droplets", async (c, next) => {
   try {
     const token = extractBearer(c.req.header("Authorization"));
     const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
-    const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", token, c.req.path, c.req.method);
+    const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", OPERATOR_HANDLE, token, c.req.path, c.req.method);
     c.set("authToken", authToken);
     await next();
   } catch (err) {
@@ -286,7 +287,7 @@ app.use("/v2/droplets/*", async (c, next) => {
   try {
     const token = extractBearer(c.req.header("Authorization"));
     const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
-    const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", token, c.req.path, c.req.method);
+    const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", OPERATOR_HANDLE, token, c.req.path, c.req.method);
     c.set("authToken", authToken);
     await next();
   } catch (err) {

@@ -81,6 +81,11 @@ interface RBACRecord {
   roles: Record<string, RBACRole>;
 }
 
+interface ServiceAllowlistRecord {
+  protects: Record<string, RBACProtects>;
+  allowed: Record<string, string[]>;
+}
+
 // ---------------------------------------------------------------------------
 // DID resolution
 // ---------------------------------------------------------------------------
@@ -238,6 +243,72 @@ async function getRBACRecord(pdsURL: string, did: string, service: string, scope
 
   if (total === 0) throw new Error(`no com.fedproxy.rbac record found for did=${did}`);
   return joined;
+}
+
+// ---------------------------------------------------------------------------
+// com.publicdomainrelay.temp.auth.allowlist.rbacDid record fetch (paginated)
+// Lets a service operator restrict which issuer DIDs may call a given
+// service+scope, independent of the issuer's own RBAC grant.
+// ---------------------------------------------------------------------------
+
+async function getServiceAllowlist(pdsURL: string, did: string, service: string, scope: string): Promise<ServiceAllowlistRecord> {
+  const joined: ServiceAllowlistRecord = { protects: {}, allowed: {} };
+  let cursor = "";
+  let total = 0;
+
+  let anyProtects = false;
+  for (;;) {
+    const url = new URL(`${pdsURL}/xrpc/com.atproto.repo.listRecords`);
+    url.searchParams.set("repo", did);
+    url.searchParams.set("collection", "com.publicdomainrelay.temp.auth.allowlist.rbacDid");
+    url.searchParams.set("limit", "100");
+    if (cursor) url.searchParams.set("cursor", cursor);
+
+    const res = await fetch(url.toString());
+    if (!res.ok) throw new Error(`listRecords failed pds=${pdsURL} did=${did}: ${res.status}`);
+
+    const out = await res.json() as { records: { uri: string; value: ServiceAllowlistRecord }[]; cursor?: string };
+
+    for (const rec of out.records ?? []) {
+      const allowlist = rec.value;
+      let protectsThis = false;
+      for (const [name, protects] of Object.entries(allowlist.protects ?? {})) {
+        if (protects.service === service || protects.service === "*") {
+          if (protects.scope === scope || protects.scope === "*") {
+            protectsThis = true;
+          }
+          break;
+        }
+      }
+      if (protectsThis !== true) {
+        continue;
+      } else {
+        anyProtects = true;
+      }
+      for (const [name, dids] of Object.entries(allowlist.allowed ?? {})) {
+        joined.allowed[name] = dids;
+      }
+      total++;
+    }
+
+    if (!out.cursor) break;
+    cursor = out.cursor;
+  }
+
+  if (anyProtects === false) throw new Error(`no com.publicdomainrelay.temp.auth.allowlist.rbacDid records found which protect for did=${did} service=${service} scope=${scope}`);
+
+  if (total === 0) throw new Error(`no com.publicdomainrelay.temp.auth.allowlist.rbacDid record found for did=${did}`);
+  return joined;
+}
+
+function checkAllowedToUseService(
+  allowlist: ServiceAllowlistRecord,
+  iss: string,
+): void {
+  for (const dids of Object.values(allowlist.allowed)) {
+    if (dids.includes(iss)) return;
+  }
+  throw new UnauthorizedException(`unable to authorize: issuer ${iss} is not on the operator's service allowlist`);
 }
 
 // ---------------------------------------------------------------------------
@@ -408,17 +479,33 @@ export async function raiseIfUnauthorized(
 export async function raiseIfUnauthorizedServiceAuth(
   service: string,
   scope: string,
+  // Source from OPERATOR_HANDLE env var somewhere up call stack
+  operatorHandle: string,
   token: string,
   path: string,
   method: string,
-  // TODO validIss
-  validIss: callback,
 ): Promise<AuthToken> {
+  // Get the incoming token data
   const { iss, sub, payload } = await validateATProtoServiceAuth(token, service);
-  if (!await validIss()) {
-  //
-    throw new UnauthorizedException(`unable to authorize: rbac lookup failed for actx=${actx}: ${String(err)}`);
 
+  // Check if the OPERATOR_HANDLE trusts the token via our allowlist
+  let operatorDid = operatorHandle;
+  if (!operatorDid.startsWith("did:")) {
+    const resolved = await idResolver.handle.resolve(operatorHandle);
+    if (!resolved) throw new UnauthorizedException(`unable to resolve operator handle: ${operatorHandle}`);
+    operatorDid = resolved;
+  }
+  const operatorPdsURL = await resolvePDS(operatorDid);
+  // checkAllowedToUseService calls listRecords for
+  // com.publicdomainrelay.temp.auth.allowlist.rbacDid
+  // where each record has properties protects{service, scope} and allowed:
+  // [dids], join together similar to RBACRecord and validate that the iss is a
+  // did which the operator of this service wants to be able to call routes here
+  const allowlist = await getServiceAllowlist(operatorPdsURL, operatorDid, service, scope);
+  checkAllowedToUseService(allowlist, iss);
+
+  // Check if the token issuer wants to enable their token to access these
+  // routes
   const pdsURL = await resolvePDS(iss);
   const rbac = await getRBACRecord(pdsURL, iss, service, scope);
   checkRBACPolicy(rbac, sub, path, method);
