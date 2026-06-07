@@ -43,6 +43,9 @@ const RBAC_NSID = "com.fedproxy.rbac";
 // the requester can observe, since the bidder treats VMs as a black box) we
 // know which droplet to tear down.
 const receiptDroplets = new Map<string, number | string>();
+// Tracks the com.fedproxy.rbac record minted for each droplet's receipt, so we
+// can remove it when the droplet is torn down (mirrors receiptDroplets).
+const receiptRbacRecords = new Map<string, StrongRef>();
 
 const ACCEPT_PATH_RECORD = "$HOME/secrets/publicdomainrelay.com/market/accept.json";
 const ACCEPT_PATH_VM = "/root/secrets/publicdomainrelay.com/market/accept.json";
@@ -79,6 +82,17 @@ const enc = new TextEncoder();
 function log(level: LogLevel, msg: string, fields: Record<string, unknown> = {}): void {
   const entry = JSON.stringify({ ts: new Date().toISOString(), level, msg, ...fields });
   Deno.stderr.writeSync(enc.encode(entry + "\n"));
+}
+
+// JSON.stringify with object keys sorted, so structurally-equal records compare
+// equal regardless of the key order the PDS returns them in.
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +294,7 @@ async function isDir(p: string): Promise<boolean> {
   try { return (await Deno.stat(p)).isDirectory; } catch { return false; }
 }
 
-async function configureDropletRbac(doctx: DOContext, vm: VM, requesterDid: string): Promise<void> {
+async function configureDropletRbac(doctx: DOContext, vm: VM, requesterDid: string): Promise<StrongRef> {
   const requesterPlc = requesterDid.split(":").slice(-1)[0];
   const slug = `${doctx.teamUuid}-${requesterPlc}-${vm.role}`;
   const roleName = `ex-${slug}`;
@@ -342,7 +356,7 @@ async function configureDropletRbac(doctx: DOContext, vm: VM, requesterDid: stri
     createdAt: new Date().toISOString(),
   };
   console.error(`[com.fedproxy.rbac] creating`);
-  await atprotoCreateRecord(agent, RBAC_NSID, rbacRecord);
+  const rbacRef = await atprotoCreateRecord(agent, RBAC_NSID, rbacRecord);
   console.error(`[com.fedproxy.rbac] created`);
 
   const rbac = doctx.rbacRepoRoot;
@@ -436,13 +450,35 @@ echo "password=\${TOKEN}"
       console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
     }
   }
+
+  return rbacRef;
+}
+
+// Deletes a com.fedproxy.rbac record previously minted for a droplet, e.g.
+// when the droplet is torn down via a vm.delete event.
+async function deleteRbacRecord(rbacRef: StrongRef, reason: string): Promise<void> {
+  const { repo, collection, rkey } = parseAtUri(rbacRef.uri);
+  log("info", "deleting rbac record", { uri: rbacRef.uri, cid: rbacRef.cid, repo, collection, rkey, agentDid: agent.assertDid, reason });
+  try {
+    const res = await agent.com.atproto.repo.deleteRecord({ repo, collection, rkey });
+    log("info", "rbac record deleted", { uri: rbacRef.uri, reason, status: res.success, headers: res.headers });
+  } catch (err) {
+    log("error", "failed to delete rbac record", {
+      uri: rbacRef.uri,
+      repo,
+      collection,
+      rkey,
+      reason,
+      err: String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+  }
 }
 
 // Creates a separate com.fedproxy.rbac record for scope=account.auth.
 // Protects /v2/account and /v2/droplets* using ATProto service auth tokens
 // (com.atproto.server.getServiceAuth — iss=agentDid, validated via DID doc keys).
 async function configureAccountAuthRbac(): Promise<void> {
-  // TODO Check if this exists and if not then post
   const roleName = `account-auth-${agentDid.split(":").slice(-1)[0]}`;
 
   const rbacRecord = {
@@ -486,6 +522,22 @@ async function configureAccountAuthRbac(): Promise<void> {
     },
     createdAt: new Date().toISOString(),
   };
+
+  const listRes = await agent.com.atproto.repo.listRecords({
+    repo: agentDid,
+    collection: RBAC_NSID,
+    limit: 100,
+  });
+  const { createdAt: _createdAt, ...rbacRecordData } = rbacRecord;
+  const wanted = canonicalJson(rbacRecordData);
+  const existing = listRes.data.records.find((r) => {
+    const { createdAt: _existingCreatedAt, ...value } = r.value as Record<string, unknown>;
+    return canonicalJson(value) === wanted;
+  });
+  if (existing) {
+    console.error(`[com.fedproxy.rbac] account.auth record already exists (${existing.uri})`);
+    return;
+  }
 
   console.error(`[com.fedproxy.rbac] creating account.auth record`);
   await atprotoCreateRecord(agent, RBAC_NSID, rbacRecord);
@@ -544,7 +596,7 @@ function injectAcceptBundle(userData: string, bundle: Record<string, unknown>): 
   return "#cloud-config\n" + yamlStringify(obj, { lineWidth: 0 });
 }
 
-async function createDroplet(vm: VM, requesterDid: string): Promise<unknown> {
+async function createDroplet(vm: VM, requesterDid: string): Promise<{ json: unknown; rbacRef: StrongRef }> {
   const requesterPlc = requesterDid.split(":").slice(-1)[0];
   const rfpRkey = (vm._uri ?? "").split("/")[4] ?? "unknown";
   const name = `${requesterPlc}-${rfpRkey}-${vm._cid ?? ""}`;
@@ -560,7 +612,7 @@ async function createDroplet(vm: VM, requesterDid: string): Promise<unknown> {
   };
   console.error("[do] droplet request:", JSON.stringify(body));
   const doctx = await makeDoctx();
-  await configureDropletRbac(doctx, vm, requesterDid);
+  const rbacRef = await configureDropletRbac(doctx, vm, requesterDid);
   const token = await getServiceAuthToken();
   const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/droplets`, {
     method: "POST",
@@ -570,7 +622,7 @@ async function createDroplet(vm: VM, requesterDid: string): Promise<unknown> {
   const json = await res.json();
   console.error("[do] /v2/droplets:", JSON.stringify(json));
   if (res.status >= 400) throw new Error(`DO /v2/droplets ${res.status}: ${JSON.stringify(json)}`);
-  return json;
+  return { json, rbacRef };
 }
 
 async function deleteDroplet(dropletId: number | string, reason: string): Promise<void> {
@@ -723,7 +775,7 @@ app.get("/receipt/*", async (c) => {
 
   const { repo: requesterDid } = parseAtUri(accept._uri);
   // TODO retry droplet creation on failure
-  const dropletJson = await createDroplet(vm, requesterDid) as { droplet?: { id?: number | string } };
+  const { json: dropletJson, rbacRef } = await createDroplet(vm, requesterDid) as { json: { droplet?: { id?: number | string } }; rbacRef: StrongRef };
   const dropletId = dropletJson.droplet?.id;
 
   // The bidder treats the VM as a black box — it has no visibility into the
@@ -751,8 +803,19 @@ app.get("/receipt/*", async (c) => {
   const id = res.data.uri.split("/").slice(-1)[0];
 
   if (dropletId !== undefined) {
-    receiptDroplets.set(`${res.data.uri}#${res.data.cid}`, dropletId);
-    log("info", "tracking droplet for receipt", { receiptUri: res.data.uri, receiptCid: res.data.cid, dropletId });
+    const receiptKey = `${res.data.uri}#${res.data.cid}`;
+    receiptDroplets.set(receiptKey, dropletId);
+    receiptRbacRecords.set(receiptKey, rbacRef);
+    log("info", "tracking droplet for receipt", {
+      receiptKey,
+      receiptUri: res.data.uri,
+      receiptCid: res.data.cid,
+      dropletId,
+      rbacUri: rbacRef.uri,
+      rbacCid: rbacRef.cid,
+      receiptDropletsSize: receiptDroplets.size,
+      receiptRbacRecordsSize: receiptRbacRecords.size,
+    });
   } else {
     log("warn", "no droplet id returned, cannot map receipt to droplet for cleanup", { dropletJson });
   }
@@ -955,9 +1018,14 @@ app.post(`/xrpc/${SUBMIT_EVENT_NSID}`, async (c) => {
   const eventRecord = await resolveAs<Event & { $type?: string }>(uri, cid);
   if (eventRecord.$type !== EVENT_NSID) return c.json({ error: "InvalidRequest", message: `expected ${EVENT_NSID}` }, 400);
   const receiptKey = `${eventRecord.receipt.uri}#${eventRecord.receipt.cid}`;
+  log("info", "submitEvent: resolved receiptKey", {
+    receiptKey,
+    knownDropletReceiptKeys: [...receiptDroplets.keys()],
+    knownRbacReceiptKeys: [...receiptRbacRecords.keys()],
+  });
   const dropletId = receiptDroplets.get(receiptKey);
   if (dropletId === undefined) {
-    log("warn", "submitEvent: no droplet tracked for receipt", { receipt: eventRecord.receipt });
+    log("warn", "submitEvent: no droplet tracked for receipt", { receiptKey, receipt: eventRecord.receipt });
     return c.json({ error: "InvalidRequest", message: "unknown receipt" }, 400);
   }
 
@@ -969,8 +1037,22 @@ app.post(`/xrpc/${SUBMIT_EVENT_NSID}`, async (c) => {
   }
 
   const deleteEvent = payload as unknown as VMDeleteEvent;
-  await deleteDroplet(dropletId, deleteEvent.reason ?? "vm.delete event received");
+  const reason = deleteEvent.reason ?? "vm.delete event received";
+  await deleteDroplet(dropletId, reason);
   receiptDroplets.delete(receiptKey);
+
+  const rbacRef = receiptRbacRecords.get(receiptKey);
+  if (rbacRef) {
+    log("info", "submitEvent: rbac record found for receipt, deleting", { receiptKey, rbacUri: rbacRef.uri, rbacCid: rbacRef.cid });
+    await deleteRbacRecord(rbacRef, reason);
+    receiptRbacRecords.delete(receiptKey);
+  } else {
+    log("warn", "submitEvent: no rbac record tracked for receipt, skipping cleanup", {
+      receiptKey,
+      receiptRbacRecordsSize: receiptRbacRecords.size,
+      knownRbacReceiptKeys: [...receiptRbacRecords.keys()],
+    });
+  }
 
   return c.json({ ok: true });
 });

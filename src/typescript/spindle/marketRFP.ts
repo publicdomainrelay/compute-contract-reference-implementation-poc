@@ -195,6 +195,16 @@ async function atprotoCreateRecord(
   };
 }
 
+function parseAtUri(uri: string): { repo: string; collection: string; rkey: string } {
+  const parts = uri.slice("at://".length).split("/");
+  return { repo: parts[0], collection: parts[1], rkey: parts[2] };
+}
+
+async function atprotoDeleteRecord(agent: Agent, ref: StrongRef): Promise<void> {
+  const { repo, collection, rkey } = parseAtUri(ref.uri);
+  await agent.com.atproto.repo.deleteRecord({ repo, collection, rkey });
+}
+
 // ---------------------------------------------------------------------------
 // user_data builder
 // ---------------------------------------------------------------------------
@@ -656,6 +666,8 @@ function watchForSshKey(
 
 async function waitForPolicyEngine(peUrl: string, timeoutMs: number, log: RFPLogger): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  const notReadyLogIntervalMs = 10_000;
+  let lastNotReadyLog = 0;
   log("waiting for policy engine", { peUrl, timeoutMs });
 
   while (Date.now() < deadline) {
@@ -665,9 +677,15 @@ async function waitForPolicyEngine(peUrl: string, timeoutMs: number, log: RFPLog
         log("policy engine ready", { peUrl });
         return;
       }
-      log("policy engine not yet ready", { res: res });
+      if (Date.now() - lastNotReadyLog >= notReadyLogIntervalMs) {
+        log("policy engine not yet ready", { res: res });
+        lastNotReadyLog = Date.now();
+      }
     } catch (err) {
-      log("policy engine not yet ready", { err: String(err) });
+      if (Date.now() - lastNotReadyLog >= notReadyLogIntervalMs) {
+        log("policy engine not yet ready", { err: String(err) });
+        lastNotReadyLog = Date.now();
+      }
     }
     await new Promise((r) => setTimeout(r, 200));
   }
@@ -900,7 +918,24 @@ export async function marketRFPSubmitWorkflow(
   // Reports a compute.events.vm.delete event back to the provider's
   // submitEvent endpoint — used both when the workflow finishes and when the
   // policy engine never comes up, so the provider knows to tear the VM down.
+  // The RBAC grant only needs to exist while the VM is alive and registering
+  // its SSH key; once we're tearing the VM down, remove it so stale grants
+  // don't accumulate (mirrors the bidder's deleteRbacRecord for droplet RBAC).
+  let rbacRemoved = false;
+  const removeRbacRecord = async (reason: string): Promise<void> => {
+    if (rbacRemoved) return;
+    rbacRemoved = true;
+    log("com.fedproxy.rbac deleting", { uri: rbacRef.uri, subject: agentDid, serviceName, reason });
+    try {
+      await atprotoDeleteRecord(agent, rbacRef);
+      log("com.fedproxy.rbac deleted", { uri: rbacRef.uri, subject: agentDid, serviceName, reason });
+    } catch (err) {
+      log("com.fedproxy.rbac delete failed", { uri: rbacRef.uri, subject: agentDid, serviceName, reason, err: String(err) });
+    }
+  };
+
   const reportVmDelete = async (reason: string): Promise<void> => {
+    await removeRbacRecord(reason);
     if (!receiptRef || !providerSubmitEventUrl) {
       log("cannot report vm.delete: missing receipt strongRef or provider submitEvent endpoint", { receiptRef, providerSubmitEventUrl, reason });
       return;
@@ -932,28 +967,50 @@ export async function marketRFPSubmitWorkflow(
     }
   };
 
-  // Watch jetstream for com.fedproxy.sshPublicKey with our service name
-  // This tells us the VM has booted, started the policy engine, and registered itself.
-  const sshKeyEvent = await watchForSshKey(
-    serviceName,
-    config.jetstreamUrl,
-    config.vmReadyTimeoutMs,
-    log,
-  );
-  log("VM registered SSH key", { serviceName, did: sshKeyEvent.did });
-
-  // Derive policy engine URL from service name + handle + fedproxy host
+  // Derive policy engine URL from service name + handle + fedproxy host.
+  // This doesn't depend on the jetstream event, so we can start polling it
+  // immediately rather than waiting on the sshPublicKey registration first.
   const peUrl = `https://${serviceName}--${config.handle.replace(/\./g, "-")}.${config.fedproxyHost}`;
   log("policy engine URL", { peUrl });
 
-  // Poll until policy engine is ready — if it never comes up, the bidder has
-  // no way to know (it never talks to the policy engine), so we tell it to
-  // delete the VM ourselves before giving up on the workflow.
+  // Watch jetstream for com.fedproxy.sshPublicKey with our service name (tells
+  // us the VM has booted, started the policy engine, and registered itself)
+  // in parallel with directly polling the policy engine's /health route. The
+  // jetstream event has been known to lag behind the VM actually being ready,
+  // so whichever signal arrives first is good enough to proceed on.
+  const sshKeyPromise = watchForSshKey(serviceName, config.jetstreamUrl, config.vmReadyTimeoutMs, log);
+  const healthPromise = waitForPolicyEngine(peUrl, config.vmReadyTimeoutMs, log);
+  sshKeyPromise.catch(() => {});
+  healthPromise.catch(() => {});
+
+  let sawHealthFirst = false;
   try {
-    await waitForPolicyEngine(peUrl, config.peReadyTimeoutMs, log);
+    const winner = await Promise.any([
+      sshKeyPromise.then((event) => ({ via: "sshKey" as const, event })),
+      healthPromise.then(() => ({ via: "health" as const })),
+    ]);
+    if (winner.via === "sshKey") {
+      log("VM registered SSH key", { serviceName, did: winner.event.did });
+    } else {
+      sawHealthFirst = true;
+      log("policy engine /health came up before sshPublicKey jetstream event, proceeding", { serviceName, peUrl });
+    }
   } catch (err) {
     await reportVmDelete("policy_engine_never_came_up");
-    throw err;
+    throw new Error(`Neither sshPublicKey registration nor policy engine /health became ready: ${String(err)}`);
+  }
+
+  // Poll until policy engine is ready — if it never comes up, the bidder has
+  // no way to know (it never talks to the policy engine), so we tell it to
+  // delete the VM ourselves before giving up on the workflow. Skipped if the
+  // /health poll above already confirmed readiness.
+  if (!sawHealthFirst) {
+    try {
+      await waitForPolicyEngine(peUrl, config.peReadyTimeoutMs, log);
+    } catch (err) {
+      await reportVmDelete("policy_engine_never_came_up");
+      throw err;
+    }
   }
 
   // Submit workflow to the remote policy engine

@@ -334,7 +334,7 @@ function globMatch(pattern: string, s: string): boolean {
   let rest = s;
   for (let i = 0; i < parts.length; i++) {
     const prefix = parts[i];
-    if (i === parts.length - 1) return rest === prefix;
+    if (i === parts.length - 1) return prefix === "" ? true : rest.endsWith(prefix);
     if (prefix.length > 0) {
       const idx = rest.indexOf(prefix);
       if (idx < 0) return false;
