@@ -159,6 +159,8 @@ async function spawnVM(droplet: Droplet, userData: string): Promise<void> {
     args: [
       "run", "-d",
       "--name", containerName,
+      "--memory", "6g",
+      "--memory-swap", "6g",
       "--device", "/dev/kvm",
       "-v", `${CACHE_DIR}:/root/.cache/simple-qemu`,
       "-v", `${udFile}:/tmp/user-data:ro`,
