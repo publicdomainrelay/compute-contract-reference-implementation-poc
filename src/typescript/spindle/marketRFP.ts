@@ -301,7 +301,7 @@ async function getVouchedDids(did: string, log: RFPLogger): Promise<string[]> {
       .filter((r) => (r.value.kind as string | undefined) !== "denounce")
       .map((r) => r.uri.split("/").pop() ?? "")
       .filter((rkey) => rkey.startsWith("did:"));
-    return Array.from(new Set([did, ...vouched]));
+    return Array.from(new Set(vouched));
   } catch (err) {
     log("vouch lookup failed", { did, err: String(err) });
     return [];
@@ -363,15 +363,20 @@ async function notifyBidderViaOffering(
 
 // Discover bidders via repo owner + collaborator vouches, notify them about the RFP.
 async function discoverAndNotifyBidders(
-  trigger: { repoDid: string; knot: string },
+  trigger: { actor: string; knot: string },
   rfpUri: string,
   rfpCid: string,
   payloadNsid: string,
   log: RFPLogger,
 ): Promise<Set<string>> {
-  log("discovering bidders via vouches", { repoDid: trigger.repoDid, knot: trigger.knot });
+  log("discovering bidders via vouches", { owner: trigger.actor, knot: trigger.knot });
 
-  const accountsToCheck = new Set<string>([trigger.repoDid]);
+  // Seed with the repo *owner account* DID (trigger.actor — populated from the
+  // knot's ownerDid, see Pipeline_TriggerRepo.Did in knotserver/internal.go).
+  // trigger.repoDid is a separate repo-identity DID whose PDS is the knot
+  // itself, which doesn't serve listRecords for arbitrary collections — vouch
+  // lookups against it always come back empty.
+  const accountsToCheck = new Set<string>([trigger.actor]);
 
   const collaborators = await getKnotMemberDids(trigger.knot, log);
   for (const c of collaborators) accountsToCheck.add(c);
@@ -696,7 +701,7 @@ export async function marketRFPSubmitWorkflow(
   // Discover vouched bidders and notify them about the RFP before opening the window.
   const rfpUri = rfpRef.uri;
   const allowedBidderDids = await discoverAndNotifyBidders(
-    { repoDid: trigger.repoDid, knot: trigger.knot },
+    { actor: trigger.actor, knot: trigger.knot },
     rfpUri,
     rfpRef.cid,
     VM_NSID,
@@ -903,7 +908,7 @@ export function marketRFPConfigFromEnv(): MarketRFPConfig {
         region:  Deno.env.get("VM_LOCATION_REGION")  ?? "west",
       },
     },
-    bidWindowMs:       parseInt(Deno.env.get("BID_WINDOW_MS")        ?? "5000",  10),
+    bidWindowMs:       parseInt(Deno.env.get("BID_WINDOW_MS")        ?? "30000", 10),
     vmReadyTimeoutMs:  parseInt(Deno.env.get("VM_READY_TIMEOUT_MS")  ?? "600000", 10),
     peReadyTimeoutMs:  parseInt(Deno.env.get("PE_READY_TIMEOUT_MS")  ?? "120000", 10),
   };
