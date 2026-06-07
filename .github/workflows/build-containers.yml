@@ -24,7 +24,7 @@ jobs:
               - 'src/typescript/qemu/qemu-*'
 
       - name: Build qemu runner container
-        if: steps.changes.outputs.qemu == 'true'
+        if: steps.changes.outputs.qemu === true
         run: |
           set -x
           set +e
