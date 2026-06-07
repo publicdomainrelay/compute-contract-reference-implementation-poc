@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="referrer" content="origin-when-cross-origin">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.purple.min.css">
+	<style>
+		code {
+			display: inline;
+			word-break: break-all;
+		}
+		article {
+			max-width: 100%;
+		}
+		.list-item {
+			margin-bottom: 1rem;
+			padding-bottom: 1rem;
+			border-bottom: 1px solid var(--pico-muted-border-color);
+			cursor: pointer;
+		}
+		.list-item:last-child {
+			border-bottom: none;
+			margin-bottom: 0;
+			padding-bottom: 0;
+		}
+		.list-item:hover {
+			background-color: var(--pico-muted-border-color);
+		}
+		#events-output {
+			background-color: var(--pico-code-background-color);
+			color: var(--pico-code-color);
+			font-family: monospace;
+			font-size: 0.85em;
+			padding: 1rem;
+			max-height: 16rem;
+			overflow-y: auto;
+			white-space: pre-wrap;
+			word-break: break-all;
+			margin-bottom: 1rem;
+		}
+		#pipelines-list li {
+			cursor: pointer;
+		}
+		#pipelines-list li:hover {
+			text-decoration: underline;
+		}
+		#log-output {
+			background-color: var(--pico-code-background-color);
+			color: var(--pico-code-color);
+			font-family: monospace;
+			font-size: 0.85em;
+			padding: 1rem;
+			max-height: 32rem;
+			overflow-y: auto;
+			white-space: pre-wrap;
+			word-break: break-all;
+		}
+		.log-line-data { display: block; }
+		.log-line-control { display: block; color: var(--pico-muted-color); font-style: italic; }
+		.log-line-stderr { color: #E37474; }
+		.crumb-link { cursor: pointer; }
+	</style>
+	<title>Tangled Pipelines Viewer</title>
+	<script type="importmap">
+	{
+		"imports": {
+			"@atproto/api": "https://esm.sh/@atproto/api@0.16.4"
+		}
+	}
+	</script>
+</head>
+<body>
+	<main class="container">
+		<section class="content">
+			<header>
+				<hgroup>
+					<h1>Tangled Pipelines Viewer</h1>
+					<h2>Browse repos, pipelines, and live spindle logs over the Atmosphere</h2>
+				</hgroup>
+				<nav>
+					<ul>
+						<li><a target="_blank" href="https://tangled.org">tangled.org</a></li>
+					</ul>
+				</nav>
+			</header>
+
+			<article id="lookup-container">
+				<h3>Look up a repo</h3>
+				<form id="lookup-form">
+					<fieldset role="group">
+						<input name="owner" id="owner-input" placeholder="owner handle or DID, e.g. alice.example.com" style="font-family: monospace;" required>
+						<input name="repo" id="repo-input" placeholder="repo name, e.g. my-cool-repo" style="font-family: monospace;" required>
+						<button id="lookup-button">Load</button>
+					</fieldset>
+				</form>
+				<p id="lookup-error" style="color: #E37474;"></p>
+			</article>
+
+			<nav id="breadcrumbs" aria-label="breadcrumb" style="display: none;">
+				<ul id="breadcrumb-list"></ul>
+			</nav>
+
+			<!-- repo summary -->
+			<article id="repo-container" style="display: none;">
+				<h3 id="repo-title"></h3>
+				<p id="repo-description"></p>
+				<ul id="repo-meta"></ul>
+			</article>
+
+			<!-- live jetstream of pipeline-status events from the repo's spindle -->
+			<article id="events-container" style="display: none;">
+				<h3>Live pipeline events</h3>
+				<p>
+					Subscribed to the spindle's <code>/events</code> stream — every
+					<code>sh.tangled.pipeline.status</code> update appears below as it happens, and
+					builds up the pipeline list beneath it. Runs are saved to your browser's
+					<code>localStorage</code> so they're still here next time you load this repo.
+				</p>
+				<p id="events-status"></p>
+				<div id="events-output"></div>
+
+				<h4>Pipelines seen so far</h4>
+				<p id="pipelines-list-empty" style="display: none;"><em>No pipeline events seen yet — trigger a pipeline run to see it appear here.</em></p>
+				<ul id="pipelines-list"></ul>
+			</article>
+
+			<!-- pipelines: browse on the appview, then jump straight to live logs here -->
+			<article id="pipelines-container" style="display: none;">
+				<h3>Pipelines &amp; Logs</h3>
+				<p>
+					Pipeline and workflow data isn't available over public XRPC — knots emit
+					<code>sh.tangled.pipeline</code> records onto an internal event stream that only the
+					appview indexes, and it serves them as plain HTML with no CORS headers. Browse them
+					there, then paste the pipeline ID and workflow name below to stream live logs straight
+					from the spindle (its <code>/logs/</code> endpoint is a public, unauthenticated websocket).
+				</p>
+				<p>
+					<a id="appview-pipelines-link" target="_blank" href="#">
+						<button class="outline">Browse pipelines on tangled.sh</button>
+					</a>
+				</p>
+				<form id="logs-lookup-form">
+					<fieldset role="group">
+						<input name="pipeline" id="pipeline-input" placeholder="pipeline id, e.g. 3lk2x9f7q2c2a" style="font-family: monospace;" required>
+						<input name="workflow" id="workflow-input" placeholder="workflow name, e.g. build" style="font-family: monospace;" required>
+						<button id="logs-lookup-button">View logs</button>
+					</fieldset>
+				</form>
+			</article>
+
+			<!-- log viewer -->
+			<article id="logs-container" style="display: none;">
+				<h3>Logs: <code id="logs-workflow-name"></code></h3>
+				<p>
+					<a id="appview-workflow-link" target="_blank" href="#">View this workflow on tangled.sh</a>
+					&nbsp;&middot;&nbsp;
+					<button id="logs-disconnect-button" class="secondary outline">Disconnect</button>
+				</p>
+				<div id="log-output"></div>
+			</article>
+
+		</section>
+	</main>
+
+	<script type="module" src="./main.js"></script>
+</body>
+</html>
