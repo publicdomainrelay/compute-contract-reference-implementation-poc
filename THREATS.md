@@ -2,7 +2,8 @@
 
 _Last full re-review: 2026-06-07. Scope: all code under `src/typescript/`
 (`spindle`, `bidder`, `qemu`, `spindle-viewer-spa`, `utils`) plus run scripts,
-Dockerfiles, and cloud-init templates._
+Dockerfiles, and cloud-init templates. The component map and end-to-end auction
+flow analyzed here are diagrammed in [README.md](./README.md)._
 
 This is a **reference / proof-of-concept**. Some findings are inherent to running
 the PoC components directly on the public internet and are flagged as design-level
@@ -19,7 +20,7 @@ the workflow.
 
 | Component | Role | Network exposure |
 |-----------|------|------------------|
-| **spindle** (`spindle/main.ts`, `marketRFP.ts`) | CI backend. Watches knots for `sh.tangled.pipeline` triggers, fetches `.github/workflows/*` at a commit SHA, runs them via a local policy engine **or** auctions them via the market (`COMPUTE_PROVIDER=market.rfp`). | HTTP, behind Caddy (plain reverse proxy, **no auth**) |
+| **spindle** (`spindle/main.ts`, `marketRFP.ts`) | CI backend. Watches knots **and the jetstream firehose** for `sh.tangled.pipeline` triggers, fetches `.github/workflows/*` at a commit SHA, runs them via a local policy engine **or** auctions them via the market (`COMPUTE_PROVIDER=market.rfp`), **actively notifying vouched bidders** (`sh.tangled.graph.vouch` → `market.offering`) via `submitRfp`. | HTTP `:8090`, behind Caddy (plain reverse proxy, **no auth**) |
 | **bidder** (`bidder/main.ts`) | Market seller. Reacts to RFPs, creates bids, and on x402 payment (`/receipt/*`) provisions a droplet through the RBAC-gated compute proxy. | HTTP `:4021` |
 | **qemu / miniCloud** (`qemu/main.ts`, `rbac_helper.ts`, `oidc_helper.ts`, `provisioning.ts`, `database.ts`) | DigitalOcean-compatible API + OIDC issuer. RBAC-gates `/v1/oidc/issue`, `/v2/account`, `/v2/droplets*`; spawns QEMU VMs in Docker. | HTTP `:8080`/`:9000` |
 | **qemu-standalone** (`qemu/qemu-standalone.ts`) | Operator CLI that builds/boots the LiveOS QEMU image (`sudo`, chroot). | none (local CLI) |
@@ -33,8 +34,12 @@ the workflow.
 2. **Knot → spindle** — workflow YAML + trigger metadata are fetched from the knot a
    repo points at; the `knot` hostname becomes an outbound fetch target. A compromised
    knot can serve malicious workflow YAML (inherent CI trust).
-3. **Jetstream firehose → spindle/marketRFP** — bid records are untrusted until the
-   bidder DID is checked against the vouched-DID allowlist.
+3. **Jetstream firehose → spindle/marketRFP** — bid records (firehose + the
+   `submitBid` XRPC push into `pendingBids`) are untrusted until the bidder DID is
+   checked against the vouched-DID allowlist built from `sh.tangled.graph.vouch`
+   (repo owner + knot members). The same discovery step fetches each candidate's
+   record-supplied `market.offering.endpointUrl` and POSTs `submitRfp` to it — an
+   outbound egress driven by record content (egress-validated; see T5).
 4. **Public network → bidder `/receipt`** — provisions real compute; gated by x402
    payment (unless `X402_MAKE_FREE` — see T8).
 5. **VM ↔ qemu OIDC/RBAC** — a booting VM proves possession of its SSH host key to
