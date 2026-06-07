@@ -81,10 +81,10 @@ function effectiveHostname(ownerDid: string): string {
 }
 
 // Returns true if a repo's spindle field points at this spindle instance.
-function matchesThisSpindle(spindle: string | undefined, repoDid: string): boolean {
+function matchesThisSpindle(spindle: string | undefined, ownerDid: string): boolean {
   if (!spindle) return false;
   if (OWNER_DID) return spindle === HOSTNAME;
-  return spindle === effectiveHostname(repoDid);
+  return spindle === effectiveHostname(ownerDid);
 }
 
 // ---------------------------------------------------------------------------
@@ -577,12 +577,12 @@ async function discoverKnotsFromATProto(ownerDid?: string): Promise<void> {
       const spindle = rec.value.spindle as string | undefined;
       const repoDid = rec.value.repoDid as string | undefined;
       const repoName = rec.value.name   as string | undefined;
-      log("debug", "knot-discovery: record", { knot, spindle, repoDid, repoName, matchesHostname: matchesThisSpindle(spindle, repoDid ?? "") });
-      if (knot && matchesThisSpindle(spindle, repoDid ?? "")) {
+      log("debug", "knot-discovery: record", { knot, spindle, repoDid, repoName, matchesHostname: matchesThisSpindle(spindle, ownerDid) });
+      if (knot && matchesThisSpindle(spindle, ownerDid)) {
         watchKnot(knot);
         foundKnots++;
       }
-      if (repoDid && spindle && matchesThisSpindle(spindle, repoDid)) {
+      if (repoDid && spindle && matchesThisSpindle(spindle, ownerDid)) {
         repoDidToSpindle.set(repoDid, spindle);
         log("info", "knot-discovery: authorized repo", { repoDid, repoName, knot });
         foundRepos++;
@@ -594,6 +594,22 @@ async function discoverKnotsFromATProto(ownerDid?: string): Promise<void> {
   }
 
   log("info", "knot-discovery complete", { knots: foundKnots, authorizedRepos: foundRepos });
+}
+
+async function repoRegisteredToThisSpindle(hostname: string, repoDid: string): Promise<bool> {
+  const ownerDid = getOwnerDid(hostname);
+  // for localhost handling
+  if (!ownerDid.startsWith("did:")) {
+    throw new Error(`repoRegisteredToThisSpindle invalid did ownerDid=${ownerDid}`);
+  }
+
+  if (repoDidToSpindle.has(repoDid)) {
+    return true;
+  }
+
+  await discoverKnotsFromATProto(ownerDid);
+
+  return repoDidToSpindle.has(repoDid);
 }
 
 // ---------------------------------------------------------------------------
@@ -622,14 +638,15 @@ function startJetstreamWatcher(): void {
 
       const commit = msg.commit as Record<string, unknown> | undefined;
       const record = commit?.record as Record<string, unknown> | undefined;
-      if (!record) return;
+      const ownerDid = msg.did as string | undefined;
+      if (!record || !ownerDid) return;
 
       const spindle = record.spindle as string | undefined;
       const knot    = record.knot    as string | undefined;
       const repoDid = record.repoDid as string | undefined;
-      if (matchesThisSpindle(spindle, repoDid ?? "")) {
+      if (matchesThisSpindle(spindle, ownerDid)) {
         if (knot) {
-          log("info", "jetstream: new repo points at this spindle", { knot, repoDid });
+          log("info", "jetstream: new repo points at this spindle", { knot, repoDid, ownerDid });
           watchKnot(knot);
         }
         if (repoDid && spindle) {
@@ -1030,6 +1047,14 @@ app.use("*", (c, next) => {
   return next();
 });
 
+// Generic error handler — converts any unhandled exception thrown from a route
+// handler (e.g. repoRegisteredToThisSpindle throwing on an invalid DID) into a
+// JSON error response instead of leaking a stack trace or returning a bare 500.
+app.onError((err, c) => {
+  log("error", "unhandled request error", { method: c.req.method, path: c.req.path, err: String(err) });
+  return c.json({ error: "InternalServerError", message: String(err instanceof Error ? err.message : err) }, 500);
+});
+
 app.get("/", (c) =>
   c.text(`
 
@@ -1361,7 +1386,8 @@ app.post("/xrpc/sh.tangled.pipeline.cancelPipeline", async (c) => {
   if (!pipeline || !repo || !workflow) {
     return c.json({ error: "InvalidRequest", message: "missing pipeline, repo, or workflow" }, 400);
   }
-  if (!repoDidToSpindle.has(repo)) {
+
+  if (!await repoRegisteredToThisSpindle(c.req.header("host") ?? HOSTNAME, trigger.repoDid)) {
     return c.json({ error: "Forbidden", message: "repo not authorized for this spindle" }, 403);
   }
 
@@ -1389,10 +1415,10 @@ app.post("/xrpc/sh.tangled.pipeline.cancelPipeline", async (c) => {
 });
 
 // /xrpc/sh.tangled.repo.listSecrets?repo=<repoDid>
-app.get("/xrpc/sh.tangled.repo.listSecrets", (c) => {
+app.get("/xrpc/sh.tangled.repo.listSecrets", async (c) => {
   const repo = c.req.query("repo");
   if (!repo) return c.json({ error: "InvalidRequest", message: "missing repo" }, 400);
-  if (!repoDidToSpindle.has(repo)) return c.json({ error: "Forbidden", message: "repo not authorized for this spindle" }, 403);
+  if (!await repoRegisteredToThisSpindle(c.req.header("host") ?? HOSTNAME, repo)) return c.json({ error: "Forbidden", message: "repo not authorized for this spindle" }, 403);
   const m = secretsStore.get(repo) ?? new Map<string, SecretEntry>();
   const secrets = [...m.values()].map(({ key, repo: r, createdAt, createdBy }) => ({
     key,
@@ -1414,7 +1440,7 @@ app.post("/xrpc/sh.tangled.repo.addSecret", async (c) => {
   // spindle. NOTE: this does NOT authenticate the *caller* — these endpoints
   // have no caller authentication and must be fronted by an authenticating proxy
   // (or AT Proto service-auth) in production. See SECURITY-THREAT-MODEL.md.
-  if (!repoDidToSpindle.has(repo)) return c.json({ error: "Forbidden", message: "repo not authorized for this spindle" }, 403);
+  if (!await repoRegisteredToThisSpindle(c.req.header("host") ?? HOSTNAME, repo)) return c.json({ error: "Forbidden", message: "repo not authorized for this spindle" }, 403);
   const m = repoSecrets(repo);
   if (m.has(key)) return c.json({ error: "InvalidRequest", message: "key already present" }, 400);
   const host = c.req.header("host") ?? HOSTNAME;
@@ -1428,7 +1454,7 @@ app.post("/xrpc/sh.tangled.repo.removeSecret", async (c) => {
   try { body = await c.req.json(); } catch { return c.json({ error: "InvalidRequest", message: "invalid JSON" }, 400); }
   const { repo, key } = body;
   if (!repo || !key) return c.json({ error: "InvalidRequest", message: "missing repo or key" }, 400);
-  if (!repoDidToSpindle.has(repo)) return c.json({ error: "Forbidden", message: "repo not authorized for this spindle" }, 403);
+  if (!await repoRegisteredToThisSpindle(c.req.header("host") ?? HOSTNAME, repo)) return c.json({ error: "Forbidden", message: "repo not authorized for this spindle" }, 403);
   const m = secretsStore.get(repo);
   if (!m?.has(key)) return c.json({ error: "InvalidRequest", message: "key not found" }, 404);
   m.delete(key);
@@ -1488,8 +1514,8 @@ app.post("/trigger", async (c) => {
   // — an SSRF primitive, since `knot` is used verbatim to build outbound URLs —
   // and (b) execute those workflows / provision paid VMs via market.rfp on the
   // operator's behalf.
-  if (!repoDidToSpindle.has(trigger.repoDid)) {
-    log("warn", "trigger rejected: repo not authorized for this spindle", { repoDid: trigger.repoDid, knot: trigger.knot });
+  if (!await repoRegisteredToThisSpindle(c.req.header("host") ?? HOSTNAME, trigger.repoDid)) {
+    log("warn", "trigger rejected: repo not authorized for this spindle", { repoDid: trigger.repoDid, knot: trigger.knot, repoDidToSpindle: repoDidToSpindle });
     return c.json({ error: "Forbidden", message: "repo not authorized for this spindle" }, 403);
   }
 

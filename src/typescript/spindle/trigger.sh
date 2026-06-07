@@ -15,10 +15,12 @@
 # Override KNOT / REPO_NAME / REPO_DID / DEFAULT_BRANCH / SHA / SPINDLE_URL via env.
 set -euo pipefail
 
-SPINDLE_URL="${SPINDLE_URL:-http://localhost:${PORT:-7777}}"
+# SPINDLE_URL="${SPINDLE_URL:-http://localhost:${PORT:-7777}}"
+SPINDLE_URL="${SPINDLE_URL:-https://did-plc-7nebcphrbnjegrniycnbvyrk.gha.spindle.tangled.fedcicd.com}"
 KNOT="${KNOT:-knot1.tangled.sh}"
 REPO_NAME="${REPO_NAME:-compute-contract-reference-implementation-poc}"
-REPO_DID="${REPO_DID:-did:plc:bbvpwcihkeeztqxk47s5arq3}"
+REPO_DID_PLC_KEY="$(git remote get-url tangled-pub | sed -e 's/.*did:plc://')"
+REPO_DID="${REPO_DID:-did:plc:${REPO_DID_PLC_KEY}}"
 DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
 
 # Resolve the latest SHA on $DEFAULT_BRANCH directly from the knot — the
