@@ -27,6 +27,19 @@ export interface OIDCTokenData {
 
 const ISSUER_URL = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? "http://localhost:8080";
 
+// SECURITY: bound the default token lifetime. Previously tokens minted without an
+// explicit `ttl` defaulted to 100 years (effectively non-expiring), so any leaked
+// token stayed valid forever. Default to 24h; operators can tune via env.
+const DEFAULT_TTL_SECONDS = Number(Deno.env.get("OIDC_DEFAULT_TTL_SECONDS") ?? 60 * 60 * 24);
+
+// Returns true iff `sub` is scoped to `actx`. The subject format is
+// `actx:<actx>[:role:...:...]`, so we require an exact match or an `actx:<actx>:`
+// prefix rather than a loose substring test (which a crafted sub could satisfy).
+export function subMatchesActx(sub: string | undefined, actx: string): boolean {
+  if (!sub) return false;
+  return sub === `actx:${actx}` || sub.startsWith(`actx:${actx}:`);
+}
+
 let _signingKey: CryptoKeyPair | null = null;
 let _publicJwk: jose.JWK | null = null;
 
@@ -107,12 +120,12 @@ export function parseAudience(aud: string): { actx: string; api: string } {
 // ---------------------------------------------------------------------------
 
 export class OIDCToken implements OIDCTokenData {
-  actx: string;
-  api: string;
-  aud: string;
-  sub: string;
-  claims: Record<string, unknown>;
-  asString: string;
+  actx!: string;
+  api!: string;
+  aud!: string;
+  sub!: string;
+  claims!: Record<string, unknown>;
+  asString!: string;
 
   private constructor(data: OIDCTokenData) {
     Object.assign(this, data);
@@ -128,7 +141,7 @@ export class OIDCToken implements OIDCTokenData {
     let audience = `api://${api}?actx=${actx}`;
 
     const sub = claims["sub"] as string | undefined;
-    if (!sub || !sub.includes(`actx:${actx}`)) {
+    if (!subMatchesActx(sub, actx)) {
       throw new Error(`'actx:${actx}' not found in sub '${sub}'`);
     }
 
@@ -139,7 +152,7 @@ export class OIDCToken implements OIDCTokenData {
     if (typeof claims["ttl"] === "number") {
       expTime = Math.floor(Date.now() / 1000) + (claims["ttl"] as number);
     } else {
-      expTime = Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 365 * 100;
+      expTime = Math.floor(Date.now() / 1000) + DEFAULT_TTL_SECONDS;
     }
 
     if (typeof claims["aud"] === "string") {

@@ -1,1 +1,3 @@
 app.db
+# Generated cloud-init can embed short-lived signed provisioning JWTs — do not commit.
+cloud-init-fresh.yaml

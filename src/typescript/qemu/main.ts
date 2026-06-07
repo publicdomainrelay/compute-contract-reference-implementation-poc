@@ -25,7 +25,7 @@
  */
 
 import { Hono } from "https://deno.land/x/hono@v4.3.11/mod.ts";
-import { getPublicJwk, getSigningKey, OIDCToken, UnauthorizedException } from "./oidc_helper.ts";
+import { getPublicJwk, getSigningKey, OIDCToken, UnauthorizedException, subMatchesActx } from "./oidc_helper.ts";
 import { raiseIfUnauthorized, raiseIfUnauthorizedServiceAuth, AuthToken } from "./rbac_helper.ts";
 import { ProvisioningData, validate as provisioningValidate } from "./provisioning.ts";
 
@@ -42,7 +42,7 @@ const CACHE_DIR = `${Deno.env.get("HOME")}/.cache/simple-qemu`;
 // ---------------------------------------------------------------------------
 
 function log(
-  level: "info" | "error" | "warn",
+  level: "info" | "error" | "warn" | "debug",
   msg: string,
   extra?: Record<string, unknown>,
 ) {
@@ -202,7 +202,7 @@ async function spawnVM(droplet: Droplet, userData: string): Promise<void> {
 // App
 // ---------------------------------------------------------------------------
 
-const app = new Hono();
+const app = new Hono<{ Variables: { authToken: AuthToken } }>();
 
 // request logger
 app.use("*", async (c, next) => {
@@ -301,8 +301,8 @@ app.post("/v1/oidc/issue", async (c) => {
     const actx = authToken.actx;
 
     const sub = (body["sub"] as string | undefined) ?? actx;
-    if (!sub.includes(`actx:${actx}`)) {
-      return c.json({ id: "unauthorized", message: `sub must contain actx:${actx}` }, 401);
+    if (!subMatchesActx(sub, actx)) {
+      return c.json({ id: "unauthorized", message: `sub must be scoped to actx:${actx}` }, 401);
     }
 
     const token = await OIDCToken.create(actx, { ...body, sub });
@@ -341,6 +341,7 @@ app.post("/v1/oidc/prove", async (c) => {
       `actx:${oidcToken.actx}`,
       ...dropletTags
         .filter((t) => t.startsWith("oidc-sub:") && t.split(":").length === 3 && t.split(":")[1] !== "actx")
+        // @ts-expect-error retained intentionally (parity); see note below
         .filter((t) => !t.startsWith("oidc-sub:") || !t.split(":").length !== 3)
         .map((t) => t.split(":")[1] + ":" + t.split(":")[2]),
     ].join(":");

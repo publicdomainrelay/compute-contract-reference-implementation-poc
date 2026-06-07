@@ -72,6 +72,7 @@ interface RBACRole {
 
 interface RBACProtects {
   service: string;
+  scope?: string;
 }
 
 interface RBACRecord {
@@ -136,15 +137,6 @@ function urlToDid(url: string): string {
   return `did:web:${host}`;
 }
 
-// Get a short-lived ATProto service auth token targeting the DO/QEMU endpoint.
-// These are non-OIDC JWTs: signed by the PDS, iss=agentDid, validated via DID doc.
-async function getServiceAuthToken(): Promise<string> {
-  // cannot request a method-less token with an expiration more than a minute in the futur
-  const exp = Math.floor(Date.now() / 1000) + 60; // 1 min
-  const res = await agent.com.atproto.server.getServiceAuth({ aud, exp });
-  return res.data.token;
-}
-
 // ---------------------------------------------------------------------------
 // ATProto service auth JWT validation (non-OIDC)
 // Validates com.atproto.server.getServiceAuth tokens against DID doc keys.
@@ -182,7 +174,7 @@ export async function validateATProtoServiceAuth(
     });
 
     // 3. Extract subject (sub) and return
-    const sub = (payload.sub as string | undefined) ?? iss;
+    const sub = ((payload as Record<string, unknown>).sub as string | undefined) ?? iss;
     return { iss, sub, payload };
   } catch (error: any) {
     throw new UnauthorizedException(
@@ -196,7 +188,7 @@ export async function validateATProtoServiceAuth(
 // ---------------------------------------------------------------------------
 
 async function getRBACRecord(pdsURL: string, did: string, service: string, scope: string): Promise<RBACRecord> {
-  const joined: RBACRecord = { policies: {}, roles: {} };
+  const joined: RBACRecord = { protects: {}, policies: {}, roles: {} };
   let cursor = "";
   let total = 0;
 
@@ -386,9 +378,15 @@ export async function raiseIfUnauthorized(
     getIssuers = async (_api: string, _actx: string) => issuers;
     void api;
   } catch (err) {
-    // actx is not a DID or RBAC not found — fall through to own-issuer-only validation
+    // SECURITY: fail closed. This previously returned an empty AuthToken (`{}`),
+    // which made the calling middleware treat the request as authorized while
+    // skipping BOTH OIDC token validation AND the RBAC policy check below — an
+    // authentication/authorization bypass on the privileged /v1/oidc/issue
+    // endpoint (which mints OIDC tokens that grant droplet creation). If we
+    // cannot resolve the actx DID or load its com.fedproxy.rbac record, we have
+    // no basis on which to authorize the caller, so deny the request.
     log("error", "failed to lookup rbac record", { actx: actx, err: String(err) });
-    return {};
+    throw new UnauthorizedException(`unable to authorize: rbac lookup failed for actx=${actx}: ${String(err)}`);
   }
 
   const oidcToken = await OIDCToken.validate(token, getIssuers);

@@ -9,6 +9,7 @@
 
 
 import { Hono } from "npm:hono@^4.12.23";
+import type { ContentfulStatusCode } from "npm:hono@^4.12.23/utils/http-status";
 import { Agent, CredentialSession } from "@atproto/api";
 import { IdResolver } from "@atproto/identity";
 import { getPdsEndpoint } from "@atproto/common-web";
@@ -37,6 +38,25 @@ const ACCEPT_PATH_RECORD = "$HOME/secrets/publicdomainrelay.com/market/accept.js
 const ACCEPT_PATH_VM = "/root/secrets/publicdomainrelay.com/market/accept.json";
 
 const CID_RE = /^(bafy|z)[A-Za-z0-9]+$/;
+
+// SECURITY (SSRF): rfp.sendBid is an attacker-controllable URL read from an RFP
+// record. Block non-http(s) schemes and cloud metadata hosts unconditionally;
+// block private/loopback ranges when MARKET_BLOCK_PRIVATE_EGRESS is set (off by
+// default so localhost dev/e2e keeps working).
+function assertSafeEgressUrl(raw: string): URL {
+  let u: URL;
+  try { u = new URL(raw); } catch { throw new Error(`invalid URL: ${raw}`); }
+  if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error(`blocked URL scheme: ${u.protocol}`);
+  const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host === "169.254.169.254" || host === "metadata.google.internal") throw new Error(`blocked cloud-metadata host: ${host}`);
+  if (Deno.env.get("MARKET_BLOCK_PRIVATE_EGRESS")) {
+    const isPrivate = host === "localhost" || host === "::1" ||
+      /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) ||
+      /^169\.254\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^(fc|fd)/.test(host);
+    if (isPrivate) throw new Error(`blocked private/loopback host: ${host}`);
+  }
+  return u;
+}
 
 // ---------------------------------------------------------------------------
 // Structured logger — JSON to stderr
@@ -571,6 +591,8 @@ function makeFacilitator() {
   // Prefer CDP facilitator if API keys are set; mirrors python (which always
   // points at api.cdp.coinbase.com with JWT headers).
   const url = "https://api.cdp.coinbase.com/platform/v2/x402";
+  // The CDP auth provider is supplied via a field the published FacilitatorConfig
+  // type doesn't declare; cast so this stays runnable while @x402 types catch up.
   return new HTTPFacilitatorClient({
     url,
     // CreateHeadersAuthProvider equivalent. The python uses generate_jwt per
@@ -578,7 +600,8 @@ function makeFacilitator() {
     // bearer JWT for the given request. Implementation lives in @coinbase/x402
     // if present; otherwise users can run with X402_MAKE_FREE=1 for local dev.
     authProvider: cdpAuthProvider(CDP_API_KEY_ID, CDP_API_KEY_SECRET),
-  });
+    // deno-lint-ignore no-explicit-any
+  } as any);
 }
 
 function cdpAuthProvider(_keyId: string, _keySecret: string) {
@@ -614,7 +637,7 @@ if (!X402_MAKE_FREE) {
 // JSON error envelope
 app.onError((err, c) => {
   if (err instanceof HTTPError) {
-    return c.json({ error: "http_error", code: err.status, detail: err.detail }, err.status);
+    return c.json({ error: "http_error", code: err.status, detail: err.detail }, err.status as ContentfulStatusCode);
   }
   console.error("[err]", (err as Error).stack ?? err);
   return c.json({ error: "internal", detail: (err as Error).message }, 500);
@@ -750,6 +773,7 @@ async function createAndSubmitBid(
 
   if (rfpRecord.sendBid) {
     try {
+      assertSafeEgressUrl(rfpRecord.sendBid);
       const res = await fetch(rfpRecord.sendBid, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -848,7 +872,7 @@ app.post("/xrpc/com.publicdomainrelay.temp.market.submitRfp", async (c) => {
     return c.json({ error: "NotApplicable", message: `no offering for ${payloadNsid}` }, 400);
   }
 
-  const { did: rfpOwnerDid } = parseAtUri(rfpUri);
+  const { repo: rfpOwnerDid } = parseAtUri(rfpUri);
 
   const { bidUri, bidCid } =
     await createAndSubmitBid(rfpUri, rfpCid, rfpRecord, `${BASE_URL}/receipt`);

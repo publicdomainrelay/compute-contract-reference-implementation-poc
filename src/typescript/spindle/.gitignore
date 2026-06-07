@@ -1,3 +1,7 @@
 spindle.logs
 spindle-db.json
 spindle-logs-db.json
+# Local runtime state / event log — may contain run metadata; never commit.
+spindle-events-db.json
+spindle-ran.logs
+spindle-ran.yaml

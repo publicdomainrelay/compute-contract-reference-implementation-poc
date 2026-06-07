@@ -1361,6 +1361,9 @@ app.post("/xrpc/sh.tangled.pipeline.cancelPipeline", async (c) => {
   if (!pipeline || !repo || !workflow) {
     return c.json({ error: "InvalidRequest", message: "missing pipeline, repo, or workflow" }, 400);
   }
+  if (!repoDidToSpindle.has(repo)) {
+    return c.json({ error: "Forbidden", message: "repo not authorized for this spindle" }, 403);
+  }
 
   // Extract knot + pipelineRkey from the AT-URI (at://did:web:knot.example.com/collection/rkey)
   // pipeline aturi authority is "did:web:<knot>"
@@ -1389,6 +1392,7 @@ app.post("/xrpc/sh.tangled.pipeline.cancelPipeline", async (c) => {
 app.get("/xrpc/sh.tangled.repo.listSecrets", (c) => {
   const repo = c.req.query("repo");
   if (!repo) return c.json({ error: "InvalidRequest", message: "missing repo" }, 400);
+  if (!repoDidToSpindle.has(repo)) return c.json({ error: "Forbidden", message: "repo not authorized for this spindle" }, 403);
   const m = secretsStore.get(repo) ?? new Map<string, SecretEntry>();
   const secrets = [...m.values()].map(({ key, repo: r, createdAt, createdBy }) => ({
     key,
@@ -1406,6 +1410,11 @@ app.post("/xrpc/sh.tangled.repo.addSecret", async (c) => {
   const { repo, key, value } = body;
   if (!repo || !key || !value) return c.json({ error: "InvalidRequest", message: "missing repo, key, or value" }, 400);
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) return c.json({ error: "InvalidRequest", message: "invalid key identifier" }, 400);
+  // Defense-in-depth: only accept secrets for repos that have opted into this
+  // spindle. NOTE: this does NOT authenticate the *caller* — these endpoints
+  // have no caller authentication and must be fronted by an authenticating proxy
+  // (or AT Proto service-auth) in production. See SECURITY-THREAT-MODEL.md.
+  if (!repoDidToSpindle.has(repo)) return c.json({ error: "Forbidden", message: "repo not authorized for this spindle" }, 403);
   const m = repoSecrets(repo);
   if (m.has(key)) return c.json({ error: "InvalidRequest", message: "key already present" }, 400);
   const host = c.req.header("host") ?? HOSTNAME;
@@ -1419,6 +1428,7 @@ app.post("/xrpc/sh.tangled.repo.removeSecret", async (c) => {
   try { body = await c.req.json(); } catch { return c.json({ error: "InvalidRequest", message: "invalid JSON" }, 400); }
   const { repo, key } = body;
   if (!repo || !key) return c.json({ error: "InvalidRequest", message: "missing repo or key" }, 400);
+  if (!repoDidToSpindle.has(repo)) return c.json({ error: "Forbidden", message: "repo not authorized for this spindle" }, 403);
   const m = secretsStore.get(repo);
   if (!m?.has(key)) return c.json({ error: "InvalidRequest", message: "key not found" }, 404);
   m.delete(key);
@@ -1471,6 +1481,19 @@ app.post("/trigger", async (c) => {
   }
 
   const trigger = body as TriggerPayload;
+
+  // Authorization: only run pipelines for repos that have opted into this
+  // spindle (this mirrors the jetstream knot-event path, which silently drops
+  // triggers whose repoDid is not in repoDidToSpindle). Without this gate an
+  // unauthenticated caller could POST an arbitrary { knot, repoDid, ref } and
+  // make the spindle (a) fetch workflow files from an attacker-chosen knot host
+  // — an SSRF primitive, since `knot` is used verbatim to build outbound URLs —
+  // and (b) execute those workflows / provision paid VMs via market.rfp on the
+  // operator's behalf.
+  if (!repoDidToSpindle.has(trigger.repoDid)) {
+    log("warn", "trigger rejected: repo not authorized for this spindle", { repoDid: trigger.repoDid, knot: trigger.knot });
+    return c.json({ error: "Forbidden", message: "repo not authorized for this spindle" }, 403);
+  }
 
   // Respond immediately; workflow fetch + submission runs in background.
   const responsePromise = triggerWorkflows(trigger);

@@ -125,6 +125,32 @@ function randomHex(bytes = 8): string {
   return Array.from(arr, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// SECURITY (SSRF): server-side fetches whose target comes from an untrusted
+// ATProto record (offering.endpointUrl, bid payload url) are an SSRF primitive.
+// This unconditionally blocks non-http(s) schemes and cloud link-local metadata
+// hosts (no legitimate use), and additionally blocks RFC1918/loopback ranges when
+// MARKET_BLOCK_PRIVATE_EGRESS is set (off by default so localhost dev/e2e works).
+export function assertSafeEgressUrl(raw: string): URL {
+  let u: URL;
+  try { u = new URL(raw); } catch { throw new Error(`invalid URL: ${raw}`); }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new Error(`blocked URL scheme: ${u.protocol}`);
+  }
+  const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host === "169.254.169.254" || host === "metadata.google.internal") {
+    throw new Error(`blocked cloud-metadata host: ${host}`);
+  }
+  if (Deno.env.get("MARKET_BLOCK_PRIVATE_EGRESS")) {
+    const isPrivate =
+      host === "localhost" || host === "::1" ||
+      /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) ||
+      /^169\.254\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+      /^(fc|fd)/.test(host);
+    if (isPrivate) throw new Error(`blocked private/loopback host: ${host}`);
+  }
+  return u;
+}
+
 type RFPLogger = (msg: string, fields?: Record<string, unknown>) => void;
 
 function makeLogger(onLog?: (line: string) => void): RFPLogger {
@@ -345,6 +371,12 @@ async function notifyBidderViaOffering(
     if (!endpointUrl || !Array.isArray(appliesTo)) continue;
     if (!appliesTo.includes(payloadNsid)) continue;
 
+    try {
+      assertSafeEgressUrl(endpointUrl);
+    } catch (err) {
+      log("offering endpointUrl rejected", { bidderDid, endpointUrl, err: String(err) });
+      continue;
+    }
     log("submitting RFP to vouched bidder", { bidderDid, endpointUrl, rfpUri });
     try {
       const res = await fetch(`${endpointUrl.replace(/\/+$/, "")}/xrpc/com.publicdomainrelay.temp.market.submitRfp`, {
@@ -722,6 +754,14 @@ export async function marketRFPSubmitWorkflow(
   log("bid winner selected", { bidUri: winner.uri, did: winner.did, cost: winner.payload?.cost });
   log("winner", { winner: winner });
 
+  // The RBAC grant below is templated from the winner's config (issuer_uri, actx).
+  // A bid without a resolved config cannot be authorized — fail instead of
+  // emitting an RBAC record with `undefined` substituted into the trust fields.
+  if (!winner.config) {
+    throw new Error(`Winning bid ${winner.uri} has no resolved config; cannot build RBAC grant`);
+  }
+  const winnerConfig = winner.config;
+
   const bidRef: StrongRef = {
     $type: "com.atproto.repo.strongRef",
     uri: winner.uri,
@@ -749,10 +789,10 @@ export async function marketRFPSubmitWorkflow(
         definition: {
           // aud is us
           aud: `api://ATProto?actx=${agentDid}`,
-          iss: `${winner.config.issuer_uri}`,
+          iss: `${winnerConfig.issuer_uri}`,
           // actx is them for this simple example
-          // TODO Thi should be templating winner.config.subject
-          sub: `actx:${winner.config.actx}:plc:${agentDidPlcKey}:role:${serviceName}`,
+          // TODO Thi should be templating winnerConfig.subject
+          sub: `actx:${winnerConfig.actx}:plc:${agentDidPlcKey}:role:${serviceName}`,
           policies: ["ssh-key-register"],
         },
       },
@@ -811,6 +851,11 @@ export async function marketRFPSubmitWorkflow(
   if (x402Payload) {
     const baseUrl = String(x402Payload.url ?? "");
     if (baseUrl) {
+      try {
+        assertSafeEgressUrl(baseUrl);
+      } catch (err) {
+        throw new Error(`winning bid x402 url rejected: ${String(err)}`);
+      }
       const receiptUrl = `${baseUrl}/${acceptRef.uri}/${acceptRef.cid}`;
       log("submitting to x402 receipt endpoint", { url: receiptUrl });
       try {
