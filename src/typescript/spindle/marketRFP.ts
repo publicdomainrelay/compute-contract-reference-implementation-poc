@@ -549,6 +549,7 @@ async function resolveAtRef(uri: string): Promise<Record<string, unknown> | unde
 }
 
 async function resolveBidPayloads(bids: CollectedBid[], log: RFPLogger): Promise<void> {
+  log("resolveBidPayloads", { bids: bids })
   await Promise.all(bids.map(async (bid) => {
     if (bid.record.payload?.uri) {
       try {

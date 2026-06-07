@@ -9,7 +9,7 @@
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": ["uri", "cid", "rfpUri"],
+          "required": ["uri", "cid", "record"],
           "properties": {
             "uri": {
               "type": "string",
@@ -19,9 +19,10 @@
               "type": "string",
               "description": "CID of the bid record."
             },
-            "rfpUri": {
-              "type": "string",
-              "description": "AT-URI of the RFP this bid is for."
+            "record": {
+              "type": "ref",
+              "ref": "com.publicdomainrelay.temp.market.bid",
+              "description": "The bid record itself, including a strong reference to the RFP it is for."
             }
           }
         }

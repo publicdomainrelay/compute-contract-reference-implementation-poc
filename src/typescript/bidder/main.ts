@@ -759,17 +759,21 @@ async function createAndSubmitBid(
     },
   });
 
+  const bid = {
+    $type: BID_NSID,
+    rfp: { $type: "com.atproto.repo.strongRef", uri: rfpUri, cid: rfpCid },
+    config: { $type: "com.atproto.repo.strongRef", uri: configRecord.data.uri, cid: configRecord.data.cid },
+    payload: { $type: "com.atproto.repo.strongRef", uri: payloadRecord.data.uri, cid: payloadRecord.data.cid },
+    createdAt: nowIso,
+  };
+
   const bidRecord = await agent.com.atproto.repo.createRecord({
     repo: agent.assertDid,
     collection: BID_NSID,
-    record: {
-      $type: BID_NSID,
-      rfp: { $type: "com.atproto.repo.strongRef", uri: rfpUri, cid: rfpCid },
-      config: { $type: "com.atproto.repo.strongRef", uri: configRecord.data.uri, cid: configRecord.data.cid },
-      payload: { $type: "com.atproto.repo.strongRef", uri: payloadRecord.data.uri, cid: payloadRecord.data.cid },
-      createdAt: nowIso,
-    },
+    record: bid,
   });
+
+  log("info", "bidRecord", { bidRecord: bidRecord });
 
   if (rfpRecord.sendBid) {
     try {
@@ -777,7 +781,7 @@ async function createAndSubmitBid(
       const res = await fetch(rfpRecord.sendBid, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uri: bidRecord.data.uri, cid: bidRecord.data.cid, rfpUri }),
+        body: JSON.stringify({ uri: bidRecord.data.uri, cid: bidRecord.data.cid, record: bid }),
         signal: AbortSignal.timeout(10000),
       });
       log("info", "sendBid POST", { url: rfpRecord.sendBid, status: res.status });

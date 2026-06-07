@@ -1441,8 +1441,10 @@ app.post("/xrpc/sh.tangled.repo.removeSecret", async (c) => {
 app.post("/xrpc/com.publicdomainrelay.temp.market.submitBid", async (c) => {
   let body: { uri?: string; cid?: string; rfpUri?: string };
   try { body = await c.req.json(); } catch { return c.json({ error: "InvalidRequest", message: "invalid JSON" }, 400); }
-  const { uri, cid, rfpUri } = body;
-  if (!uri || !cid || !rfpUri) return c.json({ error: "InvalidRequest", message: "missing uri, cid, or rfpUri" }, 400);
+  const { uri, cid, record } = body;
+  if (!uri || !cid || !record ) return c.json({ error: "InvalidRequest", message: "missing uri, cid, or record" }, 400);
+
+  const rfpUri = record.rfp.uri;
 
   const did = uri.replace("at://", "").split("/")[0];
   const queue = pendingBids.get(rfpUri) ?? [];
@@ -1450,11 +1452,7 @@ app.post("/xrpc/com.publicdomainrelay.temp.market.submitBid", async (c) => {
     did,
     uri,
     cid,
-    record: {
-      $type: "com.publicdomainrelay.temp.market.bid",
-      rfp: { $type: "com.atproto.repo.strongRef", uri: rfpUri, cid: "" },
-      payload: { $type: "com.atproto.repo.strongRef", uri: "", cid: "" },
-    },
+    record: record,
   });
   pendingBids.set(rfpUri, queue);
 
