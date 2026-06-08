@@ -28,7 +28,10 @@
 //   payload.  No local checkout or REPO_PATH is needed.
 
 import { Agent, CredentialSession } from "npm:@atproto/api";
+import { IdResolver } from "npm:@atproto/identity";
+import { verifyJwt } from "npm:@atproto/xrpc-server";
 import { Hono } from "jsr:@hono/hono";
+import { cors } from "jsr:@hono/hono/cors";
 import { parse as parseYaml } from "jsr:@std/yaml";
 import { marketRFPSubmitWorkflow, marketRFPConfigFromEnv, pendingBids } from "./marketRFP.ts";
 
@@ -709,6 +712,45 @@ async function discoverKnotsFromATProto(ownerDid?: string): Promise<void> {
   log("info", "knot-discovery complete", { knots: foundKnots, authorizedRepos: foundRepos });
 }
 
+// ---------------------------------------------------------------------------
+// /trigger auth — ATProto inter-service auth JWT (xrpc service-auth proxying)
+//
+// The viewer SPA signs in (BrowserOAuthClient), then mints a short-lived
+// com.atproto.server.getServiceAuth token bound to TRIGGER_LXM with
+// aud=did:web:<this spindle's effective hostname> — the user's PDS issues and
+// signs it with their repo signing key. We verify the signature against the
+// issuer's DID document (resolved via IdResolver), confirm the audience and
+// lxm match, and require the issuer to be the trigger's declared `actor` —
+// i.e. you can only manually trigger runs attributed to yourself.
+// See atproto.com/specs/xrpc#inter-service-authentication-jwt.
+// ---------------------------------------------------------------------------
+
+const TRIGGER_LXM = "com.publicdomainrelay.temp.spindle.trigger";
+
+const idResolver = new IdResolver();
+
+function extractBearer(header: string | undefined | null): string {
+  if (!header) throw new Error("missing Authorization header");
+  const m = /^Bearer\s+(\S+)$/i.exec(header);
+  if (!m) throw new Error("Authorization header must be 'Bearer <token>'");
+  return m[1];
+}
+
+async function validateTriggerServiceAuth(authHeader: string | undefined | null, hostname: string): Promise<string> {
+  const token = extractBearer(authHeader);
+  const aud = `did:web:${effectiveHostname(getOwnerDid(hostname))}`;
+
+  const payload = await verifyJwt(token, aud, TRIGGER_LXM, async (did: string) => {
+    return await idResolver.did.resolveAtprotoKey(did);
+  });
+
+  const iss = (payload as Record<string, unknown>).iss as string | undefined;
+  if (!iss || !iss.startsWith("did:")) {
+    throw new Error("service auth token missing DID issuer");
+  }
+  return iss;
+}
+
 async function repoRegisteredToThisSpindle(hostname: string, repoDid: string): Promise<bool> {
   const ownerDid = getOwnerDid(hostname);
   // for localhost handling
@@ -1168,6 +1210,8 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
 // ---------------------------------------------------------------------------
 
 const app = new Hono();
+
+app.use('*', cors());
 
 app.use("*", (c, next) => {
   log("info", "request", { method: c.req.method, path: c.req.path });
@@ -1660,6 +1704,25 @@ app.post("/trigger", async (c) => {
   }
 
   const trigger = body as TriggerPayload;
+
+  // Authentication: require an ATProto inter-service auth JWT (xrpc
+  // service-auth proxying) bound to TRIGGER_LXM, with `aud` matching this
+  // spindle's own service DID. The JWT's issuer must equal the trigger's
+  // declared `actor` — manual triggers can only be attributed to the person
+  // who actually authenticated, not impersonate someone else. This is the gate
+  // referenced in the addSecret/removeSecret comments below ("must be fronted
+  // by an authenticating proxy or AT Proto service-auth in production").
+  let actorDid: string;
+  try {
+    actorDid = await validateTriggerServiceAuth(c.req.header("Authorization"), c.req.header("host") ?? HOSTNAME);
+  } catch (err) {
+    log("warn", "trigger rejected: invalid service-auth token", { err: String(err) });
+    return c.json({ error: "Unauthorized", message: `invalid service-auth token: ${String(err)}` }, 401);
+  }
+  if (actorDid !== trigger.actor) {
+    log("warn", "trigger rejected: token issuer does not match declared actor", { iss: actorDid, actor: trigger.actor });
+    return c.json({ error: "Forbidden", message: "service-auth token issuer must match the trigger's actor" }, 403);
+  }
 
   // Authorization: only run pipelines for repos that have opted into this
   // spindle (this mirrors the jetstream knot-event path, which silently drops

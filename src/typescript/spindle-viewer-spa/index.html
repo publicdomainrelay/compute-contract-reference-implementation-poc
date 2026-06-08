@@ -65,7 +65,8 @@
 	<script type="importmap">
 	{
 		"imports": {
-			"@atproto/api": "https://esm.sh/@atproto/api@0.16.4"
+			"@atproto/api": "https://esm.sh/@atproto/api@0.16.4",
+			"@atproto/oauth-client-browser": "https://esm.sh/@atproto/oauth-client-browser@0.3.29"
 		}
 	}
 	</script>
@@ -80,10 +81,30 @@
 				</hgroup>
 				<nav>
 					<ul>
+						<li id="logout-nav" style="display: none;"><a href="#" id="logout-link">Sign out (<code id="session-handle"></code>)</a></li>
+						<li id="login-nav"><a href="#" id="login-link">Sign in</a></li>
 						<li><a target="_blank" href="https://tangled.org">tangled.org</a></li>
 					</ul>
 				</nav>
 			</header>
+
+			<!-- hidden by default, shown when "Sign in" is clicked and no session exists -->
+			<article id="login-container" style="display: none;">
+				<h3>Sign in with the Atmosphere</h3>
+				<p>
+					Signing in lets you mint a short-lived
+					<a target="_blank" href="https://atproto.com/specs/xrpc#inter-service-authentication-jwt">ATProto service-auth token</a>
+					to call a repo's spindle <code>/trigger</code> endpoint and kick off a pipeline run yourself,
+					instead of waiting for a knot push event.
+				</p>
+				<form id="login-form">
+					<fieldset role="group">
+						<input name="handle" id="login-handle-input" placeholder="alice.example.com" style="font-family: monospace;" required>
+						<button id="login-button">Sign in</button>
+					</fieldset>
+				</form>
+				<p id="login-error" style="color: #E37474;"></p>
+			</article>
 
 			<article id="lookup-container">
 				<h3>Look up a repo</h3>
@@ -140,6 +161,22 @@
 						<button class="outline">Browse pipelines on tangled.sh</button>
 					</a>
 				</p>
+
+				<!-- manual trigger: signs an ATProto service-auth token (xrpc service-auth
+				     proxying) and POSTs it to the repo's spindle /trigger endpoint. Only
+				     shown once the user has signed in (see "Sign in" above). -->
+				<div id="trigger-container" style="display: none;">
+					<p>
+						Manually start a pipeline run on <code id="trigger-default-branch"></code> via the
+						spindle's <code>/trigger</code> endpoint, authenticated with a freshly-minted
+						service-auth token (<code>iss</code> = your DID, <code>aud</code> = the spindle's
+						service DID, <code>lxm</code> = the trigger method) — the spindle verifies the
+						token's signature against your DID document before running anything.
+					</p>
+					<button id="trigger-button">Trigger pipeline run</button>
+					<p id="trigger-status"></p>
+				</div>
+
 				<form id="logs-lookup-form">
 					<fieldset role="group">
 						<input name="pipeline" id="pipeline-input" placeholder="pipeline id, e.g. 3lk2x9f7q2c2a" style="font-family: monospace;" required>

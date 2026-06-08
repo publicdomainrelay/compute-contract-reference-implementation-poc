@@ -8,6 +8,12 @@
 # POST body must satisfy TriggerPayload (main.ts:162-170):
 #   knot, pipelineRkey, actor, repoDid, repoName, ref, inputs?
 #
+# Requires an inter-service auth JWT (xrpc service-auth proxying — see
+# validateTriggerServiceAuth in main.ts): `iss` must equal `actor` above, `aud`
+# must be the spindle's own did:web, and the token must be bound to
+# com.publicdomainrelay.temp.spindle.trigger. We mint it with
+# `goat account service-auth` using the logged-in goat account.
+#
 # Target repo defaults to "compute-contract-reference-implementation-poc" on
 # knot1.tangled.sh (repoDid did:plc:bbvpwcihkeeztqxk47s5arq3) — its
 # sh.tangled.repo record's `spindle` field matches this running instance's
@@ -41,6 +47,22 @@ fi
 # pipelineRkey just needs to be unique per run — mint a TID-shaped key
 PIPELINE_RKEY="manual-$(date -u +%Y%m%dT%H%M%SZ)"
 
+# /trigger now requires an ATProto inter-service auth JWT (xrpc service-auth
+# proxying, see main.ts validateTriggerServiceAuth): iss must equal $ACTOR_DID,
+# aud must be the spindle's own service DID (did:web:<spindle hostname>), and
+# the token must be bound (lxm) to the trigger method — otherwise it's rejected
+# with 401/403. `goat account service-auth` asks the logged-in account's PDS to
+# mint and sign exactly that token.
+SPINDLE_HOST="$(echo "$SPINDLE_URL" | sed -E 's#^[a-z]+://##; s#/.*##')"
+SPINDLE_DID="did:web:${SPINDLE_HOST}"
+TRIGGER_LXM="com.publicdomainrelay.temp.spindle.trigger"
+
+TOKEN="$(goat account service-auth --aud "$SPINDLE_DID" --lxm "$TRIGGER_LXM" --duration-sec 60)"
+if [ -z "$TOKEN" ]; then
+  echo "error: failed to mint service-auth token (aud=${SPINDLE_DID} lxm=${TRIGGER_LXM})" >&2
+  exit 1
+fi
+
 echo "Triggering pipeline run via ${SPINDLE_URL}/trigger"
 echo "  repo:   $REPO_NAME ($REPO_DID)"
 echo "  knot:   $KNOT"
@@ -48,6 +70,8 @@ echo "  branch: $DEFAULT_BRANCH"
 echo "  sha:    $SHA"
 echo "  actor:  $ACTOR_DID"
 echo "  rkey:   $PIPELINE_RKEY"
+echo "  aud:    $SPINDLE_DID"
+echo "  lxm:    $TRIGGER_LXM"
 
 BODY=$(jq -n \
   --arg knot "$KNOT" \
@@ -59,5 +83,8 @@ BODY=$(jq -n \
   '{knot: $knot, pipelineRkey: $pipelineRkey, actor: $actor, repoDid: $repoDid, repoName: $repoName, ref: $ref}')
 
 echo "$BODY" | tee /dev/stderr \
-  | curl -sS -X POST "${SPINDLE_URL}/trigger" -H 'Content-Type: application/json' -d @- \
+  | curl -sS -X POST "${SPINDLE_URL}/trigger" \
+      -H 'Content-Type: application/json' \
+      -H "Authorization: Bearer ${TOKEN}" \
+      -d @- \
   | tee /dev/stderr | jq .

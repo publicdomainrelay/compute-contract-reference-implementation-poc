@@ -147,6 +147,69 @@ export function spindleEventsUrl(spindle) {
 }
 
 /* ----------------------------------------------------------------------- */
+/* Manual triggering: xrpc service-auth proxying to POST /trigger           */
+/*                                                                           */
+/* The spindle's /trigger endpoint (main.ts app.post("/trigger")) now       */
+/* requires an ATProto inter-service auth JWT (see                          */
+/* atproto.com/specs/xrpc#inter-service-authentication-jwt):                */
+/*   - iss  = the signed-in user's DID                                      */
+/*   - aud  = the spindle's service DID, did:web:<spindle-hostname>         */
+/*   - lxm  = TRIGGER_LXM, binding the token to this one action             */
+/* The token is minted via com.atproto.server.getServiceAuth (proxied       */
+/* through the user's PDS, which signs it with their repo signing key) and  */
+/* sent as a Bearer token — this *is* "xrpc service auth proxying": the PDS */
+/* mediates issuance, the spindle verifies the result against the issuer's  */
+/* DID document. See main.ts validateTriggerServiceAuth.                    */
+/* ----------------------------------------------------------------------- */
+
+// TRIGGER_LXM is the lexicon-method identifier the service-auth token is
+// bound to. It isn't a registered NSID with a schema (the endpoint is plain
+// POST /trigger, not /xrpc/...) — it just needs to be a stable string both
+// sides agree on, so a token minted for this purpose can't be replayed
+// against some other endpoint.
+export const TRIGGER_LXM = "com.publicdomainrelay.temp.spindle.trigger";
+
+// spindleServiceDid is the audience a trigger token must be issued for — the
+// spindle's own did:web identity, derived from its public hostname.
+export function spindleServiceDid(spindle) {
+	return `did:web:${spindle}`;
+}
+
+// spindleTriggerUrl builds the spindle's POST /trigger endpoint URL.
+export function spindleTriggerUrl(spindle) {
+	return `https://${spindle}/trigger`;
+}
+
+// buildTriggerPayload assembles a TriggerPayload (mirrors main.ts:162-170 /
+// TriggerPayload) from what the viewer already knows about the repo plus the
+// signed-in user's DID (who becomes the "actor" the run is attributed to).
+export function buildTriggerPayload({ knot, repoDid, repoName, ref, actorDid, inputs }) {
+	if (!knot || !repoDid || !repoName || !ref || !actorDid) {
+		throw new Error("buildTriggerPayload: missing knot, repoDid, repoName, ref, or actorDid");
+	}
+	const payload = { knot, pipelineRkey: triggerPipelineRkey(), actor: actorDid, repoDid, repoName, ref };
+	if (inputs !== undefined) payload.inputs = inputs;
+	return payload;
+}
+
+// resolveLatestSha asks the knot for the tip commit of a branch (mirrors the
+// `sh.tangled.repo.log?repo=...&ref=...&limit=1` lookup in trigger.sh) — the
+// spindle fetches .github/workflows/*.yml at this exact SHA, so the trigger
+// payload's `ref` must be a real commit, not a branch name.
+export async function resolveLatestSha(knot, repoDid, branch) {
+	const out = await xrpcGet(`https://${knot}`, "sh.tangled.repo.log", { repo: repoDid, ref: branch, limit: 1 });
+	const sha = out?.commits?.[0]?.this;
+	if (!sha) throw new Error(`could not resolve latest commit for ${repoDid}@${branch} from ${knot}`);
+	return sha;
+}
+
+// triggerPipelineRkey mints a unique-enough rkey for a manually-triggered run
+// (the spindle just needs uniqueness per run — it doesn't validate TID shape).
+export function triggerPipelineRkey(now = new Date()) {
+	return `manual-${now.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")}`;
+}
+
+/* ----------------------------------------------------------------------- */
 /* Pipeline-status events: parsing + accumulating a browsable run list      */
 /* ----------------------------------------------------------------------- */
 

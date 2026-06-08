@@ -23,6 +23,7 @@ import {
 	appviewRepoUrl, appviewPipelinesUrl, appviewWorkflowUrl, spindleLogsUrl,
 	spindleEventsUrl, parsePipelineStatusEnvelope, pipelineRunKey, upsertPipelineRun, pipelineStorageKey,
 	parseRoute, buildRoute,
+	TRIGGER_LXM, spindleServiceDid, spindleTriggerUrl, buildTriggerPayload, triggerPipelineRkey,
 } from "./tangled.js";
 
 const OWNER = "johnandersen777.bsky.social";
@@ -45,6 +46,53 @@ Deno.test("findRepoRecord matches by rkey or by cosmetic name", () => {
 	assertEquals(findRepoRecord(records, REPO)?.uri, "at://did:plc:abc/sh.tangled.repo/xyz789");
 	assertEquals(findRepoRecord(records, "abc123")?.value.name, "other-repo");
 	assertEquals(findRepoRecord(records, "does-not-exist"), undefined);
+});
+
+/* ----------------------------------------------------------------------- */
+/* Manual triggering: xrpc service-auth proxying to POST /trigger           */
+/* ----------------------------------------------------------------------- */
+
+Deno.test("spindleServiceDid + spindleTriggerUrl derive the spindle's service DID and trigger endpoint from its hostname", () => {
+	assertEquals(spindleServiceDid("did-plc-aaa.gha.spindle.example.com"), "did:web:did-plc-aaa.gha.spindle.example.com");
+	assertEquals(spindleTriggerUrl("did-plc-aaa.gha.spindle.example.com"), "https://did-plc-aaa.gha.spindle.example.com/trigger");
+});
+
+Deno.test("triggerPipelineRkey mints a unique, sortable rkey from a timestamp", () => {
+	const a = triggerPipelineRkey(new Date("2026-06-08T01:02:03.456Z"));
+	const b = triggerPipelineRkey(new Date("2026-06-08T01:02:04.000Z"));
+	assertEquals(a, "manual-20260608T010203Z");
+	assertEquals(b, "manual-20260608T010204Z");
+	assert(a < b);
+});
+
+Deno.test("buildTriggerPayload assembles a TriggerPayload from repo facts + the signed-in actor's DID", () => {
+	const payload = buildTriggerPayload({
+		knot: "knot1.tangled.sh",
+		repoDid: "did:plc:bbvpwcihkeeztqxk47s5arq3",
+		repoName: REPO,
+		ref: "abc123",
+		actorDid: "did:plc:alice",
+	});
+	assertEquals(payload.knot, "knot1.tangled.sh");
+	assertEquals(payload.actor, "did:plc:alice");
+	assertEquals(payload.repoDid, "did:plc:bbvpwcihkeeztqxk47s5arq3");
+	assertEquals(payload.repoName, REPO);
+	assertEquals(payload.ref, "abc123");
+	assert(payload.pipelineRkey.startsWith("manual-"));
+});
+
+Deno.test("buildTriggerPayload requires the fields the spindle's TriggerPayload needs", () => {
+	let threw = false;
+	try {
+		buildTriggerPayload({ knot: "knot1.tangled.sh", repoDid: "did:plc:x", repoName: REPO, ref: "abc" });
+	} catch {
+		threw = true;
+	}
+	assert(threw, "expected buildTriggerPayload to throw when actorDid is missing");
+});
+
+Deno.test("TRIGGER_LXM is a stable lexicon-method identifier the service-auth token is bound to", () => {
+	assertEquals(TRIGGER_LXM, "com.publicdomainrelay.temp.spindle.trigger");
 });
 
 /* ----------------------------------------------------------------------- */

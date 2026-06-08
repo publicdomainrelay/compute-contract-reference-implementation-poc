@@ -7,8 +7,12 @@
 // opens a websocket straight to the spindle's `/logs/{knot}/{rkey}/{name}`
 // endpoint to tail live logs for a given pipeline + workflow.
 //
-// No OAuth is involved: every record read here is public, and the spindle
-// log-streaming endpoint is unauthenticated (see core/spindle/server.go).
+// Reading is still anonymous — every record here is public, and the spindle
+// log-streaming endpoint is unauthenticated (see core/spindle/server.go) — but
+// *triggering* a pipeline run requires proving who you are. Signing in (via
+// @atproto/oauth-client-browser) lets us mint short-lived ATProto service-auth
+// tokens (xrpc service-auth proxying, see TRIGGER_LXM in tangled.js) and POST
+// them to the repo's spindle /trigger endpoint.
 //
 // URLs are hash-routed (no server-side rewrite rules needed to serve
 // index.html for arbitrary paths, which static hosts for SPAs don't always
@@ -23,12 +27,16 @@
 // URL building, …) lives in ./tangled.js so it can be unit-tested with
 // `deno test` without a browser — see tangled_test.js.
 
+import { BrowserOAuthClient } from "@atproto/oauth-client-browser";
+import { Agent } from "@atproto/api";
+
 import {
 	REPO_NSID,
 	resolveOwner, listAllRecords, findRepoRecord,
 	appviewPipelinesUrl, appviewWorkflowUrl, spindleLogsUrl,
 	spindleEventsUrl, parsePipelineStatusEnvelope, upsertPipelineRun, pipelineStorageKey,
 	parseRoute, buildRoute,
+	TRIGGER_LXM, spindleServiceDid, spindleTriggerUrl, buildTriggerPayload, resolveLatestSha,
 } from "./tangled.js";
 
 let activeSocket; // undefined | WebSocket — the currently open log stream
@@ -38,6 +46,147 @@ let suppressNextHashChange = false; // set when we update the hash ourselves
 
 // currentView holds everything we need to re-render or drill further down.
 let currentView = {}; // { owner: { identifier, did, pds }, repoName, repoRecord }
+
+/* ----------------------------------------------------------------------- */
+/* Sign-in (OAuth) — only needed to mint service-auth tokens for /trigger   */
+/* ----------------------------------------------------------------------- */
+
+let oauthClient; // undefined | BrowserOAuthClient
+let session; // undefined | OAuthSession — set once signed in
+let agent; // undefined | Agent — wraps `session` for XRPC calls (getServiceAuth, …)
+
+// buildClientId mirrors the loopback-client special case from the OAuth spec
+// (atproto.com/specs/oauth#localhost-client-development) for local dev, and
+// otherwise points at the static oauth-client-metadata.json served alongside
+// this SPA — whose `client_id`/`redirect_uris` must be kept in sync with
+// wherever this SPA is actually deployed.
+function buildClientId() {
+	const isLocal = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+	if (isLocal) {
+		return `http://localhost?${new URLSearchParams({
+			scope: "atproto",
+			redirect_uri: Object.assign(new URL(window.location.origin), { hostname: "127.0.0.1" }).href,
+		})}`;
+	}
+	return `${window.location.origin}/oauth-client-metadata.json`;
+}
+
+function renderSession() {
+	if (session && agent) {
+		hide("login-nav", "login-container");
+		show("logout-nav", "inline");
+		document.getElementById("session-handle").textContent = agent.assertDid ? agent.did : session.did;
+	} else {
+		hide("logout-nav");
+		show("login-nav", "inline");
+	}
+	updateTriggerVisibility();
+}
+
+async function doSignIn(handle) {
+	const errorEl = document.getElementById("login-error");
+	const button = document.getElementById("login-button");
+	errorEl.textContent = "";
+	button.setAttribute("aria-busy", "true");
+	try {
+		// Never resolves — the browser navigates away to the user's PDS.
+		await oauthClient.signIn(handle, { state: window.location.hash });
+	} catch (err) {
+		errorEl.textContent = `Sign-in failed: ${err.message || err}`;
+		button.removeAttribute("aria-busy");
+	}
+}
+
+async function doSignOut() {
+	if (session) await oauthClient.revoke(session.did).catch(() => {});
+	window.location.reload();
+}
+
+async function initOAuth() {
+	oauthClient = await BrowserOAuthClient.load({
+		clientId: buildClientId(),
+		handleResolver: "https://bsky.social",
+	});
+
+	const result = await oauthClient.init();
+	if (result) {
+		session = result.session;
+		agent = new Agent(session);
+		if (typeof result.state === "string" && result.state.startsWith("#")) {
+			suppressNextHashChange = true;
+			window.location.hash = result.state;
+		}
+	}
+
+	oauthClient.addEventListener("deleted", () => {
+		session = undefined;
+		agent = undefined;
+		renderSession();
+	});
+
+	renderSession();
+}
+
+/* ----------------------------------------------------------------------- */
+/* Manual trigger — mints a service-auth token and POSTs it to /trigger     */
+/* ----------------------------------------------------------------------- */
+
+function updateTriggerVisibility() {
+	const { repoRecord } = currentView;
+	const canTrigger = !!(session && agent && repoRecord?.value?.spindle && repoRecord?.value?.knot);
+	if (canTrigger) {
+		document.getElementById("trigger-default-branch").textContent = repoRecord.value.defaultBranch || "the default branch";
+		show("trigger-container");
+	} else {
+		hide("trigger-container");
+	}
+}
+
+// triggerPipeline signs a service-auth token bound to TRIGGER_LXM with
+// aud=did:web:<spindle> (xrpc service-auth proxying — the user's PDS issues
+// the token, signed with their repo key; the spindle verifies it against
+// their DID document, see main.ts validateTriggerServiceAuth), then POSTs
+// the trigger payload to the spindle's /trigger endpoint with it as a Bearer
+// token.
+async function triggerPipeline() {
+	const statusEl = document.getElementById("trigger-status");
+	const button = document.getElementById("trigger-button");
+	statusEl.textContent = "";
+	button.setAttribute("aria-busy", "true");
+
+	try {
+		const { repoRecord } = currentView;
+		const { knot, spindle, repoDid, defaultBranch } = repoRecord.value;
+		const repoName = currentView.repoName;
+
+		statusEl.textContent = `Resolving latest commit on ${defaultBranch}…`;
+		const ref = await resolveLatestSha(knot, repoDid, defaultBranch);
+
+		const payload = buildTriggerPayload({ knot, repoDid, repoName, ref, actorDid: agent.did });
+
+		statusEl.textContent = "Requesting service-auth token…";
+		const aud = spindleServiceDid(spindle);
+		const exp = Math.floor(Date.now() / 1000) + 60; // short-lived, single-use
+		const tokenRes = await agent.com.atproto.server.getServiceAuth({ aud, exp, lxm: TRIGGER_LXM });
+		const token = tokenRes.data.token;
+
+		statusEl.textContent = `Submitting trigger to ${spindle}…`;
+		const res = await fetch(spindleTriggerUrl(spindle), {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+			body: JSON.stringify(payload),
+		});
+		const body = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(body.message || body.error || `${res.status} ${res.statusText}`);
+
+		const workflows = (body.workflows || []).map((w) => w.workflow).join(", ") || "no workflows";
+		statusEl.textContent = `Triggered ${payload.pipelineRkey} (${ref.slice(0, 12)}) — submitted: ${workflows}`;
+	} catch (err) {
+		statusEl.textContent = `Trigger failed: ${err.message || err}`;
+	} finally {
+		button.removeAttribute("aria-busy");
+	}
+}
 
 /* ----------------------------------------------------------------------- */
 /* DOM helpers                                                              */
@@ -172,10 +321,12 @@ async function loadRepo(ownerIdentifier, repoName) {
 
 		renderRepo();
 		renderPipelinesPanel();
+		updateTriggerVisibility();
 		startEventsStream();
 		setBreadcrumb();
 	} catch (err) {
 		currentView = {};
+		updateTriggerVisibility();
 		errorEl.textContent = `${err.message || err}`;
 	} finally {
 		lookupButton.removeAttribute("aria-busy");
@@ -453,10 +604,28 @@ function init() {
 
 	document.getElementById("logs-disconnect-button").onclick = () => closeLogSocket();
 
+	document.getElementById("login-link").onclick = (e) => {
+		e.preventDefault();
+		show("login-container");
+	};
+	document.getElementById("login-form").onsubmit = (e) => {
+		e.preventDefault();
+		const handle = document.getElementById("login-handle-input").value.trim();
+		if (handle) doSignIn(handle);
+	};
+	document.getElementById("logout-link").onclick = (e) => {
+		e.preventDefault();
+		doSignOut();
+	};
+	document.getElementById("trigger-button").onclick = () => triggerPipeline();
+
 	window.addEventListener("hashchange", handleHashChange);
 
-	// Deep link on first load.
-	followRoute(parseRoute(window.location.hash));
+	// Deep link on first load (state restoration from initOAuth may also set
+	// the hash and suppress the resulting hashchange — see suppressNextHashChange).
+	initOAuth()
+		.catch((err) => console.error("OAuth init failed:", err))
+		.finally(() => followRoute(parseRoute(window.location.hash)));
 }
 
 document.addEventListener("DOMContentLoaded", init);
