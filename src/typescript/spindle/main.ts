@@ -27,6 +27,7 @@
 //   sh.tangled.repo.blob at the exact commit SHA supplied in the trigger
 //   payload.  No local checkout or REPO_PATH is needed.
 
+import { Agent, CredentialSession } from "npm:@atproto/api";
 import { Hono } from "jsr:@hono/hono";
 import { parse as parseYaml } from "jsr:@std/yaml";
 import { marketRFPSubmitWorkflow, marketRFPConfigFromEnv, pendingBids } from "./marketRFP.ts";
@@ -284,6 +285,90 @@ function hostnameForRepo(repoDid: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// com.publicdomainrelay.temp.tangled.spindle.repos — durable record of which
+// repos this spindle is authorized to run pipelines for. The rkey is
+// `${HOSTNAME}-${repoDid}` since the same ATProto account may run more than
+// one spindle, and each needs its own authorization record per repo.
+// ---------------------------------------------------------------------------
+
+const SPINDLE_REPOS_NSID = "com.publicdomainrelay.temp.tangled.spindle.repos";
+
+let spindleReposAgent: Agent | null | undefined;
+
+async function getSpindleReposAgent(): Promise<Agent | null> {
+  if (spindleReposAgent !== undefined) return spindleReposAgent;
+  const handle = Deno.env.get("ATPROTO_HANDLE") ?? "";
+  const password = Deno.env.get("ATPROTO_PASSWORD") ?? "";
+  if (!handle || !password) {
+    spindleReposAgent = null;
+    return spindleReposAgent;
+  }
+  try {
+    const pdsUrl = Deno.env.get("ATPROTO_PDS_URL") ?? "https://bsky.social";
+    const session = new CredentialSession(new URL(pdsUrl));
+    await session.login({ identifier: handle, password });
+    spindleReposAgent = new Agent(session);
+  } catch (err) {
+    log("error", "spindle-repos: agent login failed", { err: String(err) });
+    spindleReposAgent = null;
+  }
+  return spindleReposAgent;
+}
+
+// Records that `repoDid` is authorized to run pipelines on `spindle`: updates
+// the in-memory cache and ensures a durable
+// com.publicdomainrelay.temp.tangled.spindle.repos/${HOSTNAME}-${repoDid}
+// record exists on the PDS. Replaces direct repoDidToSpindle.set() calls.
+async function recordRepoSpindle(repoDid: string, spindle: string): Promise<void> {
+  repoDidToSpindle.set(repoDid, spindle);
+
+  const agent = await getSpindleReposAgent();
+  if (!agent) return;
+  try {
+    await agent.com.atproto.repo.putRecord({
+      repo: agent.assertDid,
+      collection: SPINDLE_REPOS_NSID,
+      rkey: `${HOSTNAME}-${repoDid}`,
+      record: {
+        $type: SPINDLE_REPOS_NSID,
+        repoDid,
+        spindle,
+        createdAt: new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    log("error", "spindle-repos: putRecord failed", { repoDid, spindle, err: String(err) });
+  }
+}
+
+// Looks up the spindle hostname `repoDid` is authorized for: checks the
+// in-memory cache first, and on a cache miss falls back to the durable
+// com.publicdomainrelay.temp.tangled.spindle.repos record on the PDS, caching
+// the result if found. Replaces direct repoDidToSpindle.get()/has() checks.
+async function getRepoSpindle(repoDid: string): Promise<string | undefined> {
+  const cached = repoDidToSpindle.get(repoDid);
+  if (cached) return cached;
+
+  const agent = await getSpindleReposAgent();
+  if (!agent) return undefined;
+  try {
+    const res = await agent.com.atproto.repo.getRecord({
+      repo: agent.assertDid,
+      collection: SPINDLE_REPOS_NSID,
+      rkey: `${HOSTNAME}-${repoDid}`,
+    });
+    const spindle = (res.data.value as Record<string, unknown> | undefined)?.spindle as string | undefined;
+    if (spindle) {
+      repoDidToSpindle.set(repoDid, spindle);
+      return spindle;
+    }
+  } catch {
+    // not found, or PDS unreachable — treat as a miss
+  }
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
 // JSON file DB — persists knot cursors across restarts
 // ---------------------------------------------------------------------------
 
@@ -495,6 +580,8 @@ function watchKnot(knot: string): void {
       const repoName     = meta.repo.repo ?? "";
       const pipelineRkey = envelope.rkey;
 
+      log("info", "knot stream meta", { meta });
+
       let ref = "";
       if (meta.kind === "push" && meta.push) {
         ref = meta.push.newSha;
@@ -507,8 +594,14 @@ function watchKnot(knot: string): void {
         return;
       }
 
+      // NOTE This is annoying the repo record is stored in the owner's PDS
+      // rather than being it's own account it's a bare did:plc:
+      //
+      // - https://tangled.org/tangled.org/core/issues/578
+      // - https://tangled.org/tangled.org/core/issues/267#comment-3mj4gln2smu22
+
       // Ignore triggers for repos that haven't opted into this spindle.
-      if (!repoDidToSpindle.has(repoDid)) {
+      if (!(await getRepoSpindle(repoDid))) {
         // DO NOT UNCOMMENT THIS LINE log("debug", "knot trigger ignored: repo not authorized", { repoDid, repoName, knot });
         return;
       }
@@ -587,7 +680,7 @@ async function discoverKnotsFromATProto(ownerDid?: string): Promise<void> {
         foundKnots++;
       }
       if (repoDid && spindle && matchesThisSpindle(spindle, ownerDid)) {
-        repoDidToSpindle.set(repoDid, spindle);
+        await recordRepoSpindle(repoDid, spindle);
         log("info", "knot-discovery: authorized repo", { repoDid, repoName, knot });
         foundRepos++;
       }
@@ -607,13 +700,13 @@ async function repoRegisteredToThisSpindle(hostname: string, repoDid: string): P
     throw new Error(`repoRegisteredToThisSpindle invalid did ownerDid=${ownerDid}`);
   }
 
-  if (repoDidToSpindle.has(repoDid)) {
+  if (await getRepoSpindle(repoDid)) {
     return true;
   }
 
   await discoverKnotsFromATProto(ownerDid);
 
-  return repoDidToSpindle.has(repoDid);
+  return (await getRepoSpindle(repoDid)) !== undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -635,7 +728,7 @@ function startJetstreamWatcher(): void {
       return;
     }
 
-    ws.onmessage = (evt) => {
+    ws.onmessage = async (evt) => {
       let msg: Record<string, unknown>;
       try { msg = JSON.parse(typeof evt.data === "string" ? evt.data : new TextDecoder().decode(evt.data as ArrayBuffer)); }
       catch { return; }
@@ -654,7 +747,7 @@ function startJetstreamWatcher(): void {
           watchKnot(knot);
         }
         if (repoDid && spindle) {
-          repoDidToSpindle.set(repoDid, spindle);
+          await recordRepoSpindle(repoDid, spindle);
         }
       }
     };
