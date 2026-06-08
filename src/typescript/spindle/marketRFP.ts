@@ -56,8 +56,9 @@ const VM_DELETE_EVENT_NSID = "com.publicdomainrelay.temp.compute.events.vm.delet
 // ---------------------------------------------------------------------------
 
 const MARKET_SERVICE_ID = "pdr_market";
-const SUBMIT_RFP_LXM   = "com.publicdomainrelay.temp.market.submitRfp";
-const SUBMIT_EVENT_LXM = "com.publicdomainrelay.temp.market.submitEvent";
+const SUBMIT_RFP_LXM    = "com.publicdomainrelay.temp.market.submitRfp";
+const SUBMIT_EVENT_LXM  = "com.publicdomainrelay.temp.market.submitEvent";
+const SUBMIT_ACCEPT_LXM = "com.publicdomainrelay.temp.market.submitAccept";
 
 const marketLexicons = [
   {
@@ -74,6 +75,14 @@ const marketLexicons = [
     defs: { main: { type: "procedure",
       input: { encoding: "application/json", schema: { type: "object", required: ["uri", "cid", "record"],
         properties: { uri: { type: "string" }, cid: { type: "string" }, record: { type: "unknown" } } } },
+      output: { encoding: "application/json" } } },
+  },
+  {
+    lexicon: 1,
+    id: SUBMIT_ACCEPT_LXM,
+    defs: { main: { type: "procedure",
+      input: { encoding: "application/json", schema: { type: "object", required: ["acceptUri", "acceptCid"],
+        properties: { acceptUri: { type: "string" }, acceptCid: { type: "string" } } } },
       output: { encoding: "application/json" } } },
   },
 ];
@@ -158,32 +167,6 @@ function randomHex(bytes = 8): string {
   const arr = new Uint8Array(bytes);
   crypto.getRandomValues(arr);
   return Array.from(arr, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-// SECURITY (SSRF): server-side fetches whose target comes from an untrusted
-// ATProto record (offering.endpointUrl, bid payload url) are an SSRF primitive.
-// This unconditionally blocks non-http(s) schemes and cloud link-local metadata
-// hosts (no legitimate use), and additionally blocks RFC1918/loopback ranges when
-// MARKET_BLOCK_PRIVATE_EGRESS is set (off by default so localhost dev/e2e works).
-export function assertSafeEgressUrl(raw: string): URL {
-  let u: URL;
-  try { u = new URL(raw); } catch { throw new Error(`invalid URL: ${raw}`); }
-  if (u.protocol !== "http:" && u.protocol !== "https:") {
-    throw new Error(`blocked URL scheme: ${u.protocol}`);
-  }
-  const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (host === "169.254.169.254" || host === "metadata.google.internal") {
-    throw new Error(`blocked cloud-metadata host: ${host}`);
-  }
-  if (Deno.env.get("MARKET_BLOCK_PRIVATE_EGRESS")) {
-    const isPrivate =
-      host === "localhost" || host === "::1" ||
-      /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) ||
-      /^169\.254\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
-      /^(fc|fd)/.test(host);
-    if (isPrivate) throw new Error(`blocked private/loopback host: ${host}`);
-  }
-  return u;
 }
 
 type RFPLogger = (msg: string, fields?: Record<string, unknown>) => void;
@@ -915,41 +898,33 @@ export async function marketRFPSubmitWorkflow(
   const rbacRef = await atprotoCreateRecord(agent, RBAC_NSID, rbacRecord);
   log("com.fedproxy.rbac created", { uri: rbacRef.uri, subject: agentDid, serviceName });
 
-  // Submit to bidder's x402 receipt endpoint (creates market.receipt). The
-  // response carries a strongRef to the receipt plus the bidder's submitEvent
-  // endpoint — the channel we use to tell it to delete the VM later, since the
-  // bidder treats provisioned VMs as a black box and can't observe that itself.
+  // Submit the accept to the bidder via its submitAccept procedure (creates
+  // market.receipt). The response carries a strongRef to the receipt plus the
+  // bidder's submitEvent endpoint — the channel we use to tell it to delete
+  // the VM later, since the bidder treats provisioned VMs as a black box and
+  // can't observe that itself. Routed through our PDS via service-proxying:
+  // bidPayload.url holds a service DID ref (did:web:HOST#pdr_market).
   let receiptRef: StrongRef | undefined;
   let providerSubmitEventUrl: string | undefined;
-  const x402Payload = winner.payload;
-  if (x402Payload) {
-    const baseUrl = String(x402Payload.url ?? "");
-    if (baseUrl) {
-      try {
-        assertSafeEgressUrl(baseUrl);
-      } catch (err) {
-        throw new Error(`winning bid x402 url rejected: ${String(err)}`);
+  const bidPayload = winner.payload;
+  const bidderServiceRef = String(bidPayload?.url ?? "");
+  if (bidderServiceRef) {
+    log("submitting accept to bidder via submitAccept", { ref: bidderServiceRef, acceptUri: acceptRef.uri });
+    try {
+      const res = await marketClient.call(
+        SUBMIT_ACCEPT_LXM,
+        {},
+        { acceptUri: acceptRef.uri, acceptCid: acceptRef.cid },
+        { headers: { "atproto-proxy": bidderServiceRef } },
+      );
+      const body = res.data as { uri?: string; cid?: string; submitEvent?: string };
+      if (body.uri && body.cid) {
+        receiptRef = { $type: "com.atproto.repo.strongRef", uri: body.uri, cid: body.cid };
       }
-      const receiptUrl = `${baseUrl}/${acceptRef.uri}/${acceptRef.cid}`;
-      log("submitting to x402 receipt endpoint", { url: receiptUrl });
-      try {
-        const res = await fetch(receiptUrl, {
-          method: "GET",
-          signal: AbortSignal.timeout(30000),
-        });
-        if (res.ok) {
-          const body = await res.json() as { uri?: string; cid?: string; submitEvent?: string };
-          if (body.uri && body.cid) {
-            receiptRef = { $type: "com.atproto.repo.strongRef", uri: body.uri, cid: body.cid };
-          }
-          providerSubmitEventUrl = body.submitEvent;
-          log("x402 receipt submitted", { status: res.status, receiptRef, providerSubmitEventUrl });
-        } else {
-          log("x402 receipt non-ok", { status: res.status });
-        }
-      } catch (err) {
-        log("x402 receipt request failed", { err: String(err) });
-      }
+      providerSubmitEventUrl = body.submitEvent;
+      log("submitAccept proxied call", { ref: bidderServiceRef, receiptRef, providerSubmitEventUrl });
+    } catch (err) {
+      log("submitAccept proxied call failed", { ref: bidderServiceRef, err: String(err) });
     }
   }
 

@@ -1,11 +1,12 @@
 // Deno + Hono port of server.py.
-// Endpoints: GET / (README html), GET /receipt/<accept-at-uri>/<cid> (x402-gated
+// Endpoints: GET / (README html),
+// POST /xrpc/com.publicdomainrelay.temp.market.submitAccept (atproto-proxy
 // settlement; resolves accept->bid->rfp->vm, provisions droplet, writes receipt),
 // POST /hook/rfp (firehose webhook -> creates bid+config+payload records).
 //
 // Run: deno run --allow-net --allow-env --allow-run --allow-read --allow-write main.ts
 //
-// $ RBAC_REPO_ROOT="${HOME}/src/rbac/homelab/wid-atp" X402_MAKE_FREE=1 DIGITALOCEAN_BASE_URL=https://homelab.johnandersen777.bsky.social.fedproxy.com deno run --allow-all --watch main.ts
+// $ RBAC_REPO_ROOT="${HOME}/src/rbac/homelab/wid-atp" DIGITALOCEAN_BASE_URL=https://homelab.johnandersen777.bsky.social.fedproxy.com deno run --allow-all --watch main.ts
 
 
 import { Hono } from "npm:hono@^4.12.23";
@@ -16,11 +17,6 @@ import { getPdsEndpoint } from "@atproto/common-web";
 import { verifyJwt } from "@atproto/xrpc-server";
 import { XrpcClient } from "@atproto/xrpc";
 import { stringify as yamlStringify, parse as yamlParse } from "npm:yaml@^2.7.0";
-
-// x402 middleware (Hono variant per CDP docs).
-import { paymentMiddleware, x402ResourceServer } from "npm:@x402/hono";
-import { ExactEvmScheme } from "npm:@x402/evm/exact/server";
-import { HTTPFacilitatorClient } from "npm:@x402/core/server";
 
 // ---------------------------------------------------------------------------
 // NSID constants (mirrors models/publicdomainrelay.py)
@@ -36,6 +32,7 @@ const RECEIPT_NSID = "com.publicdomainrelay.temp.market.receipt";
 const OFFERING_NSID = "com.publicdomainrelay.temp.market.offering";
 const EVENT_NSID = "com.publicdomainrelay.temp.market.event";
 const SUBMIT_EVENT_NSID = "com.publicdomainrelay.temp.market.submitEvent";
+const SUBMIT_ACCEPT_NSID = "com.publicdomainrelay.temp.market.submitAccept";
 const VM_DELETE_EVENT_NSID = "com.publicdomainrelay.temp.compute.events.vm.delete";
 const RBAC_NSID = "com.fedproxy.rbac";
 
@@ -45,6 +42,7 @@ const MARKET_SERVICE_ID = "pdr_market";
 const SUBMIT_BID_LXM = "com.publicdomainrelay.temp.market.submitBid";
 const SUBMIT_RFP_LXM = "com.publicdomainrelay.temp.market.submitRfp";
 const SUBMIT_EVENT_LXM = "com.publicdomainrelay.temp.market.submitEvent";
+const SUBMIT_ACCEPT_LXM = "com.publicdomainrelay.temp.market.submitAccept";
 
 // Maps `${receiptUri}#${receiptCid}` -> DigitalOcean droplet id, so that when
 // the requester reports a com.publicdomainrelay.temp.compute.events.vm.delete
@@ -60,25 +58,6 @@ const ACCEPT_PATH_RECORD = "$HOME/secrets/publicdomainrelay.com/market/accept.js
 const ACCEPT_PATH_VM = "/root/secrets/publicdomainrelay.com/market/accept.json";
 
 const CID_RE = /^(bafy|z)[A-Za-z0-9]+$/;
-
-// SECURITY (SSRF): rfp.submitBid is an attacker-controllable URL read from an RFP
-// record. Block non-http(s) schemes and cloud metadata hosts unconditionally;
-// block private/loopback ranges when MARKET_BLOCK_PRIVATE_EGRESS is set (off by
-// default so localhost dev/e2e keeps working).
-function assertSafeEgressUrl(raw: string): URL {
-  let u: URL;
-  try { u = new URL(raw); } catch { throw new Error(`invalid URL: ${raw}`); }
-  if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error(`blocked URL scheme: ${u.protocol}`);
-  const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (host === "169.254.169.254" || host === "metadata.google.internal") throw new Error(`blocked cloud-metadata host: ${host}`);
-  if (Deno.env.get("MARKET_BLOCK_PRIVATE_EGRESS")) {
-    const isPrivate = host === "localhost" || host === "::1" ||
-      /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) ||
-      /^169\.254\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^(fc|fd)/.test(host);
-    if (isPrivate) throw new Error(`blocked private/loopback host: ${host}`);
-  }
-  return u;
-}
 
 // ---------------------------------------------------------------------------
 // Structured logger — JSON to stderr
@@ -140,9 +119,6 @@ function reqEnv(name: string): string {
   return v;
 }
 
-const PAY_TO = reqEnv("RECV_ADDR");
-const CDP_API_KEY_ID = reqEnv("CDP_RECV_API_KEY_ID");
-const CDP_API_KEY_SECRET = reqEnv("CDP_RECV_API_KEY_SECRET");
 const DO_TOKEN = reqEnv("DIGITALOCEAN_TOKEN");
 const RBAC_REPO_ROOT = (() => {
   const p = reqEnv("RBAC_REPO_ROOT");
@@ -151,7 +127,6 @@ const RBAC_REPO_ROOT = (() => {
 const BASE_URL = (Deno.env.get("BASE_URL") ?? "").replace(/\/+$/, "");
 const ATPROTO_HANDLE = reqEnv("ATPROTO_HANDLE");
 const ATPROTO_PASSWORD = reqEnv("ATPROTO_PASSWORD");
-const X402_MAKE_FREE = Deno.env.has("X402_MAKE_FREE");
 const DIGITALOCEAN_BASE_URL = (Deno.env.get("DIGITALOCEAN_BASE_URL") ?? "https://droplet-oidc.its1337.com").replace(/\/+$/, "");
 
 // ---------------------------------------------------------------------------
@@ -744,58 +719,6 @@ app.get("/.well-known/did.json", (c) => {
   });
 });
 
-// CDP facilitator with header auth (matches python create_headers).
-// CDP requires a JWT per request; for parity with python (which uses
-// cdp.auth.utils.jwt.generate_jwt). Minimal port: re-create JWT per call via
-// the helper exposed by @coinbase/x402 when available; otherwise consumers
-// can set X402_MAKE_FREE=1.
-function makeFacilitator() {
-  // Prefer CDP facilitator if API keys are set; mirrors python (which always
-  // points at api.cdp.coinbase.com with JWT headers).
-  const url = "https://api.cdp.coinbase.com/platform/v2/x402";
-  // The CDP auth provider is supplied via a field the published FacilitatorConfig
-  // type doesn't declare; cast so this stays runnable while @x402 types catch up.
-  return new HTTPFacilitatorClient({
-    url,
-    // CreateHeadersAuthProvider equivalent. The python uses generate_jwt per
-    // verify/settle/supported path; here we expose a callback that builds a
-    // bearer JWT for the given request. Implementation lives in @coinbase/x402
-    // if present; otherwise users can run with X402_MAKE_FREE=1 for local dev.
-    authProvider: cdpAuthProvider(CDP_API_KEY_ID, CDP_API_KEY_SECRET),
-    // deno-lint-ignore no-explicit-any
-  } as any);
-}
-
-function cdpAuthProvider(_keyId: string, _keySecret: string) {
-  // The @coinbase/x402 npm package exports `facilitator` with auth baked in.
-  // We re-import lazily to keep this file runnable with X402_MAKE_FREE=1
-  // even when the package isn't installed.
-  // deno-lint-ignore no-explicit-any
-  return async (_req: any) => ({}); // headers added by @coinbase/x402 when wired
-}
-
-if (!X402_MAKE_FREE) {
-  const facilitatorClient = makeFacilitator();
-  const server = new x402ResourceServer(facilitatorClient).register(
-    "eip155:8453",
-    new ExactEvmScheme(),
-  );
-  app.use(
-    paymentMiddleware(
-      {
-        "GET /receipt/*": {
-          accepts: [
-            { scheme: "exact", price: "$1.00", network: "eip155:8453", payTo: PAY_TO },
-          ],
-          description: "Pay for compute contract",
-          mimeType: "application/json",
-        },
-      },
-      server,
-    ),
-  );
-}
-
 // JSON error envelope
 app.onError((err, c) => {
   if (err instanceof HTTPError) {
@@ -806,21 +729,31 @@ app.onError((err, c) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /receipt/<accept-at-uri>/<cid>
+// POST /xrpc/com.publicdomainrelay.temp.market.submitAccept  { acceptUri, acceptCid }
+//
+// Settles the contract: resolves accept->bid->rfp->vm, provisions the
+// resource, mints a market.receipt record, and returns a strongRef to it plus
+// the bidder's submitEvent service DID reference. Must be called via PDS
+// service-proxying (atproto-proxy); the receiver verifies the inter-service
+// auth JWT and requires its issuer to be the DID that authored the referenced
+// accept record.
 // ---------------------------------------------------------------------------
 
-app.get("/receipt/*", async (c) => {
-  const path = c.req.path.replace(/^\/+/, "");
-  if (!path.includes("/")) throw new HTTPError(400, "missing cid");
-  const lastSlash = path.lastIndexOf("/");
-  const cid = path.slice(lastSlash + 1);
-  let atPart = path.slice(0, lastSlash);
-  if (!CID_RE.test(cid)) throw new HTTPError(400, "invalid cid");
-  if (atPart.startsWith("receipt/")) atPart = atPart.slice("receipt/".length);
-  const acceptAtUri = atPart;
-  const acceptCid = cid;
+app.post(`/xrpc/${SUBMIT_ACCEPT_NSID}`, async (c) => {
+  let body: { acceptUri?: string; acceptCid?: string };
+  try { body = await c.req.json(); } catch { return c.json({ error: "InvalidRequest", message: "invalid JSON" }, 400); }
+  const { acceptUri, acceptCid } = body;
+  if (!acceptUri || !acceptCid) return c.json({ error: "InvalidRequest", message: "missing acceptUri or acceptCid" }, 400);
+  if (!CID_RE.test(acceptCid)) return c.json({ error: "InvalidRequest", message: "invalid acceptCid" }, 400);
 
-  const accept = await resolveAs<Accept>(acceptAtUri, acceptCid);
+  let issuerDid: string;
+  try { issuerDid = await validateMarketServiceAuth(c.req.header("Authorization"), SUBMIT_ACCEPT_LXM); }
+  catch (err) { log("warn", "submitAccept rejected: invalid service-auth token", { err: String(err) }); return c.json({ error: "Unauthorized", message: `invalid service-auth token: ${String(err)}` }, 401); }
+  if (issuerDid !== atUriAuthority(acceptUri)) { log("warn", "submitAccept rejected: token issuer does not match accept author", { iss: issuerDid, acceptUri }); return c.json({ error: "Forbidden", message: "service-auth token issuer must author the accept record" }, 403); }
+
+  log("info", "submitAccept received", { acceptUri, acceptCid });
+
+  const accept = await resolveAs<Accept>(acceptUri, acceptCid);
   console.error("[receipt] accept:", accept._uri);
   const bid = await resolveAs<Bid>(accept.bid.uri, accept.bid.cid);
   console.error("[receipt] bid:", bid._uri);
@@ -877,7 +810,7 @@ app.get("/receipt/*", async (c) => {
       $type: RECEIPT_NSID,
       rfp: { $type: "com.atproto.repo.strongRef", uri: accept.rfp.uri, cid: accept.rfp.cid },
       bid: { $type: "com.atproto.repo.strongRef", uri: bid._uri, cid: bid._cid },
-      accept: { $type: "com.atproto.repo.strongRef", uri: acceptAtUri, cid: acceptCid },
+      accept: { $type: "com.atproto.repo.strongRef", uri: acceptUri, cid: acceptCid },
       submitEvent: submitEventUrl,
       createdAt: new Date().toISOString(),
     },
@@ -914,7 +847,6 @@ async function createAndSubmitBid(
   rfpUri: string,
   rfpCid: string,
   rfpRecord: RFP,
-  receiptUrl: string,
 ): Promise<{ configUri: string; configCid: string; payloadUri: string; payloadCid: string; bidUri: string; bidCid: string }> {
   const nowIso = new Date().toISOString();
   const doctx = await makeDoctx();
@@ -946,7 +878,7 @@ async function createAndSubmitBid(
       currency: "USDC",
       frequency: "monthly",
       prepay: true,
-      url: receiptUrl,
+      url: `${bidderServiceDid()}#${MARKET_SERVICE_ID}`,
       createdAt: nowIso,
     },
   });
@@ -1009,11 +941,6 @@ type WebhookPayload = {
   };
 };
 
-function x402UrlTemplate(reqUrl: string): string {
-  const base = BASE_URL || new URL(reqUrl).origin;
-  return `${base.replace(/\/+$/, "")}/receipt`;
-}
-
 app.post("/hook/rfp", async (c) => {
   const hookData = await c.req.json();
   log("info", "hit /hook/rfp", { hookData: hookData });
@@ -1030,7 +957,7 @@ app.post("/hook/rfp", async (c) => {
   const rfpRecord = await resolveAs<RFP>(rfpAtUri, rfpCid);
 
   const { configUri, configCid, payloadUri, payloadCid, bidUri, bidCid } =
-    await createAndSubmitBid(rfpAtUri, rfpCid, rfpRecord, x402UrlTemplate(c.req.url));
+    await createAndSubmitBid(rfpAtUri, rfpCid, rfpRecord);
 
   return c.json({
     success: true,
@@ -1077,7 +1004,7 @@ app.post("/xrpc/com.publicdomainrelay.temp.market.submitRfp", async (c) => {
   const { repo: rfpOwnerDid } = parseAtUri(rfpUri);
 
   const { bidUri, bidCid } =
-    await createAndSubmitBid(rfpUri, rfpCid, rfpRecord, `${BASE_URL}/receipt`);
+    await createAndSubmitBid(rfpUri, rfpCid, rfpRecord);
 
   log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
 

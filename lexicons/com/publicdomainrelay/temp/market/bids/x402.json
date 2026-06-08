@@ -34,7 +34,7 @@
           },
           "url": {
             "type": "string",
-            "description": "x402 payment URL template (may contain {at} and {cid} placeholders for the com.publicdomainrelay.temp.market.accept AT URI/CID)."
+            "description": "Service DID reference (did:web:HOST#pdr_market) of the bidder's market service. The requester calls com.publicdomainrelay.temp.market.submitAccept via PDS service-proxying using this value as the atproto-proxy target, to settle the contract and obtain a receipt."
           }
         }
       }

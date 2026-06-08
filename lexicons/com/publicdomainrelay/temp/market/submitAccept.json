@@ -1,0 +1,56 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.submitAccept",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Submit the AT-URI and CID of an accept record directly to the bidder named in the winning bid's payload, settling the contract: the bidder resolves accept->bid->rfp->vm, provisions the resource, mints a market.receipt record, and returns a strong reference to it plus its submitEvent service DID reference. Must be called via PDS service-proxying (atproto-proxy); the receiver verifies the inter-service auth JWT and requires its issuer to be the DID that authored the referenced accept record.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["acceptUri", "acceptCid"],
+          "properties": {
+            "acceptUri": {
+              "type": "string",
+              "description": "AT-URI of the accept record."
+            },
+            "acceptCid": {
+              "type": "string",
+              "description": "CID of the accept record."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["id", "uri", "cid", "submitEvent"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Record key (rkey) of the newly minted receipt."
+            },
+            "uri": {
+              "type": "string",
+              "description": "AT-URI of the newly minted receipt record."
+            },
+            "cid": {
+              "type": "string",
+              "description": "CID of the newly minted receipt record."
+            },
+            "submitEvent": {
+              "type": "string",
+              "description": "Service DID reference (did:web:HOST#pdr_market) of the bidder's market service, scoped to this receipt's strongRef. The requester calls com.publicdomainrelay.temp.market.submitEvent via PDS service-proxying using this value as the atproto-proxy target."
+            }
+          }
+        }
+      },
+      "errors": [
+        { "name": "InvalidRequest" },
+        { "name": "Forbidden" }
+      ]
+    }
+  }
+}
