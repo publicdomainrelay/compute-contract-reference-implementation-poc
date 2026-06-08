@@ -375,12 +375,20 @@ async function notifyBidderViaOffering(
   log: RFPLogger,
 ): Promise<void> {
   let pds: string;
-  try { pds = await resolvePDS(bidderDid); } catch { return; }
+  try {
+    pds = await resolvePDS(bidderDid);
+  } catch (err) {
+    log("offering discovery: PDS resolve failed", { bidderDid, err: String(err) });
+    return;
+  }
 
   let offerings: Array<{ uri: string; cid: string; value: Record<string, unknown> }>;
   try {
     offerings = await listRecordsAll(pds, bidderDid, OFFERING_NSID);
-  } catch { return; }
+  } catch (err) {
+    log("offering discovery: listRecords failed", { bidderDid, pds, err: String(err) });
+    return;
+  }
 
   for (const offering of offerings) {
     const appliesTo = offering.value.appliesTo as string[] | undefined;

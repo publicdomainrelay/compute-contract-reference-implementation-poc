@@ -418,6 +418,7 @@ log("info", "db loaded", { path: DB_PATH, knots: Object.keys(db.cursors), persis
 
 interface SpindleLogsDB {
   logs: Record<string, string>; // runKey → raw console output
+  preLogs: Record<string, string[]>; // runKey → pre-PE provisioning log lines (market-rfp etc.)
 }
 
 function loadLogsDB(): SpindleLogsDB {
@@ -425,9 +426,10 @@ function loadLogsDB(): SpindleLogsDB {
     const raw = Deno.readTextFileSync(LOGS_DB_PATH);
     const parsed = JSON.parse(raw) as SpindleLogsDB;
     if (!parsed.logs) parsed.logs = {};
+    if (!parsed.preLogs) parsed.preLogs = {};
     return parsed;
   } catch {
-    return { logs: {} };
+    return { logs: {}, preLogs: {} };
   }
 }
 
@@ -446,6 +448,20 @@ function persistRunLog(key: string, output: string): void {
   logsDB.logs[key] = output;
   saveLogsDB(logsDB);
 }
+
+// Persist pre-PE provisioning log lines (market-rfp discovery/bidding/VM setup)
+// so the "Provisioning" step survives a spindle restart and replays in full.
+function persistPreLog(key: string, lines: string[]): void {
+  logsDB.preLogs[key] = lines;
+  saveLogsDB(logsDB);
+}
+
+// Restore persisted provisioning logs into the in-memory map so /logs can
+// replay the "Provisioning" step for runs that started before this restart.
+for (const [key, lines] of Object.entries(logsDB.preLogs)) {
+  preRunLogs.set(key, [...lines]);
+}
+log("info", "pre-run logs restored", { count: Object.keys(logsDB.preLogs).length });
 
 // Restore persisted runs into the in-memory Map so /logs works across restarts.
 for (const [key, pr] of Object.entries(db.runs)) {
@@ -1086,7 +1102,12 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
           const rfpConfig = marketRFPConfigFromEnv();
           const preLogs: string[] = [];
           preRunLogs.set(key, preLogs);
-          const result = await marketRFPSubmitWorkflow(wfObj, trigger, rfpConfig, hostnameForRepo(trigger.repoDid), (line) => preLogs.push(line));
+          const result = await marketRFPSubmitWorkflow(wfObj, trigger, rfpConfig, hostnameForRepo(trigger.repoDid), (line) => {
+            preLogs.push(line);
+            // Persist after every line — provisioning can take minutes and a
+            // crash/restart mid-run must not lose the "Provisioning" log step.
+            persistPreLog(key, preLogs);
+          });
           taskId = result.taskId;
           peUrl = result.peUrl;
           reportVmDelete = result.reportVmDelete;
@@ -1336,9 +1357,17 @@ app.get("/logs/:knot/:pipelineRkey/:workflow", (c) => {
     });
 
     let linesStreamed = 0;
+    // Lines that came from the PE itself (build/checkout/etc), separate from
+    // the "Provisioning" preLogs above — used to decide whether the PE-output
+    // fallbacks below should run. Without this, a market-rfp run would always
+    // have linesStreamed > 0 from preLogs alone and the actual build output
+    // (checkout, "Print all files", changes groups) would never be fetched.
+    let peLines = 0;
 
     // Emit any pre-PE log lines collected during marketRFP provisioning.
-    const preLogs = preRunLogs.get(key);
+    // Fall back to the on-disk copy if the in-memory map lost it (e.g. a
+    // restart raced the persist write for an in-flight run).
+    const preLogs = preRunLogs.get(key) ?? logsDB.preLogs[key];
     if (preLogs && preLogs.length > 0) {
       openStep("Provisioning", 1 /* StepKindUser */);
       for (const line of preLogs) { sendData(line); linesStreamed++; }
@@ -1377,6 +1406,7 @@ app.get("/logs/:knot/:pipelineRkey/:workflow", (c) => {
               if (rawLine.startsWith("data: ")) {
                 processLine(rawLine.slice("data: ".length));
                 linesStreamed++;
+                peLines++;
               }
             }
           }
@@ -1390,9 +1420,11 @@ app.get("/logs/:knot/:pipelineRkey/:workflow", (c) => {
       log("error", "log stream SSE error", { taskId: run.taskId, err: String(err) });
     }
 
-    // Hybrid fallback: if SSE delivered nothing, pull the snapshot from the status endpoint.
-    // Covers cases where the task was cleaned up between run completion and log fetch.
-    if (linesStreamed === 0) {
+    // Hybrid fallback: if the PE's SSE stream delivered nothing (e.g. the task
+    // was already cleaned up — 404), pull the snapshot from the status endpoint.
+    // Gated on peLines (not linesStreamed) so a market-rfp run's "Provisioning"
+    // preLogs don't mask a missing PE build-output stream.
+    if (peLines === 0) {
       log("info", "log stream SSE empty, falling back to console_output snapshot", { taskId: run.taskId });
       try {
         const res = await fetch(`${run.peUrl}/request/status/${run.taskId}`);
@@ -1401,18 +1433,18 @@ app.get("/logs/:knot/:pipelineRkey/:workflow", (c) => {
           const raw = status.console_output ?? "";
           if (raw) {
             for (const line of raw.split("\n")) {
-              if (line) { processLine(line); linesStreamed++; }
+              if (line) { processLine(line); linesStreamed++; peLines++; }
             }
-            log("info", "log stream fallback complete", { taskId: run.taskId, linesStreamed });
+            log("info", "log stream fallback complete", { taskId: run.taskId, linesStreamed, peLines });
           } else {
             // Last resort: plain console_output endpoint
             const r2 = await fetch(`${run.peUrl}/request/console_output/${run.taskId}`);
             if (r2.ok) {
               const text = await r2.text();
               for (const line of text.split("\n")) {
-                if (line) { processLine(line); linesStreamed++; }
+                if (line) { processLine(line); linesStreamed++; peLines++; }
               }
-              log("info", "log stream last-resort complete", { taskId: run.taskId, linesStreamed });
+              log("info", "log stream last-resort complete", { taskId: run.taskId, linesStreamed, peLines });
             }
           }
         }
@@ -1422,7 +1454,7 @@ app.get("/logs/:knot/:pipelineRkey/:workflow", (c) => {
     }
 
     // Persisted log fallback: PE is gone after restart but we saved output locally.
-    if (linesStreamed === 0) {
+    if (peLines === 0) {
       const key = runKey(
         c.req.param("knot"),
         c.req.param("pipelineRkey"),
@@ -1432,9 +1464,9 @@ app.get("/logs/:knot/:pipelineRkey/:workflow", (c) => {
       if (saved) {
         log("info", "log stream serving from persisted logs db", { taskId: run.taskId });
         for (const line of saved.split("\n")) {
-          if (line) { processLine(line); linesStreamed++; }
+          if (line) { processLine(line); linesStreamed++; peLines++; }
         }
-        log("info", "log stream persisted complete", { taskId: run.taskId, linesStreamed });
+        log("info", "log stream persisted complete", { taskId: run.taskId, linesStreamed, peLines });
       }
     }
 
