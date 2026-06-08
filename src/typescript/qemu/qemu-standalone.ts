@@ -1,6 +1,9 @@
 #!/usr/bin/env -S deno run -A
 /**
  * Deno Script to build and run a Fedora or Ubuntu SquashFS LiveOS using QEMU.
+ *
+ * TODO - update to optionally run only in docker a cloud-init and sshd setup
+ *
  * Usage:
  * deno run -A main.ts build [--distro=fedora|ubuntu]
  * cat cloud-init.yaml | deno run -A main.ts run [--distro=fedora|ubuntu]
