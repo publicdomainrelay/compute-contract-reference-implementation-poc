@@ -18,7 +18,7 @@
           "appliesTo": {
             "type": "array",
             "description": "List of payload NSIDs this bidder handles (e.g. com.publicdomainrelay.temp.compute.vm).",
-            "items": { "type": "string" },
+            "items": { "type": "string", "format": "nsid" },
             "minLength": 1
           },
           "createdAt": {

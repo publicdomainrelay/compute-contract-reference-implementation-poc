@@ -10,9 +10,10 @@
 // Reading is still anonymous — every record here is public, and the spindle
 // log-streaming endpoint is unauthenticated (see core/spindle/server.go) — but
 // *triggering* a pipeline run requires proving who you are. Signing in (via
-// @atproto/oauth-client-browser) lets us mint short-lived ATProto service-auth
-// tokens (xrpc service-auth proxying, see TRIGGER_LXM in tangled.js) and POST
-// them to the repo's spindle /trigger endpoint.
+// @atproto/oauth-client-browser) lets us call the trigger XRPC on the user's
+// own PDS with an `atproto-proxy` header; the PDS mints a short-lived
+// service-auth token and proxies the request to the repo's spindle (PDS service
+// proxying, see TRIGGER_LXM / spindleProxyHeader in tangled.js).
 //
 // URLs are hash-routed (no server-side rewrite rules needed to serve
 // index.html for arbitrary paths, which static hosts for SPAs don't always
@@ -29,6 +30,7 @@
 
 import { BrowserOAuthClient } from "@atproto/oauth-client-browser";
 import { Agent } from "@atproto/api";
+import { XrpcClient } from "@atproto/xrpc";
 
 import {
 	REPO_NSID,
@@ -36,7 +38,7 @@ import {
 	appviewPipelinesUrl, appviewWorkflowUrl, spindleLogsUrl,
 	spindleEventsUrl, parsePipelineStatusEnvelope, upsertPipelineRun, pipelineStorageKey,
 	parseRoute, buildRoute,
-	TRIGGER_LXM, spindleServiceDid, spindleTriggerUrl, buildTriggerPayload, resolveLatestSha,
+	TRIGGER_LXM, TRIGGER_LEXICON, spindleProxyHeader, buildTriggerPayload, resolveLatestSha,
 } from "./tangled.js";
 
 let activeSocket; // undefined | WebSocket — the currently open log stream
@@ -48,12 +50,16 @@ let suppressNextHashChange = false; // set when we update the hash ourselves
 let currentView = {}; // { owner: { identifier, did, pds }, repoName, repoRecord }
 
 /* ----------------------------------------------------------------------- */
-/* Sign-in (OAuth) — only needed to mint service-auth tokens for /trigger   */
+/* Sign-in (OAuth) — needed so the PDS can proxy the trigger XRPC for us     */
 /* ----------------------------------------------------------------------- */
 
 let oauthClient; // undefined | BrowserOAuthClient
 let session; // undefined | OAuthSession — set once signed in
-let agent; // undefined | Agent — wraps `session` for XRPC calls (getServiceAuth, …)
+let agent; // undefined | Agent — wraps `session`, used for agent.did
+// triggerClient — an XrpcClient bound to the user's OAuth session (their PDS)
+// and taught the TRIGGER_LEXICON, so triggerPipeline can issue the trigger call
+// with an `atproto-proxy` header and have the PDS proxy it to the spindle.
+let triggerClient; // undefined | XrpcClient
 
 // buildClientId mirrors the loopback-client special case from the OAuth spec
 // (atproto.com/specs/oauth#localhost-client-development) for local dev, and
@@ -112,6 +118,11 @@ async function initOAuth() {
 	if (result) {
 		session = result.session;
 		agent = new Agent(session);
+		// The OAuthSession is a FetchHandlerObject: requests it handles go to the
+		// user's PDS with OAuth/DPoP auth applied, so this XrpcClient's calls are
+		// authenticated PDS calls that the PDS will proxy onward (per the
+		// atproto-proxy header we set on each trigger).
+		triggerClient = new XrpcClient(session, [TRIGGER_LEXICON]);
 		if (typeof result.state === "string" && result.state.startsWith("#")) {
 			suppressNextHashChange = true;
 			window.location.hash = result.state;
@@ -121,6 +132,7 @@ async function initOAuth() {
 	oauthClient.addEventListener("deleted", () => {
 		session = undefined;
 		agent = undefined;
+		triggerClient = undefined;
 		renderSession();
 	});
 
@@ -128,12 +140,12 @@ async function initOAuth() {
 }
 
 /* ----------------------------------------------------------------------- */
-/* Manual trigger — mints a service-auth token and POSTs it to /trigger     */
+/* Manual trigger — calls the trigger XRPC via PDS service proxying          */
 /* ----------------------------------------------------------------------- */
 
 function updateTriggerVisibility() {
 	const { repoRecord } = currentView;
-	const canTrigger = !!(session && agent && repoRecord?.value?.spindle && repoRecord?.value?.knot);
+	const canTrigger = !!(triggerClient && agent && repoRecord?.value?.spindle && repoRecord?.value?.knot);
 	if (canTrigger) {
 		document.getElementById("trigger-default-branch").textContent = repoRecord.value.defaultBranch || "the default branch";
 		show("trigger-container");
@@ -142,12 +154,13 @@ function updateTriggerVisibility() {
 	}
 }
 
-// triggerPipeline signs a service-auth token bound to TRIGGER_LXM with
-// aud=did:web:<spindle> (xrpc service-auth proxying — the user's PDS issues
-// the token, signed with their repo key; the spindle verifies it against
-// their DID document, see main.ts validateTriggerServiceAuth), then POSTs
-// the trigger payload to the spindle's /trigger endpoint with it as a Bearer
-// token.
+// triggerPipeline calls the trigger procedure on the user's OWN PDS with an
+// `atproto-proxy: did:web:<spindle>#tangled_spindle` header. The PDS mints and
+// signs the inter-service auth token (lxm=TRIGGER_LXM) with the user's repo key
+// and proxies the request to the spindle, which verifies the token against the
+// issuer's DID document and requires iss === actor. The browser never mints or
+// sees a token, and never talks to the spindle directly.
+// See atproto.com/specs/xrpc#service-proxying.
 async function triggerPipeline() {
 	const statusEl = document.getElementById("trigger-status");
 	const button = document.getElementById("trigger-button");
@@ -164,20 +177,11 @@ async function triggerPipeline() {
 
 		const payload = buildTriggerPayload({ knot, repoDid, repoName, ref, actorDid: agent.did });
 
-		statusEl.textContent = "Requesting service-auth token…";
-		const aud = spindleServiceDid(spindle);
-		const exp = Math.floor(Date.now() / 1000) + 60; // short-lived, single-use
-		const tokenRes = await agent.com.atproto.server.getServiceAuth({ aud, exp, lxm: TRIGGER_LXM });
-		const token = tokenRes.data.token;
-
-		statusEl.textContent = `Submitting trigger to ${spindle}…`;
-		const res = await fetch(spindleTriggerUrl(spindle), {
-			method: "POST",
-			headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-			body: JSON.stringify(payload),
+		statusEl.textContent = `Submitting trigger to ${spindle} via your PDS…`;
+		const res = await triggerClient.call(TRIGGER_LXM, {}, payload, {
+			headers: { "atproto-proxy": spindleProxyHeader(spindle) },
 		});
-		const body = await res.json().catch(() => ({}));
-		if (!res.ok) throw new Error(body.message || body.error || `${res.status} ${res.statusText}`);
+		const body = res.data ?? {};
 
 		const workflows = (body.workflows || []).map((w) => w.workflow).join(", ") || "no workflows";
 		statusEl.textContent = `Triggered ${payload.pipelineRkey} (${ref.slice(0, 12)}) — submitted: ${workflows}`;

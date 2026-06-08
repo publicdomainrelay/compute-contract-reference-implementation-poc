@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# Trigger a new pipeline run out-of-band by POSTing straight to this spindle's
-# /trigger endpoint (main.ts:1459) — bypasses the knot's git post-receive hook
-# (the only path that normally produces a sh.tangled.pipeline event, see
-# triggerPipeline in knotserver/internal.go) so we can exercise
-# triggerWorkflows() directly for testing.
+# Trigger a new pipeline run out-of-band by calling this spindle's trigger XRPC
+# (main.ts handleTrigger) — bypasses the knot's git post-receive hook (the only
+# path that normally produces a sh.tangled.pipeline event, see triggerPipeline
+# in knotserver/internal.go) so we can exercise triggerWorkflows() directly for
+# testing.
 #
-# POST body must satisfy TriggerPayload (main.ts:162-170):
+# Request body must satisfy TriggerPayload (main.ts:162-170):
 #   knot, pipelineRkey, actor, repoDid, repoName, ref, inputs?
 #
-# Requires an inter-service auth JWT (xrpc service-auth proxying — see
-# validateTriggerServiceAuth in main.ts): `iss` must equal `actor` above, `aud`
-# must be the spindle's own did:web, and the token must be bound to
-# com.publicdomainrelay.temp.spindle.trigger. We mint it with
-# `goat account service-auth` using the logged-in goat account.
+# Uses PDS service proxying (atproto.com/specs/xrpc#service-proxying), exactly
+# like the viewer SPA: we hand `goat xrpc` a service DID reference
+# (did:web:<spindle>#tangled_spindle) instead of a base URL, so it sends the
+# call to the logged-in account's PDS with an `atproto-proxy` header. The PDS
+# mints and signs the inter-service auth token (iss=<our DID>, aud=the spindle's
+# service DID, lxm=com.publicdomainrelay.temp.tangled.spindle.trigger) and
+# forwards the request to the spindle, which verifies it against our DID
+# document and requires iss === actor (see validateTriggerServiceAuth).
 #
 # Target repo defaults to "compute-contract-reference-implementation-poc" on
 # knot1.tangled.sh (repoDid did:plc:bbvpwcihkeeztqxk47s5arq3) — its
@@ -47,31 +50,24 @@ fi
 # pipelineRkey just needs to be unique per run — mint a TID-shaped key
 PIPELINE_RKEY="manual-$(date -u +%Y%m%dT%H%M%SZ)"
 
-# /trigger now requires an ATProto inter-service auth JWT (xrpc service-auth
-# proxying, see main.ts validateTriggerServiceAuth): iss must equal $ACTOR_DID,
-# aud must be the spindle's own service DID (did:web:<spindle hostname>), and
-# the token must be bound (lxm) to the trigger method — otherwise it's rejected
-# with 401/403. `goat account service-auth` asks the logged-in account's PDS to
-# mint and sign exactly that token.
+# Proxy target: the spindle's service DID reference. Handing this (rather than a
+# base URL) to `goat xrpc` triggers authenticated PDS proxying — goat posts to
+# our PDS with `atproto-proxy: <SPINDLE_REF>`, the PDS resolves the spindle's
+# did:web document, mints the service-auth token, and forwards the call.
 SPINDLE_HOST="$(echo "$SPINDLE_URL" | sed -E 's#^[a-z]+://##; s#/.*##')"
-SPINDLE_DID="did:web:${SPINDLE_HOST}"
-TRIGGER_LXM="com.publicdomainrelay.temp.spindle.trigger"
+SPINDLE_SERVICE_ID="tangled_spindle"
+SPINDLE_REF="did:web:${SPINDLE_HOST}#${SPINDLE_SERVICE_ID}"
+TRIGGER_LXM="com.publicdomainrelay.temp.tangled.spindle.trigger"
 
-TOKEN="$(goat account service-auth --aud "$SPINDLE_DID" --lxm "$TRIGGER_LXM" --duration-sec 60)"
-if [ -z "$TOKEN" ]; then
-  echo "error: failed to mint service-auth token (aud=${SPINDLE_DID} lxm=${TRIGGER_LXM})" >&2
-  exit 1
-fi
-
-echo "Triggering pipeline run via ${SPINDLE_URL}/trigger"
-echo "  repo:   $REPO_NAME ($REPO_DID)"
-echo "  knot:   $KNOT"
-echo "  branch: $DEFAULT_BRANCH"
-echo "  sha:    $SHA"
-echo "  actor:  $ACTOR_DID"
-echo "  rkey:   $PIPELINE_RKEY"
-echo "  aud:    $SPINDLE_DID"
-echo "  lxm:    $TRIGGER_LXM"
+echo "Triggering pipeline run by proxying ${TRIGGER_LXM} through your PDS"
+echo "  repo:    $REPO_NAME ($REPO_DID)"
+echo "  knot:    $KNOT"
+echo "  branch:  $DEFAULT_BRANCH"
+echo "  sha:     $SHA"
+echo "  actor:   $ACTOR_DID"
+echo "  rkey:    $PIPELINE_RKEY"
+echo "  proxy:   $SPINDLE_REF"
+echo "  lxm:     $TRIGGER_LXM"
 
 BODY=$(jq -n \
   --arg knot "$KNOT" \
@@ -82,9 +78,8 @@ BODY=$(jq -n \
   --arg ref "$SHA" \
   '{knot: $knot, pipelineRkey: $pipelineRkey, actor: $actor, repoDid: $repoDid, repoName: $repoName, ref: $ref}')
 
+# `goat xrpc procedure <service> <nsid> ...`: a service DID reference selects
+# authenticated PDS proxying; `-` reads the JSON request body from stdin.
 echo "$BODY" | tee /dev/stderr \
-  | curl -sS -X POST "${SPINDLE_URL}/trigger" \
-      -H 'Content-Type: application/json' \
-      -H "Authorization: Bearer ${TOKEN}" \
-      -d @- \
+  | goat xrpc procedure "$SPINDLE_REF" "$TRIGGER_LXM" 'Content-Type:application/json' - \
   | tee /dev/stderr | jq .

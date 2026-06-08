@@ -147,37 +147,74 @@ export function spindleEventsUrl(spindle) {
 }
 
 /* ----------------------------------------------------------------------- */
-/* Manual triggering: xrpc service-auth proxying to POST /trigger           */
+/* Manual triggering: PDS service proxying to the spindle's trigger XRPC     */
 /*                                                                           */
-/* The spindle's /trigger endpoint (main.ts app.post("/trigger")) now       */
-/* requires an ATProto inter-service auth JWT (see                          */
-/* atproto.com/specs/xrpc#inter-service-authentication-jwt):                */
-/*   - iss  = the signed-in user's DID                                      */
-/*   - aud  = the spindle's service DID, did:web:<spindle-hostname>         */
-/*   - lxm  = TRIGGER_LXM, binding the token to this one action             */
-/* The token is minted via com.atproto.server.getServiceAuth (proxied       */
-/* through the user's PDS, which signs it with their repo signing key) and  */
-/* sent as a Bearer token — this *is* "xrpc service auth proxying": the PDS */
-/* mediates issuance, the spindle verifies the result against the issuer's  */
-/* DID document. See main.ts validateTriggerServiceAuth.                    */
+/* We do NOT talk to the spindle directly. Instead the signed-in user makes  */
+/* an authenticated XRPC call to their OWN PDS with the                      */
+/*   atproto-proxy: did:web:<spindle>#tangled_spindle                        */
+/* header (see spindleProxyHeader). The PDS resolves that service DID,       */
+/* finds the matching `service` entry in the spindle's did:web document      */
+/* (served at /.well-known/did.json), mints a short-lived inter-service auth */
+/* JWT — signed with the user's repo signing key, with iss=<user DID>,       */
+/* aud=did:web:<spindle>#tangled_spindle, lxm=TRIGGER_LXM — and forwards the  */
+/* request to the spindle's serviceEndpoint as a Bearer token. The spindle   */
+/* verifies that token against the issuer's DID document and requires        */
+/* iss === actor (see main.ts validateTriggerServiceAuth).                   */
+/* See atproto.com/specs/xrpc#service-proxying.                              */
 /* ----------------------------------------------------------------------- */
 
-// TRIGGER_LXM is the lexicon-method identifier the service-auth token is
-// bound to. It isn't a registered NSID with a schema (the endpoint is plain
-// POST /trigger, not /xrpc/...) — it just needs to be a stable string both
-// sides agree on, so a token minted for this purpose can't be replayed
-// against some other endpoint.
-export const TRIGGER_LXM = "com.publicdomainrelay.temp.spindle.trigger";
+// TRIGGER_LXM is the NSID of the trigger procedure. It is a real, published
+// lexicon (lexicons/com/publicdomainrelay/temp/tangled/spindle/trigger.json),
+// so it doubles as the proxied request path (/xrpc/<TRIGGER_LXM>) and the `lxm`
+// the PDS binds the service-auth token to.
+export const TRIGGER_LXM = "com.publicdomainrelay.temp.tangled.spindle.trigger";
 
-// spindleServiceDid is the audience a trigger token must be issued for — the
-// spindle's own did:web identity, derived from its public hostname.
+// SPINDLE_SERVICE_ID is the DID-document `service` fragment under which a
+// spindle advertises itself for PDS proxying (matches SPINDLE_SERVICE_ID in
+// the spindle's main.ts and the `id` in its /.well-known/did.json).
+export const SPINDLE_SERVICE_ID = "tangled_spindle";
+
+// TRIGGER_LEXICON is the minimal lexicon doc the browser XrpcClient needs to
+// know TRIGGER_LXM is a JSON procedure (so it issues a POST and validates the
+// body). Kept in sync with the published schema referenced above.
+export const TRIGGER_LEXICON = {
+	lexicon: 1,
+	id: TRIGGER_LXM,
+	defs: {
+		main: {
+			type: "procedure",
+			input: {
+				encoding: "application/json",
+				schema: {
+					type: "object",
+					required: ["knot", "pipelineRkey", "actor", "repoDid", "repoName", "ref"],
+					properties: {
+						knot: { type: "string" },
+						pipelineRkey: { type: "string" },
+						actor: { type: "string", format: "did" },
+						repoDid: { type: "string", format: "did" },
+						repoName: { type: "string" },
+						ref: { type: "string" },
+						inputs: { type: "unknown" },
+					},
+				},
+			},
+			output: { encoding: "application/json" },
+		},
+	},
+};
+
+// spindleServiceDid is the spindle's own did:web identity, derived from its
+// public hostname.
 export function spindleServiceDid(spindle) {
 	return `did:web:${spindle}`;
 }
 
-// spindleTriggerUrl builds the spindle's POST /trigger endpoint URL.
-export function spindleTriggerUrl(spindle) {
-	return `https://${spindle}/trigger`;
+// spindleProxyHeader builds the `atproto-proxy` header value that tells the
+// user's PDS which service to forward the trigger call to: the spindle's
+// service DID plus its service-endpoint fragment.
+export function spindleProxyHeader(spindle) {
+	return `${spindleServiceDid(spindle)}#${SPINDLE_SERVICE_ID}`;
 }
 
 // buildTriggerPayload assembles a TriggerPayload (mirrors main.ts:162-170 /

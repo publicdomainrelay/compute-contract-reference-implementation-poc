@@ -12,7 +12,7 @@
   "response_types": [
     "code"
   ],
-  "scope": "atproto rpc:com.publicdomainrelay.temp.spindle.trigger?aud=*",
+  "scope": "atproto rpc:com.publicdomainrelay.temp.tangled.spindle.trigger?aud=*",
   "token_endpoint_auth_method": "none",
   "client_name": "Tangled Pipelines Viewer",
   "client_uri": "https://tangled.fedcicd.com"

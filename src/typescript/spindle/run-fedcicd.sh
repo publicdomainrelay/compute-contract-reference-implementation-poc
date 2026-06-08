@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export COMPUTE_PROVIDER=market.rfp
+# export COMPUTE_PROVIDER=market.rfp
 export BID_WINDOW_MS=3000
 export SPINDLE_HOSTNAME="gha.spindle.tangled.fedcicd.com"
 export PORT="7777"

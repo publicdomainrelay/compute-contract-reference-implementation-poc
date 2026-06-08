@@ -66,6 +66,7 @@
 	{
 		"imports": {
 			"@atproto/api": "https://esm.sh/@atproto/api@0.16.4",
+			"@atproto/xrpc": "https://esm.sh/@atproto/xrpc@0.7.7",
 			"@atproto/oauth-client-browser": "https://esm.sh/@atproto/oauth-client-browser@0.3.29"
 		}
 	}
@@ -92,10 +93,11 @@
 			<article id="login-container" style="display: none;">
 				<h3>Sign in with the Atmosphere</h3>
 				<p>
-					Signing in lets you mint a short-lived
-					<a target="_blank" href="https://atproto.com/specs/xrpc#inter-service-authentication-jwt">ATProto service-auth token</a>
-					to call a repo's spindle <code>/trigger</code> endpoint and kick off a pipeline run yourself,
-					instead of waiting for a knot push event.
+					Signing in lets your own PDS
+					<a target="_blank" href="https://atproto.com/specs/xrpc#service-proxying">proxy an authenticated XRPC call</a>
+					to a repo's spindle and kick off a pipeline run yourself, instead of waiting for a knot
+					push event. Your PDS mints and signs the short-lived service-auth token behind the
+					scenes — the token never touches the browser.
 				</p>
 				<form id="login-form">
 					<fieldset role="group">
@@ -162,16 +164,19 @@
 					</a>
 				</p>
 
-				<!-- manual trigger: signs an ATProto service-auth token (xrpc service-auth
-				     proxying) and POSTs it to the repo's spindle /trigger endpoint. Only
-				     shown once the user has signed in (see "Sign in" above). -->
+				<!-- manual trigger: calls the trigger XRPC on the user's own PDS with an
+				     atproto-proxy header, so the PDS mints the service-auth token and
+				     proxies the request to the repo's spindle. Only shown once the user
+				     has signed in (see "Sign in" above). -->
 				<div id="trigger-container" style="display: none;">
 					<p>
-						Manually start a pipeline run on <code id="trigger-default-branch"></code> via the
-						spindle's <code>/trigger</code> endpoint, authenticated with a freshly-minted
-						service-auth token (<code>iss</code> = your DID, <code>aud</code> = the spindle's
-						service DID, <code>lxm</code> = the trigger method) — the spindle verifies the
-						token's signature against your DID document before running anything.
+						Manually start a pipeline run on <code id="trigger-default-branch"></code> by calling
+						<code>com.publicdomainrelay.temp.tangled.spindle.trigger</code> on <em>your</em> PDS with an
+						<code>atproto-proxy</code> header pointed at the spindle's
+						<code>did:web</code> service entry. Your PDS signs a service-auth token
+						(<code>iss</code> = your DID, <code>aud</code> = the spindle's service DID,
+						<code>lxm</code> = the trigger method) and forwards the request; the spindle verifies
+						the token against your DID document before running anything.
 					</p>
 					<button id="trigger-button">Trigger pipeline run</button>
 					<p id="trigger-status"></p>

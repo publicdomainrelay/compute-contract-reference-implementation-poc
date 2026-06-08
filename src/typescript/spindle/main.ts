@@ -31,6 +31,7 @@ import { Agent, CredentialSession } from "npm:@atproto/api";
 import { IdResolver } from "npm:@atproto/identity";
 import { verifyJwt } from "npm:@atproto/xrpc-server";
 import { Hono } from "jsr:@hono/hono";
+import type { Context } from "jsr:@hono/hono";
 import { cors } from "jsr:@hono/hono/cors";
 import { parse as parseYaml } from "jsr:@std/yaml";
 import { marketRFPSubmitWorkflow, marketRFPConfigFromEnv, pendingBids } from "./marketRFP.ts";
@@ -599,8 +600,6 @@ function watchKnot(knot: string): void {
       const repoName     = meta.repo.repo ?? "";
       const pipelineRkey = envelope.rkey;
 
-      log("info", "knot stream meta", { meta });
-
       let ref = "";
       if (meta.kind === "push" && meta.push) {
         ref = meta.push.newSha;
@@ -713,19 +712,27 @@ async function discoverKnotsFromATProto(ownerDid?: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// /trigger auth — ATProto inter-service auth JWT (xrpc service-auth proxying)
+// /trigger auth — ATProto inter-service auth JWT (PDS service proxying)
 //
-// The viewer SPA signs in (BrowserOAuthClient), then mints a short-lived
-// com.atproto.server.getServiceAuth token bound to TRIGGER_LXM with
-// aud=did:web:<this spindle's effective hostname> — the user's PDS issues and
-// signs it with their repo signing key. We verify the signature against the
-// issuer's DID document (resolved via IdResolver), confirm the audience and
-// lxm match, and require the issuer to be the trigger's declared `actor` —
-// i.e. you can only manually trigger runs attributed to yourself.
-// See atproto.com/specs/xrpc#inter-service-authentication-jwt.
+// The viewer SPA signs in (BrowserOAuthClient), then makes an XRPC call to the
+// user's OWN PDS with the `atproto-proxy: did:web:<spindle>#tangled_spindle`
+// header. The PDS resolves that service DID, finds the matching `service` entry
+// in our DID document (served at GET /.well-known/did.json below), mints a
+// short-lived inter-service auth token bound to TRIGGER_LXM — signed with the
+// user's repo signing key — and forwards the request here as a Bearer token.
+// We verify the signature against the issuer's DID document (resolved via
+// IdResolver), confirm the audience and lxm match, and require the issuer to be
+// the trigger's declared `actor` — i.e. you can only manually trigger runs
+// attributed to yourself. See atproto.com/specs/xrpc#service-proxying and
+// atproto.com/specs/xrpc#inter-service-authentication-jwt.
 // ---------------------------------------------------------------------------
 
-const TRIGGER_LXM = "com.publicdomainrelay.temp.spindle.trigger";
+const TRIGGER_LXM = "com.publicdomainrelay.temp.tangled.spindle.trigger";
+
+// Service endpoint identifier (DID-document `service` fragment) under which this
+// spindle advertises itself for PDS proxying. The viewer's `atproto-proxy`
+// header and the proxied token's `aud` are `did:web:<spindle>#<this id>`.
+const SPINDLE_SERVICE_ID = "tangled_spindle";
 
 const idResolver = new IdResolver();
 
@@ -738,17 +745,33 @@ function extractBearer(header: string | undefined | null): string {
 
 async function validateTriggerServiceAuth(authHeader: string | undefined | null, hostname: string): Promise<string> {
   const token = extractBearer(authHeader);
-  const aud = `did:web:${effectiveHostname(getOwnerDid(hostname))}`;
+  const serviceDid = `did:web:${effectiveHostname(getOwnerDid(hostname))}`;
+  const serviceRef = `${serviceDid}#${SPINDLE_SERVICE_ID}`;
 
-  const payload = await verifyJwt(token, aud, TRIGGER_LXM, async (did: string) => {
+  // Pass ownDid=null so verifyJwt only checks the signature, lxm, and expiry; we
+  // assert the audience by hand just below. This lets us accept BOTH forms of
+  // `aud` a proxying PDS may send: the full service reference
+  // (`did:web:<spindle>#tangled_spindle`, used by newer PDSes) and the bare
+  // service DID (`did:web:<spindle>`) that the reference PDS emitted until Spring
+  // 2026 by stripping the fragment. Re-checking aud here preserves the
+  // anti-forwarding guarantee verifyJwt's own aud check would otherwise give.
+  // See atproto.com/specs/xrpc#service-proxying.
+  const payload = await verifyJwt(token, null, TRIGGER_LXM, async (did: string) => {
     return await idResolver.did.resolveAtprotoKey(did);
   });
+
+  const aud = (payload as Record<string, unknown>).aud as string | undefined;
+  if (aud !== serviceDid && aud !== serviceRef) {
+    throw new Error(`unexpected audience ${aud ?? "(none)"}; expected ${serviceDid} or ${serviceRef}`);
+  }
 
   const iss = (payload as Record<string, unknown>).iss as string | undefined;
   if (!iss || !iss.startsWith("did:")) {
     throw new Error("service auth token missing DID issuer");
   }
-  return iss;
+  // Strip any service fragment from the issuer (legacy tokens could carry one)
+  // so it compares cleanly against the trigger's bare `actor` DID.
+  return iss.split("#")[0];
 }
 
 async function repoRegisteredToThisSpindle(hostname: string, repoDid: string): Promise<bool> {
@@ -1240,11 +1263,13 @@ tangled-spindle-minimal: runs .github/workflows via the policy engine.
 
 Routes:
   GET  /                                      this page
+  GET  /.well-known/did.json                  did:web doc (service entry for PDS proxying)
   GET  /xrpc/sh.tangled.owner                 spindle owner DID
   GET  /events                                pipeline status WebSocket
   GET  /logs/:knot/:pipelineRkey/:workflow          console output
   GET  /status/:knot/:pipelineRkey/:workflow        run status JSON
-  POST /trigger                                     submit a pipeline trigger
+  POST /xrpc/com.publicdomainrelay.temp.tangled.spindle.trigger  submit a pipeline trigger (PDS-proxyable)
+  POST /trigger                                     submit a pipeline trigger (bare alias)
   POST /xrpc/sh.tangled.pipeline.cancelPipeline     cancel a run { pipeline, repo, workflow }
   GET  /xrpc/sh.tangled.repo.listSecrets?repo=DID  list secrets (keys only)
   POST /xrpc/sh.tangled.repo.addSecret             add secret { repo, key, value }
@@ -1260,6 +1285,31 @@ Policy engine    : ${POLICY_ENGINE_URL}
 app.get("/xrpc/sh.tangled.owner", (c) => {
   const host = c.req.header("host") ?? HOSTNAME;
   return c.json({ owner: getOwnerDid(host) });
+});
+
+// /.well-known/did.json — the spindle's did:web document. This is what makes
+// PDS service proxying possible: a client points the `atproto-proxy` header at
+// `did:web:<spindle>#tangled_spindle`, the PDS resolves that DID to this
+// document, finds the matching `service` entry, and forwards the proxied XRPC
+// request to its `serviceEndpoint`. The document is built per-request from the
+// Host header so it stays correct in dynamic per-owner subdomain mode
+// (<did-slug>.HOSTNAME), exactly matching the `aud` validateTriggerServiceAuth
+// expects. No signing key is needed here — the spindle only receives proxied
+// tokens (signed by the user's key), it never issues them.
+app.get("/.well-known/did.json", (c) => {
+  const host = c.req.header("host") ?? HOSTNAME;
+  const serviceHost = effectiveHostname(getOwnerDid(host));
+  return c.json({
+    "@context": ["https://www.w3.org/ns/did/v1"],
+    id: `did:web:${serviceHost}`,
+    service: [
+      {
+        id: `#${SPINDLE_SERVICE_ID}`,
+        type: "TangledSpindle",
+        serviceEndpoint: `https://${serviceHost}`,
+      },
+    ],
+  });
 });
 
 // /events — WebSocket fan-out of sh.tangled.pipeline.status events.
@@ -1685,11 +1735,15 @@ app.post("/xrpc/com.publicdomainrelay.temp.market.submitEvent", async (c) => {
   return c.json({ ok: true });
 });
 
-// /trigger — accept a pipeline trigger and kick off workflow execution.
-// Body mirrors the fields from sh.tangled.pipeline that the knot
-// dispatches to the spindle when a push/PR event fires:
+// handleTrigger — accept a pipeline trigger and kick off workflow execution.
+// Body mirrors the fields from sh.tangled.pipeline that the knot dispatches to
+// the spindle when a push/PR event fires:
 //   knot, pipelineRkey, actor, repoDid, repoName, ref, inputs?
-app.post("/trigger", async (c) => {
+//
+// Registered at /xrpc/com.publicdomainrelay.temp.tangled.spindle.trigger (the
+// canonical, PDS-proxyable path — proxying only forwards /xrpc/<nsid>) and, for
+// backwards compatibility with out-of-band callers, at the bare /trigger path.
+const handleTrigger = async (c: Context): Promise<Response> => {
   let body: Partial<TriggerPayload>;
   try {
     body = await c.req.json();
@@ -1756,7 +1810,12 @@ app.post("/trigger", async (c) => {
       statusUrl: `https://${hostnameForRepo(trigger.repoDid)}/status/${trigger.knot}/${trigger.pipelineRkey}/${stem}`,
     })),
   });
-});
+};
+
+// Canonical path: reachable via PDS service proxying (atproto-proxy header).
+app.post(`/xrpc/${TRIGGER_LXM}`, handleTrigger);
+// Backwards-compatible bare path for out-of-band callers (e.g. direct curl).
+app.post("/trigger", handleTrigger);
 
 app.get("/healthz", (c) => c.json({ ok: true }));
 

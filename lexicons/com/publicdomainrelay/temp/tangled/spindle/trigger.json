@@ -1,0 +1,83 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.tangled.spindle.trigger",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Manually trigger a pipeline run on a Tangled spindle. Intended to be called via PDS service proxying (the 'atproto-proxy' header, pointed at the spindle's did:web service entry), so the user's PDS mints and signs the inter-service auth token; the spindle verifies the token's issuer against their DID document and requires it to match the trigger's 'actor'. Mirrors the sh.tangled.pipeline fields a knot dispatches on a push/PR event.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["knot", "pipelineRkey", "actor", "repoDid", "repoName", "ref"],
+          "properties": {
+            "knot": {
+              "type": "string",
+              "description": "Knot hostname that hosts the repo, e.g. knot1.tangled.sh."
+            },
+            "pipelineRkey": {
+              "type": "string",
+              "description": "Record key identifying this pipeline run; only needs to be unique per run."
+            },
+            "actor": {
+              "type": "string",
+              "format": "did",
+              "description": "DID of the actor the run is attributed to. Must equal the issuer of the service-auth token."
+            },
+            "repoDid": {
+              "type": "string",
+              "format": "did",
+              "description": "DID of the repo (the owner DID used for sh.tangled.repo.blob lookups)."
+            },
+            "repoName": {
+              "type": "string",
+              "description": "Human-readable repo name, e.g. myrepo."
+            },
+            "ref": {
+              "type": "string",
+              "description": "Commit SHA to run at. The spindle fetches .github/workflows/*.yml at this exact commit, so it must be a real commit, not a branch name."
+            },
+            "inputs": {
+              "type": "unknown",
+              "description": "Optional workflow_dispatch-style inputs, as a map of string keys to string values."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["submitted", "knot", "pipelineRkey", "ref", "workflows"],
+          "properties": {
+            "submitted": {
+              "type": "boolean",
+              "description": "True once the trigger was accepted and workflow submission started."
+            },
+            "knot": { "type": "string" },
+            "pipelineRkey": { "type": "string" },
+            "ref": { "type": "string" },
+            "workflows": {
+              "type": "array",
+              "description": "The workflow stems that were submitted, with their log/status stream URLs.",
+              "items": {
+                "type": "object",
+                "required": ["workflow"],
+                "properties": {
+                  "workflow": { "type": "string" },
+                  "logsUrl": { "type": "string", "format": "uri" },
+                  "statusUrl": { "type": "string", "format": "uri" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "errors": [
+        { "name": "InvalidRequest", "description": "Malformed body or missing required fields." },
+        { "name": "Unauthorized", "description": "Missing or invalid inter-service auth token." },
+        { "name": "Forbidden", "description": "Token issuer does not match actor, or repo is not authorized for this spindle." }
+      ]
+    }
+  }
+}

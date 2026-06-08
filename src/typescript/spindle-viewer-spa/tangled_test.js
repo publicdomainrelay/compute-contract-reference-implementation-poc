@@ -23,7 +23,7 @@ import {
 	appviewRepoUrl, appviewPipelinesUrl, appviewWorkflowUrl, spindleLogsUrl,
 	spindleEventsUrl, parsePipelineStatusEnvelope, pipelineRunKey, upsertPipelineRun, pipelineStorageKey,
 	parseRoute, buildRoute,
-	TRIGGER_LXM, spindleServiceDid, spindleTriggerUrl, buildTriggerPayload, triggerPipelineRkey,
+	TRIGGER_LXM, SPINDLE_SERVICE_ID, spindleServiceDid, spindleProxyHeader, buildTriggerPayload, triggerPipelineRkey,
 } from "./tangled.js";
 
 const OWNER = "johnandersen777.bsky.social";
@@ -49,12 +49,16 @@ Deno.test("findRepoRecord matches by rkey or by cosmetic name", () => {
 });
 
 /* ----------------------------------------------------------------------- */
-/* Manual triggering: xrpc service-auth proxying to POST /trigger           */
+/* Manual triggering: PDS service proxying to the spindle's trigger XRPC     */
 /* ----------------------------------------------------------------------- */
 
-Deno.test("spindleServiceDid + spindleTriggerUrl derive the spindle's service DID and trigger endpoint from its hostname", () => {
+Deno.test("spindleServiceDid + spindleProxyHeader derive the spindle's service DID and atproto-proxy header from its hostname", () => {
 	assertEquals(spindleServiceDid("did-plc-aaa.gha.spindle.example.com"), "did:web:did-plc-aaa.gha.spindle.example.com");
-	assertEquals(spindleTriggerUrl("did-plc-aaa.gha.spindle.example.com"), "https://did-plc-aaa.gha.spindle.example.com/trigger");
+	assertEquals(
+		spindleProxyHeader("did-plc-aaa.gha.spindle.example.com"),
+		`did:web:did-plc-aaa.gha.spindle.example.com#${SPINDLE_SERVICE_ID}`,
+	);
+	assertEquals(SPINDLE_SERVICE_ID, "tangled_spindle");
 });
 
 Deno.test("triggerPipelineRkey mints a unique, sortable rkey from a timestamp", () => {
@@ -91,8 +95,8 @@ Deno.test("buildTriggerPayload requires the fields the spindle's TriggerPayload 
 	assert(threw, "expected buildTriggerPayload to throw when actorDid is missing");
 });
 
-Deno.test("TRIGGER_LXM is a stable lexicon-method identifier the service-auth token is bound to", () => {
-	assertEquals(TRIGGER_LXM, "com.publicdomainrelay.temp.spindle.trigger");
+Deno.test("TRIGGER_LXM is the published trigger NSID the service-auth token is bound to", () => {
+	assertEquals(TRIGGER_LXM, "com.publicdomainrelay.temp.tangled.spindle.trigger");
 });
 
 /* ----------------------------------------------------------------------- */
