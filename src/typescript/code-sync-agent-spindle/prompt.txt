@@ -1,0 +1,6 @@
+Using deno typescript and the claude code agent sdk write two agents which use structured outputs. The subagent will determine if any changes to ./core/spindle/ are relavent to ./compute-contract-reference-implementation-poc/src/typescript/spindle/, if they are then it will report what changed and how it's relavent and what changes need to be made to compute-contract-reference-implementation-poc. Then the main agent will execute those changes on a branch and create a commit, reporting the commit created in the scripts JSON output. If no chaanges are needed a report on what was analyzed and why no changes were needed will be output.
+
+Read the following and do what we've asked you please.
+
+- https://code.claude.com/docs/en/agent-sdk/structured-outputs.md
+- https://code.claude.com/docs/en/agent-sdk/subagents.md

@@ -1,0 +1,8 @@
+{
+  "imports": {
+    "@anthropic-ai/claude-agent-sdk": "npm:@anthropic-ai/claude-agent-sdk"
+  },
+  "tasks": {
+    "sync-spindle": "deno run --allow-all sync-spindle-agent.ts"
+  }
+}
