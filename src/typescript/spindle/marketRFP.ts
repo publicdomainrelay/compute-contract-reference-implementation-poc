@@ -32,6 +32,7 @@
 //   PE_READY_TIMEOUT_MS     How long to wait for PE to respond (default: 120000)
 
 import { Agent, CredentialSession } from "npm:@atproto/api";
+import { XrpcClient } from "@atproto/xrpc";
 import { IdResolver } from "npm:@atproto/identity";
 import { getPdsEndpoint } from "npm:@atproto/common-web";
 
@@ -51,6 +52,33 @@ const EVENT_NSID = "com.publicdomainrelay.temp.market.event";
 const VM_DELETE_EVENT_NSID = "com.publicdomainrelay.temp.compute.events.vm.delete";
 
 // ---------------------------------------------------------------------------
+// Market service proxying (atproto PDS service-proxy)
+// ---------------------------------------------------------------------------
+
+const MARKET_SERVICE_ID = "pdr_market";
+const SUBMIT_RFP_LXM   = "com.publicdomainrelay.temp.market.submitRfp";
+const SUBMIT_EVENT_LXM = "com.publicdomainrelay.temp.market.submitEvent";
+
+const marketLexicons = [
+  {
+    lexicon: 1,
+    id: SUBMIT_RFP_LXM,
+    defs: { main: { type: "procedure",
+      input: { encoding: "application/json", schema: { type: "object", required: ["rfpUri", "rfpCid"],
+        properties: { rfpUri: { type: "string" }, rfpCid: { type: "string" } } } },
+      output: { encoding: "application/json" } } },
+  },
+  {
+    lexicon: 1,
+    id: SUBMIT_EVENT_LXM,
+    defs: { main: { type: "procedure",
+      input: { encoding: "application/json", schema: { type: "object", required: ["uri", "cid", "record"],
+        properties: { uri: { type: "string" }, cid: { type: "string" }, record: { type: "unknown" } } } },
+      output: { encoding: "application/json" } } },
+  },
+];
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -60,7 +88,7 @@ type StrongRef = {
   cid: string;
 };
 
-type BidRecord = {
+export type BidRecord = {
   $type: string;
   rfp: StrongRef;
   payload: StrongRef;
@@ -372,6 +400,7 @@ async function notifyBidderViaOffering(
   rfpUri: string,
   rfpCid: string,
   payloadNsid: string,
+  marketClient: XrpcClient,
   log: RFPLogger,
 ): Promise<void> {
   let pds: string;
@@ -396,21 +425,16 @@ async function notifyBidderViaOffering(
     if (!endpointUrl || !Array.isArray(appliesTo)) continue;
     if (!appliesTo.includes(payloadNsid)) continue;
 
-    try {
-      assertSafeEgressUrl(endpointUrl);
-    } catch (err) {
-      log("offering endpointUrl rejected", { bidderDid, endpointUrl, err: String(err) });
-      continue;
-    }
+    // endpointUrl now holds a market service DID ref (did:web:HOST#pdr_market).
     log("submitting RFP to vouched bidder", { bidderDid, endpointUrl, rfpUri });
     try {
-      const res = await fetch(`${endpointUrl.replace(/\/+$/, "")}/xrpc/com.publicdomainrelay.temp.market.submitRfp`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rfpUri, rfpCid }),
-        signal: AbortSignal.timeout(15000),
-      });
-      log("submitRfp response", { bidderDid, status: res.status });
+      const res = await marketClient.call(
+        SUBMIT_RFP_LXM,
+        {},
+        { rfpUri, rfpCid },
+        { headers: { "atproto-proxy": endpointUrl } },
+      );
+      log("submitRfp response", { bidderDid, success: res.success });
     } catch (err) {
       log("submitRfp failed", { bidderDid, endpointUrl, err: String(err) });
     }
@@ -424,6 +448,7 @@ async function discoverAndNotifyBidders(
   rfpUri: string,
   rfpCid: string,
   payloadNsid: string,
+  marketClient: XrpcClient,
   log: RFPLogger,
 ): Promise<Set<string>> {
   log("discovering bidders via vouches", { owner: trigger.actor, knot: trigger.knot });
@@ -452,7 +477,7 @@ async function discoverAndNotifyBidders(
 
   await Promise.all(
     Array.from(vouchedDids).map((did) =>
-      notifyBidderViaOffering(did, rfpUri, rfpCid, payloadNsid, log)
+      notifyBidderViaOffering(did, rfpUri, rfpCid, payloadNsid, marketClient, log)
     ),
   );
 
@@ -732,6 +757,11 @@ export async function marketRFPSubmitWorkflow(
   const agentDidPlcKey = agentDid.split(":")[2];
   log("atproto authenticated", { did: agentDid, handle: config.handle });
 
+  // XrpcClient over our own PDS session; market calls are service-proxied via
+  // the `atproto-proxy` header carrying a did:web:HOST#pdr_market service ref.
+  // deno-lint-ignore no-explicit-any
+  const marketClient = new XrpcClient(session, marketLexicons as any);
+
   // Build user_data with policy-engine bootstrap
   const userData = buildUserData(serviceName);
 
@@ -751,16 +781,15 @@ export async function marketRFPSubmitWorkflow(
   log("compute.vm created", { uri: vmRef.uri });
 
   // Create market.rfp record wrapping the VM
-  const submitBidUrl = spindleHostname
-    ? `https://${spindleHostname}/xrpc/com.publicdomainrelay.temp.market.submitBid`
-    : undefined;
   const rfpRecord: Record<string, unknown> = {
     $type: RFP_NSID,
     domain: "compute",
     payload: vmRef,
     createdAt: new Date().toISOString(),
   };
-  if (submitBidUrl) rfpRecord.submitBid = submitBidUrl;
+  if (spindleHostname) {
+    rfpRecord.submitBid = `did:web:${spindleHostname}#${MARKET_SERVICE_ID}`;
+  }
   const rfpRef = await atprotoCreateRecord(agent, RFP_NSID, rfpRecord);
   log("market.rfp created", { uri: rfpRef.uri });
 
@@ -771,6 +800,7 @@ export async function marketRFPSubmitWorkflow(
     rfpUri,
     rfpRef.cid,
     VM_NSID,
+    marketClient,
     log,
   );
 
@@ -812,7 +842,7 @@ export async function marketRFPSubmitWorkflow(
     createdAt: new Date().toISOString(),
   };
   if (spindleHostname) {
-    acceptRecord.submitEvent = `https://${spindleHostname}/xrpc/com.publicdomainrelay.temp.market.submitEvent`;
+    acceptRecord.submitEvent = `did:web:${spindleHostname}#${MARKET_SERVICE_ID}`;
   }
   const acceptRef = await atprotoCreateRecord(agent, ACCEPT_NSID, acceptRecord);
   log("market.accept created", { uri: acceptRef.uri });
@@ -949,7 +979,6 @@ export async function marketRFPSubmitWorkflow(
       return;
     }
     try {
-      assertSafeEgressUrl(providerSubmitEventUrl);
       const nowIso = new Date().toISOString();
       const deletePayloadRef = await atprotoCreateRecord(agent, VM_DELETE_EVENT_NSID, {
         $type: VM_DELETE_EVENT_NSID,
@@ -963,13 +992,15 @@ export async function marketRFPSubmitWorkflow(
         createdAt: nowIso,
       };
       const eventRef = await atprotoCreateRecord(agent, EVENT_NSID, eventRecord);
-      const res = await fetch(providerSubmitEventUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uri: eventRef.uri, cid: eventRef.cid, record: eventRecord }),
-        signal: AbortSignal.timeout(10000),
-      });
-      log("submitEvent vm.delete POST", { url: providerSubmitEventUrl, reason, status: res.status });
+      // providerSubmitEventUrl holds a did:web:HOST#pdr_market service ref;
+      // route the submitEvent call through our PDS via service proxying.
+      const res = await marketClient.call(
+        SUBMIT_EVENT_LXM,
+        {},
+        { uri: eventRef.uri, cid: eventRef.cid, record: eventRecord },
+        { headers: { "atproto-proxy": providerSubmitEventUrl } },
+      );
+      log("submitEvent vm.delete POST", { url: providerSubmitEventUrl, reason, success: res.success });
     } catch (err) {
       log("submitEvent vm.delete POST failed", { url: providerSubmitEventUrl, reason, err: String(err) });
     }

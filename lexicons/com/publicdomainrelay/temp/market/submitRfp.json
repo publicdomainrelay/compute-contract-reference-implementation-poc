@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Submit an RFP directly to a bidder whose offering record matches the RFP payload NSID. The bidder creates a bid and optionally calls sendBid back to the RFP issuer.",
+      "description": "Submit an RFP directly to a bidder whose offering record matches the RFP payload NSID. The bidder creates a bid and optionally calls submitBid back to the RFP issuer. Must be called via PDS service-proxying (atproto-proxy); the receiver verifies the inter-service auth JWT and requires its issuer to be the DID that authored the referenced RFP record.",
       "input": {
         "encoding": "application/json",
         "schema": {

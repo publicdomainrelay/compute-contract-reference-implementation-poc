@@ -36,7 +36,7 @@
           },
           "submitEvent": {
             "type": "string",
-            "description": "Endpoint to send AT-URI and CID of com.publicdomainrelay.temp.market.event records to, scoped to this receipt's strongRef. Used by the requester to report lifecycle events the provider cannot observe itself (e.g. compute.events.vm.delete when a workflow finishes or its policy engine never comes up), since the provider treats provisioned resources as a black box."
+            "description": "Service DID reference (did:web:HOST#pdr_market) of the provider's market service, scoped to this receipt's strongRef. The requester calls com.publicdomainrelay.temp.market.submitEvent via PDS service-proxying using this value as the atproto-proxy target, to report lifecycle events the provider cannot observe itself (e.g. compute.events.vm.delete when a workflow finishes or its policy engine never comes up), since the provider treats provisioned resources as a black box."
           }
         }
       }

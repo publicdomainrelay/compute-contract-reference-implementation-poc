@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Submit the AT-URI and CID of an event record directly to the counterparty, bypassing the firehose. Used when the accept or receipt includes a submitEvent endpoint — e.g. so a requester can tell a bidder to delete a VM whose workflow finished, or whose policy engine never came up, since the bidder treats the VM as a black box.",
+      "description": "Submit the AT-URI and CID of an event record directly to the counterparty, bypassing the firehose. Used when the accept or receipt includes a submitEvent service DID reference — e.g. so a requester can tell a bidder to delete a VM whose workflow finished, or whose policy engine never came up, since the bidder treats the VM as a black box. Must be called via PDS service-proxying (atproto-proxy); the receiver verifies the inter-service auth JWT and requires its issuer to be the DID that authored the referenced event record.",
       "input": {
         "encoding": "application/json",
         "schema": {

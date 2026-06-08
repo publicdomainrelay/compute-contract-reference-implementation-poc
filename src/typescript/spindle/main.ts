@@ -34,7 +34,7 @@ import { Hono } from "jsr:@hono/hono";
 import type { Context } from "jsr:@hono/hono";
 import { cors } from "jsr:@hono/hono/cors";
 import { parse as parseYaml } from "jsr:@std/yaml";
-import { marketRFPSubmitWorkflow, marketRFPConfigFromEnv, pendingBids } from "./marketRFP.ts";
+import { marketRFPSubmitWorkflow, marketRFPConfigFromEnv, pendingBids, type BidRecord } from "./marketRFP.ts";
 
 // ---------------------------------------------------------------------------
 // Structured logger — JSON to stderr
@@ -734,6 +734,14 @@ const TRIGGER_LXM = "com.publicdomainrelay.temp.tangled.spindle.trigger";
 // header and the proxied token's `aud` are `did:web:<spindle>#<this id>`.
 const SPINDLE_SERVICE_ID = "tangled_spindle";
 
+// Market service endpoint identifier (DID-document `service` fragment) under
+// which this spindle advertises its market RECEIVER endpoints for PDS proxying.
+// Bidders/agents proxy to `did:web:<spindle>#pdr_market`; the proxied token's
+// `aud` is the same reference (or the bare service DID on legacy PDSes).
+const MARKET_SERVICE_ID = "pdr_market";
+const SUBMIT_BID_LXM = "com.publicdomainrelay.temp.market.submitBid";
+const SUBMIT_EVENT_LXM = "com.publicdomainrelay.temp.market.submitEvent";
+
 const idResolver = new IdResolver();
 
 function extractBearer(header: string | undefined | null): string {
@@ -772,6 +780,48 @@ async function validateTriggerServiceAuth(authHeader: string | undefined | null,
   // Strip any service fragment from the issuer (legacy tokens could carry one)
   // so it compares cleanly against the trigger's bare `actor` DID.
   return iss.split("#")[0];
+}
+
+// validateMarketServiceAuth — same PDS service-proxying verification as
+// validateTriggerServiceAuth, but for the market RECEIVER endpoints. The
+// service reference uses MARKET_SERVICE_ID and the bound lxm is passed in by
+// the caller (submitBid vs submitEvent). Returns the bare issuer DID.
+async function validateMarketServiceAuth(authHeader: string | undefined | null, hostname: string, lxm: string): Promise<string> {
+  const token = extractBearer(authHeader);
+  const serviceDid = `did:web:${effectiveHostname(getOwnerDid(hostname))}`;
+  const serviceRef = `${serviceDid}#${MARKET_SERVICE_ID}`;
+
+  // Pass ownDid=null so verifyJwt only checks the signature, lxm, and expiry; we
+  // assert the audience by hand just below. This lets us accept BOTH forms of
+  // `aud` a proxying PDS may send: the full service reference
+  // (`did:web:<spindle>#pdr_market`, used by newer PDSes) and the bare service
+  // DID (`did:web:<spindle>`) that the reference PDS emitted until Spring 2026
+  // by stripping the fragment. Re-checking aud here preserves the
+  // anti-forwarding guarantee verifyJwt's own aud check would otherwise give.
+  // See atproto.com/specs/xrpc#service-proxying.
+  const payload = await verifyJwt(token, null, lxm, async (did: string) => {
+    return await idResolver.did.resolveAtprotoKey(did);
+  });
+
+  const aud = (payload as Record<string, unknown>).aud as string | undefined;
+  if (aud !== serviceDid && aud !== serviceRef) {
+    throw new Error(`unexpected audience ${aud ?? "(none)"}; expected ${serviceDid} or ${serviceRef}`);
+  }
+
+  const iss = (payload as Record<string, unknown>).iss as string | undefined;
+  if (!iss || !iss.startsWith("did:")) {
+    throw new Error("service auth token missing DID issuer");
+  }
+  // Strip any service fragment from the issuer (legacy tokens could carry one)
+  // so it compares cleanly against the record author's bare DID.
+  return iss.split("#")[0];
+}
+
+// Authority (repo DID) of the primary AT-URI in a market request body. The
+// verified token issuer must equal this so a caller can only submit records
+// they authored.
+function atUriAuthority(uri: string): string {
+  return uri.replace("at://", "").split("/")[0];
 }
 
 async function repoRegisteredToThisSpindle(hostname: string, repoDid: string): Promise<bool> {
@@ -1308,6 +1358,11 @@ app.get("/.well-known/did.json", (c) => {
         type: "TangledSpindle",
         serviceEndpoint: `https://${serviceHost}`,
       },
+      {
+        id: `#${MARKET_SERVICE_ID}`,
+        type: "PdrMarket",
+        serviceEndpoint: `https://${serviceHost}`,
+      },
     ],
   });
 });
@@ -1697,10 +1752,22 @@ app.post("/xrpc/sh.tangled.repo.removeSecret", async (c) => {
 // Bidders POST here when RFP.submitBid is set, bypassing the firehose.
 // uri+cid identify the bid AT record; rfpUri routes it to the right collector.
 app.post("/xrpc/com.publicdomainrelay.temp.market.submitBid", async (c) => {
-  let body: { uri?: string; cid?: string; rfpUri?: string };
+  let body: { uri?: string; cid?: string; record?: BidRecord };
   try { body = await c.req.json(); } catch { return c.json({ error: "InvalidRequest", message: "invalid JSON" }, 400); }
   const { uri, cid, record } = body;
   if (!uri || !cid || !record ) return c.json({ error: "InvalidRequest", message: "missing uri, cid, or record" }, 400);
+
+  let issuerDid: string;
+  try {
+    issuerDid = await validateMarketServiceAuth(c.req.header("Authorization"), c.req.header("host") ?? HOSTNAME, SUBMIT_BID_LXM);
+  } catch (err) {
+    log("warn", "submitBid rejected: invalid service-auth token", { err: String(err) });
+    return c.json({ error: "Unauthorized", message: `invalid service-auth token: ${String(err)}` }, 401);
+  }
+  if (issuerDid !== atUriAuthority(uri)) {
+    log("warn", "submitBid rejected: token issuer does not match bid author", { iss: issuerDid, uri });
+    return c.json({ error: "Forbidden", message: "service-auth token issuer must author the bid record" }, 403);
+  }
 
   const rfpUri = record.rfp.uri;
 
@@ -1729,6 +1796,18 @@ app.post("/xrpc/com.publicdomainrelay.temp.market.submitEvent", async (c) => {
   const { uri, cid, record } = body;
   if (!uri || !cid || !record?.receipt || !record?.payload) {
     return c.json({ error: "InvalidRequest", message: "missing uri, cid, or record" }, 400);
+  }
+
+  let issuerDid: string;
+  try {
+    issuerDid = await validateMarketServiceAuth(c.req.header("Authorization"), c.req.header("host") ?? HOSTNAME, SUBMIT_EVENT_LXM);
+  } catch (err) {
+    log("warn", "submitEvent rejected: invalid service-auth token", { err: String(err) });
+    return c.json({ error: "Unauthorized", message: `invalid service-auth token: ${String(err)}` }, 401);
+  }
+  if (issuerDid !== atUriAuthority(uri)) {
+    log("warn", "submitEvent rejected: token issuer does not match event author", { iss: issuerDid, uri });
+    return c.json({ error: "Forbidden", message: "service-auth token issuer must author the event record" }, 403);
   }
 
   log("info", "submitEvent received", { uri, cid, receipt: record.receipt, payload: record.payload });
