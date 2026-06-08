@@ -80,6 +80,107 @@ BODY=$(jq -n \
 
 # `goat xrpc procedure <service> <nsid> ...`: a service DID reference selects
 # authenticated PDS proxying; `-` reads the JSON request body from stdin.
-echo "$BODY" | tee /dev/stderr \
-  | goat xrpc procedure "$SPINDLE_REF" "$TRIGGER_LXM" 'Content-Type:application/json' - \
-  | tee /dev/stderr | jq .
+# The trigger now returns immediately with the run ids (logsUrl per workflow);
+# compute provisioning continues in the background on the spindle.
+echo "$BODY" >&2
+RESPONSE="$(echo "$BODY" | goat xrpc procedure "$SPINDLE_REF" "$TRIGGER_LXM" 'Content-Type:application/json' -)"
+echo "$RESPONSE" | jq .
+
+# Pull the per-workflow log URLs out of the trigger response so we can stream.
+mapfile -t LOG_URLS < <(echo "$RESPONSE" | jq -r '.workflows[]?.logsUrl // empty')
+if [ "${#LOG_URLS[@]}" -eq 0 ]; then
+  echo "no workflows to stream" >&2
+  exit 0
+fi
+
+# Inline Deno log streamer. The spindle's /logs endpoint streams the run's
+# accumulated output over a WebSocket and then closes (it isn't a long-lived
+# tail), so we reconnect until /status reports a terminal state, deduping
+# already-printed data lines across reconnects by count.
+STREAMER="$(mktemp --suffix=.ts)"
+trap 'rm -f "$STREAMER"' EXIT
+cat > "$STREAMER" <<'EOF'
+const logsUrl = Deno.args[0];
+const label = Deno.args[1] ?? "";
+const wsUrl = logsUrl.replace(/^http/, "ws");
+const statusUrl = logsUrl.replace("/logs/", "/status/");
+const prefix = label ? `[${label}] ` : "";
+const enc = new TextEncoder();
+const out = (s: string) => Deno.stdout.writeSync(enc.encode(prefix + s + "\n"));
+
+const DEADLINE = Date.now() + 30 * 60 * 1000; // 30 min safety cap
+let printed = 0; // data lines already emitted (monotonic across reconnects)
+
+const isTerminal = (s: string | null) =>
+  s === "complete" || s === "input_validation_error";
+
+async function pollStatus(): Promise<string | null> {
+  try {
+    const r = await fetch(statusUrl);
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j?.policyEngine?.status ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function streamOnce(): Promise<void> {
+  return new Promise((resolve) => {
+    let seen = 0;
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch {
+      resolve();
+      return;
+    }
+    ws.onmessage = (ev) => {
+      let frame: { type?: string; kind?: string; content?: string };
+      try {
+        frame = JSON.parse(ev.data as string);
+      } catch {
+        return;
+      }
+      if (frame.type === "ping") return;
+      if (frame.kind === "data") {
+        seen++;
+        if (seen > printed) {
+          out(frame.content ?? "");
+          printed = seen;
+        }
+      }
+    };
+    ws.onclose = () => resolve();
+    ws.onerror = () => {
+      try { ws.close(); } catch { /* ignore */ }
+      resolve();
+    };
+  });
+}
+
+while (true) {
+  await streamOnce();
+  const s = await pollStatus();
+  if (isTerminal(s)) break;
+  if (Date.now() > DEADLINE) {
+    out(`(log stream gave up after 30m, last status: ${s ?? "unknown"})`);
+    break;
+  }
+  await new Promise((r) => setTimeout(r, 2000));
+}
+EOF
+
+# Stream each workflow's logs. Prefix lines with the workflow stem only when
+# more than one workflow is running, so a single-workflow run stays clean.
+pids=()
+for url in "${LOG_URLS[@]}"; do
+  label=""
+  if [ "${#LOG_URLS[@]}" -gt 1 ]; then
+    label="${url##*/}"
+  fi
+  echo "==> streaming logs: $url" >&2
+  deno run --allow-net "$STREAMER" "$url" "$label" &
+  pids+=($!)
+done
+wait "${pids[@]}"

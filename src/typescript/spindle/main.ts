@@ -201,6 +201,49 @@ const runs = new Map<string, Run>();
 // Pre-PE log lines collected during marketRFP provisioning (runKey → lines)
 const preRunLogs = new Map<string, string[]>();
 
+// Per-run coordination so the /logs streamer can hold one socket open across the
+// (possibly minutes-long) submission/provisioning gap instead of closing when
+// the placeholder run still has no taskId. triggerWorkflows arms a waiter when
+// it pre-registers the placeholder; submitWorkflows settles it "ready" once the
+// real task is installed, or "failed" if submission errors out (so the socket
+// doesn't hang forever). logSubs are signal-only callbacks the streamer registers
+// to be woken as provisioning lines are appended to preRunLogs.
+type RunReady = "ready" | "failed";
+interface RunWaiter {
+  promise: Promise<RunReady>;
+  resolve: (r: RunReady) => void;
+  settled: boolean;
+  logSubs: Set<() => void>;
+}
+const runWaiters = new Map<string, RunWaiter>();
+
+function getRunWaiter(key: string): RunWaiter {
+  let w = runWaiters.get(key);
+  if (!w) {
+    let resolve!: (r: RunReady) => void;
+    const promise = new Promise<RunReady>((res) => { resolve = res; });
+    w = { promise, resolve, settled: false, logSubs: new Set() };
+    runWaiters.set(key, w);
+  }
+  return w;
+}
+
+function settleRunWaiter(key: string, r: RunReady): void {
+  const w = runWaiters.get(key);
+  if (w && !w.settled) { w.settled = true; w.resolve(r); }
+}
+
+// Wake any /logs sockets waiting on this run so they flush newly-appended
+// provisioning lines from preRunLogs. Signal-only: the streamer reads the array
+// by index, which keeps replay race-free (no line dropped or double-sent).
+function publishPreLog(key: string): void {
+  const w = runWaiters.get(key);
+  if (!w) return;
+  for (const sub of [...w.logSubs]) {
+    try { sub(); } catch { w.logSubs.delete(sub); }
+  }
+}
+
 // WebSocket subscribers for /events
 const subscribers = new Set<WebSocket>();
 
@@ -1193,6 +1236,11 @@ async function trackRun(run: Run): Promise<void> {
   }
 }
 
+// triggerWorkflows — fetch the repo's workflow files, pre-register a run per
+// workflow so /logs and /status resolve immediately, then submit each workflow
+// to compute in the background. Returns the workflow stems as soon as they're
+// known (i.e. before — possibly minutes-long — submission/provisioning finishes)
+// so the caller can return the run ids and start streaming logs right away.
 async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
   const workflows = await fetchWorkflows(trigger.knot, trigger.repoDid, trigger.ref);
   if (workflows.size === 0) {
@@ -1201,8 +1249,46 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
   }
   log("info", "found .github/workflows", { repoDid: trigger.repoDid, ref: trigger.ref, knot: trigger.knot, workflows: [...workflows.keys()] });
 
-  const submitted: string[] = [];
+  const stems = [...workflows.keys()];
 
+  // Pre-register a placeholder Run per workflow before submission so the /logs
+  // and /status endpoints resolve immediately instead of 404ing while compute
+  // is being allocated (market.rfp provisioning can take minutes).
+  // submitWorkflows() below overwrites these with the real taskId/peUrl once the
+  // task exists; until then /logs streams the "Provisioning" preLogs.
+  for (const stem of stems) {
+    const key = runKey(trigger.knot, trigger.pipelineRkey, stem);
+    if (!runs.has(key)) {
+      runs.set(key, {
+        taskId: "",
+        workflow: stem,
+        knot: trigger.knot,
+        pipelineRkey: trigger.pipelineRkey,
+        actor: trigger.actor,
+        repoDid: trigger.repoDid,
+        ref: trigger.ref,
+        startedAt: new Date(),
+        status: "submitted",
+        peUrl: POLICY_ENGINE_URL,
+      });
+      // Arm the waiter now so a /logs socket can subscribe before submission
+      // starts and stream provisioning lines live (server-side gap bridge).
+      getRunWaiter(key);
+    }
+  }
+
+  // Submit to compute in the background; do not block the caller on it.
+  submitWorkflows(trigger, workflows).catch((err) =>
+    log("error", "submitWorkflows failed", { knot: trigger.knot, repoName: trigger.repoName, ref: trigger.ref, err: String(err) })
+  );
+
+  return stems;
+}
+
+// submitWorkflows — submit each fetched workflow to compute and register the
+// resulting Run (taskId/peUrl) once the task exists. Runs in the background;
+// see triggerWorkflows for the placeholder runs it overwrites.
+async function submitWorkflows(trigger: TriggerPayload, workflows: Map<string, unknown>): Promise<void> {
   await Promise.all(
     [...workflows.entries()].map(async ([stem, wfObj]) => {
       const key = runKey(trigger.knot, trigger.pipelineRkey, stem);
@@ -1222,6 +1308,8 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
             // Persist after every line — provisioning can take minutes and a
             // crash/restart mid-run must not lose the "Provisioning" log step.
             persistPreLog(key, preLogs);
+            // Wake any /logs sockets streaming this run through provisioning.
+            publishPreLog(key);
           });
           taskId = result.taskId;
           peUrl = result.peUrl;
@@ -1238,10 +1326,17 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
         } else {
           broadcastStatus(rkey, stem, "unknown", "error", trigger.knot, trigger.pipelineRkey);
         }
+        // No task will ever exist for this run — release any /logs socket
+        // waiting through provisioning so it doesn't hang forever.
+        settleRunWaiter(key, "failed");
         return;
       }
 
-      const run: Run = {
+      // Install the real task. Mutate the placeholder created by triggerWorkflows
+      // in place (if present) so a /logs socket already holding a reference to
+      // this run sees the taskId without re-reading the map; fall back to creating
+      // one for callers that didn't pre-register (none today, but keep it safe).
+      const run: Run = runs.get(key) ?? {
         taskId,
         workflow: stem,
         knot: trigger.knot,
@@ -1254,7 +1349,14 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
         peUrl,
         reportVmDelete,
       };
+      run.taskId = taskId;
+      run.peUrl = peUrl;
+      run.reportVmDelete = reportVmDelete;
+      run.status = "submitted";
       runs.set(key, run);
+      // Release any /logs socket waiting through provisioning — run.taskId is now
+      // populated on the very object that socket captured, so its PE stream opens.
+      settleRunWaiter(key, "ready");
       db.runs[key] = {
         taskId: run.taskId,
         workflow: run.workflow,
@@ -1268,14 +1370,11 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
         peUrl: run.peUrl,
       };
       saveDB(db);
-      submitted.push(stem);
 
       log("info", "submitted", { run: run });
       trackRun(run).catch((err) => log("error", "trackRun failed", { workflow: stem, taskId, err: String(err) }));
     }),
   );
-
-  return submitted;
 }
 
 // ---------------------------------------------------------------------------
@@ -1513,14 +1612,52 @@ app.get("/logs/:knot/:pipelineRkey/:workflow", (c) => {
     // (checkout, "Print all files", changes groups) would never be fetched.
     let peLines = 0;
 
-    // Emit any pre-PE log lines collected during marketRFP provisioning.
-    // Fall back to the on-disk copy if the in-memory map lost it (e.g. a
-    // restart raced the persist write for an in-flight run).
-    const preLogs = preRunLogs.get(key) ?? logsDB.preLogs[key];
-    if (preLogs && preLogs.length > 0) {
+    // Provisioning logs (market.rfp pre-PE lines). Two cases:
+    //   1. Run still being provisioned (placeholder, no taskId yet, waiter live):
+    //      hold this socket open and stream provisioning lines as they're appended
+    //      until the real task is installed ("ready") or submission fails. This is
+    //      the server-side bridge across the provisioning gap — the client no
+    //      longer has to reconnect to pick up the build. We read preRunLogs by
+    //      index (`sent`) and treat the subscriber as a wake signal, so replay is
+    //      race-free: nothing is dropped or double-sent.
+    //   2. Task already exists (incl. runs restored after restart): just replay
+    //      the snapshot, exactly as before.
+    const waiter = runWaiters.get(key);
+    if (!run.taskId && waiter && !waiter.settled) {
       openStep("Provisioning", 1 /* StepKindUser */);
-      for (const line of preLogs) { sendData(line); linesStreamed++; }
+      const arr = () => preRunLogs.get(key) ?? logsDB.preLogs[key] ?? [];
+      let sent = 0;
+      const flush = () => {
+        const lines = arr();
+        for (; sent < lines.length; sent++) { sendData(lines[sent]); linesStreamed++; }
+      };
+      const liveSub = () => flush();
+      waiter.logSubs.add(liveSub);
+      flush();                              // replay whatever exists so far
+      const ready = await waiter.promise;   // wait through provisioning
+      flush();                              // drain lines that landed before settle
+      waiter.logSubs.delete(liveSub);
       closeStep();
+
+      // Client vanished while we waited — nothing left to do.
+      if (socket.readyState !== WebSocket.OPEN) { stopLogKeepAlive(); return; }
+
+      if (ready === "failed") {
+        openStep("Error", 1 /* StepKindUser */);
+        sendData("##[error] workflow submission failed; no compute was provisioned");
+        closeStep();
+      }
+      // On "ready", run.taskId is now populated in place by submitWorkflows, so
+      // the PE SSE block below opens against the real task.
+    } else {
+      // Fall back to the on-disk copy if the in-memory map lost it (e.g. a
+      // restart raced the persist write for an in-flight run).
+      const preLogs = preRunLogs.get(key) ?? logsDB.preLogs[key];
+      if (preLogs && preLogs.length > 0) {
+        openStep("Provisioning", 1 /* StepKindUser */);
+        for (const line of preLogs) { sendData(line); linesStreamed++; }
+        closeStep();
+      }
     }
 
     try {
@@ -1870,13 +2007,12 @@ const handleTrigger = async (c: Context): Promise<Response> => {
     return c.json({ error: "Forbidden", message: "repo not authorized for this spindle" }, 403);
   }
 
-  // Respond immediately; workflow fetch + submission runs in background.
-  const responsePromise = triggerWorkflows(trigger);
-
-  // Return the list of workflow stems we expect to run (fetched inline so
-  // the caller knows what to watch).  If the fetch is slow we still return
-  // quickly because we race it inside triggerWorkflows.
-  const submitted = await responsePromise;
+  // Return as soon as the workflow stems are known — triggerWorkflows fetches
+  // the workflow files and pre-registers a run per stem, then submits to compute
+  // in the background. The caller gets the run ids (the /logs/:knot/:rkey/:wf
+  // path components) immediately and can start streaming logs while the actual
+  // compute is still being provisioned.
+  const submitted = await triggerWorkflows(trigger);
 
   return c.json({
     submitted: true,
