@@ -61,6 +61,10 @@ const receiptDroplets = new Map<string, number | string>();
 // Tracks the com.fedproxy.rbac record minted for each droplet's receipt, so we
 // can remove it when the droplet is torn down (mirrors receiptDroplets).
 const receiptRbacRecords = new Map<string, StrongRef>();
+// Maps `${receiptUri}#${receiptCid}` -> the DID that issued the market.accept
+// settling this contract (the authority of the accept AT-URI). Only this DID is
+// permitted to drive a vm.delete that tears down the receipt's droplet.
+const receiptAcceptAuthors = new Map<string, string>();
 
 const ACCEPT_PATH_RECORD = "$HOME/secrets/publicdomainrelay.com/market/accept.json";
 const ACCEPT_PATH_VM = "/root/secrets/publicdomainrelay.com/market/accept.json";
@@ -949,6 +953,10 @@ app.post(`/xrpc/${SUBMIT_ACCEPT_NSID}`, async (c) => {
     const receiptKey = `${res.data.uri}#${res.data.cid}`;
     receiptDroplets.set(receiptKey, dropletId);
     receiptRbacRecords.set(receiptKey, rbacRef);
+    // requesterDid is the authority of the accept AT-URI, i.e. the DID that
+    // issued the market.accept settling this contract. Record it so that only
+    // that DID can later drive a vm.delete tearing down this droplet.
+    receiptAcceptAuthors.set(receiptKey, requesterDid);
     log("info", "tracking droplet for receipt", {
       receiptKey,
       receiptUri: res.data.uri,
@@ -956,6 +964,7 @@ app.post(`/xrpc/${SUBMIT_ACCEPT_NSID}`, async (c) => {
       dropletId,
       rbacUri: rbacRef.uri,
       rbacCid: rbacRef.cid,
+      acceptAuthor: requesterDid,
       receiptDropletsSize: receiptDroplets.size,
       receiptRbacRecordsSize: receiptRbacRecords.size,
     });
@@ -1195,10 +1204,26 @@ app.post(`/xrpc/${SUBMIT_EVENT_NSID}`, async (c) => {
     return c.json({ ok: true });
   }
 
+  // Only the DID that issued the market.accept settling this contract may tear
+  // down the droplet. The token issuer is already verified to author the event
+  // record above; here we additionally require it to be that accept's author,
+  // so a third party who authors their own vm.delete event cannot delete a
+  // droplet they didn't pay for.
+  const acceptAuthor = receiptAcceptAuthors.get(receiptKey);
+  if (acceptAuthor === undefined) {
+    log("warn", "submitEvent: no accept author tracked for receipt, refusing delete", { receiptKey });
+    return c.json({ error: "Forbidden", message: "no accept author recorded for receipt" }, 403);
+  }
+  if (issuerDid !== acceptAuthor) {
+    log("warn", "submitEvent rejected: token issuer is not the market.accept author", { iss: issuerDid, acceptAuthor, receiptKey });
+    return c.json({ error: "Forbidden", message: "only the market.accept issuer may delete the droplet" }, 403);
+  }
+
   const deleteEvent = payload as unknown as VMDeleteEvent;
   const reason = deleteEvent.reason ?? "vm.delete event received";
   await deleteDroplet(dropletId, reason);
   receiptDroplets.delete(receiptKey);
+  receiptAcceptAuthors.delete(receiptKey);
 
   const rbacRef = receiptRbacRecords.get(receiptKey);
   if (rbacRef) {
