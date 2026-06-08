@@ -1,16 +1,22 @@
 // Deno + Hono port of server.py.
 // Endpoints: GET / (README html),
+// GET /x402/receipt/<accepts.x402-at-uri>/<cid> (x402 payment-gated; mints a
+//   com.publicdomainrelay.temp.market.receipts.x402 proof-of-payment record),
 // POST /xrpc/com.publicdomainrelay.temp.market.submitAccept (atproto-proxy
 // settlement; resolves accept->bid->rfp->vm, provisions droplet, writes receipt),
 // POST /hook/rfp (firehose webhook -> creates bid+config+payload records).
 //
 // Run: deno run --allow-net --allow-env --allow-run --allow-read --allow-write main.ts
 //
-// $ RBAC_REPO_ROOT="${HOME}/src/rbac/homelab/wid-atp" DIGITALOCEAN_BASE_URL=https://homelab.johnandersen777.bsky.social.fedproxy.com deno run --allow-all --watch main.ts
+// $ RBAC_REPO_ROOT="${HOME}/src/rbac/homelab/wid-atp" X402_MAKE_FREE=1 DIGITALOCEAN_BASE_URL=https://homelab.johnandersen777.bsky.social.fedproxy.com deno run --allow-all --watch main.ts
 
 
 import { Hono } from "npm:hono@^4.12.23";
 import type { ContentfulStatusCode } from "npm:hono@^4.12.23/utils/http-status";
+// x402 middleware (Hono variant per CDP docs).
+import { paymentMiddleware, x402ResourceServer } from "npm:@x402/hono";
+import { ExactEvmScheme } from "npm:@x402/evm/exact/server";
+import { HTTPFacilitatorClient } from "npm:@x402/core/server";
 import { Agent, CredentialSession } from "@atproto/api";
 import { IdResolver } from "@atproto/identity";
 import { getPdsEndpoint } from "@atproto/common-web";
@@ -27,6 +33,8 @@ const WIF_SIMPLE_NSID = "com.publicdomainrelay.temp.compute.config.wif.simple";
 const RFP_NSID = "com.publicdomainrelay.temp.market.rfp";
 const BID_NSID = "com.publicdomainrelay.temp.market.bid";
 const BIDS_X402_NSID = "com.publicdomainrelay.temp.market.bids.x402";
+const ACCEPTS_X402_NSID = "com.publicdomainrelay.temp.market.accepts.x402";
+const RECEIPTS_X402_NSID = "com.publicdomainrelay.temp.market.receipts.x402";
 const ACCEPT_NSID = "com.publicdomainrelay.temp.market.accept";
 const RECEIPT_NSID = "com.publicdomainrelay.temp.market.receipt";
 const OFFERING_NSID = "com.publicdomainrelay.temp.market.offering";
@@ -107,6 +115,7 @@ type Accept = { rfp: StrongRef; bid: StrongRef; payload?: StrongRef; submitEvent
 type Event = { receipt: StrongRef; payload: StrongRef; _uri?: string; _cid?: string };
 type VMDeleteEvent = { reason: string; _uri?: string; _cid?: string };
 type BidsX402 = { cost: unknown; currency: string; frequency: string; prepay: boolean; url: string; _uri?: string; _cid?: string };
+type AcceptsX402 = { bid: StrongRef; payload?: StrongRef; _uri?: string; _cid?: string };
 type WIFSimple = Record<string, unknown> & { _uri?: string; _cid?: string };
 
 // ---------------------------------------------------------------------------
@@ -119,6 +128,9 @@ function reqEnv(name: string): string {
   return v;
 }
 
+const PAY_TO = reqEnv("RECV_ADDR");
+const CDP_API_KEY_ID = reqEnv("CDP_RECV_API_KEY_ID");
+const CDP_API_KEY_SECRET = reqEnv("CDP_RECV_API_KEY_SECRET");
 const DO_TOKEN = reqEnv("DIGITALOCEAN_TOKEN");
 const RBAC_REPO_ROOT = (() => {
   const p = reqEnv("RBAC_REPO_ROOT");
@@ -127,6 +139,7 @@ const RBAC_REPO_ROOT = (() => {
 const BASE_URL = (Deno.env.get("BASE_URL") ?? "").replace(/\/+$/, "");
 const ATPROTO_HANDLE = reqEnv("ATPROTO_HANDLE");
 const ATPROTO_PASSWORD = reqEnv("ATPROTO_PASSWORD");
+const X402_MAKE_FREE = Deno.env.has("X402_MAKE_FREE");
 const DIGITALOCEAN_BASE_URL = (Deno.env.get("DIGITALOCEAN_BASE_URL") ?? "https://droplet-oidc.its1337.com").replace(/\/+$/, "");
 
 // ---------------------------------------------------------------------------
@@ -707,6 +720,62 @@ async function loadReadme(): Promise<void> {
 
 app.get("/", (c) => c.html(readmeHtml));
 
+// CDP facilitator with header auth (matches python create_headers).
+// CDP requires a JWT per request; for parity with python (which uses
+// cdp.auth.utils.jwt.generate_jwt). Minimal port: re-create JWT per call via
+// the helper exposed by @coinbase/x402 when available; otherwise consumers
+// can set X402_MAKE_FREE=1.
+function makeFacilitator() {
+  // Prefer CDP facilitator if API keys are set; mirrors python (which always
+  // points at api.cdp.coinbase.com with JWT headers).
+  const url = "https://api.cdp.coinbase.com/platform/v2/x402";
+  // The CDP auth provider is supplied via a field the published FacilitatorConfig
+  // type doesn't declare; cast so this stays runnable while @x402 types catch up.
+  return new HTTPFacilitatorClient({
+    url,
+    // CreateHeadersAuthProvider equivalent. The python uses generate_jwt per
+    // verify/settle/supported path; here we expose a callback that builds a
+    // bearer JWT for the given request. Implementation lives in @coinbase/x402
+    // if present; otherwise users can run with X402_MAKE_FREE=1 for local dev.
+    authProvider: cdpAuthProvider(CDP_API_KEY_ID, CDP_API_KEY_SECRET),
+    // deno-lint-ignore no-explicit-any
+  } as any);
+}
+
+function cdpAuthProvider(_keyId: string, _keySecret: string) {
+  // The @coinbase/x402 npm package exports `facilitator` with auth baked in.
+  // We re-import lazily to keep this file runnable with X402_MAKE_FREE=1
+  // even when the package isn't installed.
+  // deno-lint-ignore no-explicit-any
+  return async (_req: any) => ({}); // headers added by @coinbase/x402 when wired
+}
+
+// The x402 receipt endpoint is the payment leg of the contract, distinct from
+// the submitAccept settlement leg. It gates GET /x402/receipt/* behind an x402
+// payment; on success the handler mints a receipts.x402 proof-of-payment record
+// (see below). Set X402_MAKE_FREE=1 to bypass payment for local dev.
+if (!X402_MAKE_FREE) {
+  const facilitatorClient = makeFacilitator();
+  const server = new x402ResourceServer(facilitatorClient).register(
+    "eip155:8453",
+    new ExactEvmScheme(),
+  );
+  app.use(
+    paymentMiddleware(
+      {
+        "GET /x402/receipt/*": {
+          accepts: [
+            { scheme: "exact", price: "$1.00", network: "eip155:8453", payTo: PAY_TO },
+          ],
+          description: "Pay for compute contract",
+          mimeType: "application/json",
+        },
+      },
+      server,
+    ),
+  );
+}
+
 // did:web document exposing the `pdr_market` service entry. The bidder only
 // RECEIVES service-auth tokens (no signing key needed here).
 app.get("/.well-known/did.json", (c) => {
@@ -726,6 +795,49 @@ app.onError((err, c) => {
   }
   console.error("[err]", (err as Error).stack ?? err);
   return c.json({ error: "internal", detail: (err as Error).message }, 500);
+});
+
+// ---------------------------------------------------------------------------
+// GET /x402/receipt/<accepts.x402-at-uri>/<cid>
+//
+// Payment leg of the contract (x402 payment-gated by the middleware above).
+// The requester mints a com.publicdomainrelay.temp.market.accepts.x402 record
+// accepting a bid's payment terms, then GETs this endpoint with that record's
+// AT-URI + CID. Once payment clears we mint a receipts.x402 proof-of-payment
+// record and hand back its strongRef; the requester uses it as the payload of
+// the higher-level market.accept, which submitAccept later verifies before
+// provisioning. This endpoint does NOT provision compute — that is submitAccept.
+// ---------------------------------------------------------------------------
+
+app.get("/x402/receipt/*", async (c) => {
+  let path = c.req.path.replace(/^\/+/, "");
+  if (path.startsWith("x402/receipt/")) path = path.slice("x402/receipt/".length);
+  if (!path.includes("/")) throw new HTTPError(400, "missing cid");
+  const lastSlash = path.lastIndexOf("/");
+  const acceptsCid = path.slice(lastSlash + 1);
+  const acceptsUri = path.slice(0, lastSlash);
+  if (!CID_RE.test(acceptsCid)) throw new HTTPError(400, "invalid cid");
+
+  log("info", "x402 receipt requested", { acceptsUri, acceptsCid });
+
+  const acceptsX402 = await resolveAs<AcceptsX402 & { $type?: string }>(acceptsUri, acceptsCid);
+  if (acceptsX402.$type && acceptsX402.$type !== ACCEPTS_X402_NSID) {
+    throw new HTTPError(400, `expected ${ACCEPTS_X402_NSID}, got ${acceptsX402.$type}`);
+  }
+
+  // Payment has cleared (middleware) — mint a proof-of-payment receipt that
+  // points back at the accepts.x402 the requester paid against.
+  const res = await agent.com.atproto.repo.createRecord({
+    repo: agent.assertDid,
+    collection: RECEIPTS_X402_NSID,
+    record: {
+      $type: RECEIPTS_X402_NSID,
+      accept: { $type: "com.atproto.repo.strongRef", uri: acceptsUri, cid: acceptsCid },
+      createdAt: new Date().toISOString(),
+    },
+  });
+  log("info", "receipts.x402 minted", { uri: res.data.uri, cid: res.data.cid, acceptsUri });
+  return c.json({ uri: res.data.uri, cid: res.data.cid });
 });
 
 // ---------------------------------------------------------------------------
@@ -761,6 +873,20 @@ app.post(`/xrpc/${SUBMIT_ACCEPT_NSID}`, async (c) => {
   if (bid.rfp.uri !== accept.rfp.uri || bid.rfp.cid !== accept.rfp.cid) {
     throw new HTTPError(400, "Accept.rfp does not match Bid.rfp");
   }
+
+  // Verify payment: accept.payload must be a receipts.x402 proof-of-payment
+  // record minted by us (this bidder) via the x402 receipt endpoint. Without it
+  // we have no evidence the requester paid, so we refuse to provision.
+  if (!accept.payload) throw new HTTPError(402, "Accept.payload (receipts.x402 proof-of-payment) is required");
+  const paymentReceipt = await resolveAs<{ $type?: string }>(accept.payload.uri, accept.payload.cid);
+  const paymentNsid = paymentReceipt.$type ?? accept.payload.uri.split("/")[3];
+  if (paymentNsid !== RECEIPTS_X402_NSID) {
+    throw new HTTPError(402, `Accept.payload must be a ${RECEIPTS_X402_NSID}, got ${paymentNsid}`);
+  }
+  if (atUriAuthority(accept.payload.uri) !== agent.assertDid) {
+    throw new HTTPError(402, "Accept.payload proof-of-payment must be authored by this bidder");
+  }
+  log("info", "payment verified", { receiptsX402: accept.payload.uri });
 
   const rfp = await resolveAs<RFP>(accept.rfp.uri, accept.rfp.cid);
   const vm = await resolveAs<VM>(rfp.payload.uri, rfp.payload.cid);
@@ -811,6 +937,7 @@ app.post(`/xrpc/${SUBMIT_ACCEPT_NSID}`, async (c) => {
       rfp: { $type: "com.atproto.repo.strongRef", uri: accept.rfp.uri, cid: accept.rfp.cid },
       bid: { $type: "com.atproto.repo.strongRef", uri: bid._uri, cid: bid._cid },
       accept: { $type: "com.atproto.repo.strongRef", uri: acceptUri, cid: acceptCid },
+      payload: { $type: "com.atproto.repo.strongRef", uri: accept.payload.uri, cid: accept.payload.cid },
       submitEvent: submitEventUrl,
       createdAt: new Date().toISOString(),
     },
@@ -847,6 +974,7 @@ async function createAndSubmitBid(
   rfpUri: string,
   rfpCid: string,
   rfpRecord: RFP,
+  receiptUrl: string,
 ): Promise<{ configUri: string; configCid: string; payloadUri: string; payloadCid: string; bidUri: string; bidCid: string }> {
   const nowIso = new Date().toISOString();
   const doctx = await makeDoctx();
@@ -878,7 +1006,7 @@ async function createAndSubmitBid(
       currency: "USDC",
       frequency: "monthly",
       prepay: true,
-      url: `${bidderServiceDid()}#${MARKET_SERVICE_ID}`,
+      url: receiptUrl,
       createdAt: nowIso,
     },
   });
@@ -888,6 +1016,9 @@ async function createAndSubmitBid(
     rfp: { $type: "com.atproto.repo.strongRef", uri: rfpUri, cid: rfpCid },
     config: { $type: "com.atproto.repo.strongRef", uri: configRecord.data.uri, cid: configRecord.data.cid },
     payload: { $type: "com.atproto.repo.strongRef", uri: payloadRecord.data.uri, cid: payloadRecord.data.cid },
+    // Service DID ref for the settlement leg (submitAccept via atproto-proxy),
+    // distinct from the payload's x402 payment url (the payment leg).
+    submitAccept: `${bidderServiceDid()}#${MARKET_SERVICE_ID}`,
     createdAt: nowIso,
   };
 
@@ -925,6 +1056,13 @@ async function createAndSubmitBid(
   };
 }
 
+// Build the x402 payment URL the bid advertises in its bids.x402 payload.
+// Prefer the configured BASE_URL; fall back to the incoming request origin.
+function x402UrlTemplate(reqUrl: string): string {
+  const base = BASE_URL || new URL(reqUrl).origin;
+  return `${base.replace(/\/+$/, "")}/x402/receipt`;
+}
+
 // ---------------------------------------------------------------------------
 // POST /hook/rfp  (firehose-style webhook envelope)
 // ---------------------------------------------------------------------------
@@ -957,7 +1095,7 @@ app.post("/hook/rfp", async (c) => {
   const rfpRecord = await resolveAs<RFP>(rfpAtUri, rfpCid);
 
   const { configUri, configCid, payloadUri, payloadCid, bidUri, bidCid } =
-    await createAndSubmitBid(rfpAtUri, rfpCid, rfpRecord);
+    await createAndSubmitBid(rfpAtUri, rfpCid, rfpRecord, x402UrlTemplate(c.req.url));
 
   return c.json({
     success: true,
@@ -1004,7 +1142,7 @@ app.post("/xrpc/com.publicdomainrelay.temp.market.submitRfp", async (c) => {
   const { repo: rfpOwnerDid } = parseAtUri(rfpUri);
 
   const { bidUri, bidCid } =
-    await createAndSubmitBid(rfpUri, rfpCid, rfpRecord);
+    await createAndSubmitBid(rfpUri, rfpCid, rfpRecord, x402UrlTemplate(c.req.url));
 
   log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
 

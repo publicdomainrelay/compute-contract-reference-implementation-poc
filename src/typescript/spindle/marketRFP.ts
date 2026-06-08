@@ -46,6 +46,7 @@ const BID_NSID    = "com.publicdomainrelay.temp.market.bid";
 const ACCEPT_NSID = "com.publicdomainrelay.temp.market.accept";
 const RECEIPT_NSID = "com.publicdomainrelay.temp.market.receipt";
 const BIDS_X402_NSID = "com.publicdomainrelay.temp.market.bids.x402";
+const ACCEPTS_X402_NSID = "com.publicdomainrelay.temp.market.accepts.x402";
 const RBAC_NSID   = "com.fedproxy.rbac";
 const SSH_KEY_NSID = "com.fedproxy.sshPublicKey";
 const EVENT_NSID = "com.publicdomainrelay.temp.market.event";
@@ -102,6 +103,9 @@ export type BidRecord = {
   rfp: StrongRef;
   payload: StrongRef;
   config?: StrongRef;
+  // Service DID ref (did:web:HOST#pdr_market) for the settlement leg
+  // (submitAccept via atproto-proxy), distinct from the payload's x402 url.
+  submitAccept?: string;
 };
 
 type CollectedBid = {
@@ -216,6 +220,31 @@ async function atprotoDeleteRecord(agent: Agent, ref: StrongRef): Promise<void> 
   await agent.com.atproto.repo.deleteRecord({ repo, collection, rkey });
 }
 
+// Validates a URL before egressing to it (the x402 payment endpoint comes from
+// a winning bid's bids.x402 payload — untrusted). Blocks non-http(s) schemes
+// and cloud-metadata hosts; with MARKET_BLOCK_PRIVATE_EGRESS set, also blocks
+// private/loopback ranges.
+export function assertSafeEgressUrl(raw: string): URL {
+  let u: URL;
+  try { u = new URL(raw); } catch { throw new Error(`invalid URL: ${raw}`); }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new Error(`blocked URL scheme: ${u.protocol}`);
+  }
+  const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host === "169.254.169.254" || host === "metadata.google.internal") {
+    throw new Error(`blocked cloud-metadata host: ${host}`);
+  }
+  if (Deno.env.get("MARKET_BLOCK_PRIVATE_EGRESS")) {
+    const isPrivate =
+      host === "localhost" || host === "::1" ||
+      /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) ||
+      /^169\.254\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+      /^(fc|fd)/.test(host);
+    if (isPrivate) throw new Error(`blocked private/loopback host: ${host}`);
+  }
+  return u;
+}
+
 // ---------------------------------------------------------------------------
 // user_data builder
 // ---------------------------------------------------------------------------
@@ -295,12 +324,27 @@ runcmd:
   - |
       set -x
 
-      curl -sfL 'https://github.com/publicdomainrelay/sshai/releases/download/latest/policy_engine_0.0.1-next_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin
-      curl -sfL 'https://github.com/publicdomainrelay/atproto-reverse-proxy/releases/download/latest/atproto-reverse-proxy_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin
+      # Retry a command until it succeeds, backing off between attempts.
+      # Used to ride out transient GitHub download/network failures during boot.
+      retry() {
+        n=0
+        delay=5
+        until "$@"; do
+          n=$((n + 1))
+          echo "command failed (attempt $n): $*; retrying in \${delay}s" >&2
+          sleep "$delay"
+          if [ "$delay" -lt 60 ]; then
+            delay=$((delay * 2))
+          fi
+        done
+      }
+
+      retry sh -c "curl -sfL 'https://github.com/publicdomainrelay/sshai/releases/download/latest/policy_engine_0.0.1-next_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin"
+      retry sh -c "curl -sfL 'https://github.com/publicdomainrelay/atproto-reverse-proxy/releases/download/latest/atproto-reverse-proxy_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin"
 
       mkdir -pv /home/agent/
       cd $(mktemp -d)
-      curl -L https://github.com/publicdomainrelay/sshai/archive/main.tar.gz | tar xz --wildcards --no-anchored 'src/policy_engine/bundled-actions/*' --strip-components=1
+      retry sh -c "curl -fL https://github.com/publicdomainrelay/sshai/archive/main.tar.gz | tar xz --wildcards --no-anchored 'src/policy_engine/bundled-actions/*' --strip-components=1"
       mv -v $(find . -name bundled-actions -type d) /home/agent/bundled-actions
       chown -R agent:agent /home/agent/bundled-actions
       cd -
@@ -815,13 +859,51 @@ export async function marketRFPSubmitWorkflow(
     cid: winner.cid,
   };
 
-  // Accept the winning bid. submitEvent tells the bidder where it can report
-  // events about the resource it provisions (e.g. compute.events.vm.started,
-  // .onNetwork) directly, bypassing the firehose — mirrors rfp.submitBid.
+  // Payment leg: settle the bid's x402 payment terms before accepting. We mint
+  // an accepts.x402 accepting the bid's payment terms, GET the bidder's x402
+  // payment endpoint (bids.x402.url) with that record's AT-URI + CID, and the
+  // bidder responds (after payment clears) with a receipts.x402 proof-of-payment
+  // strongRef. That proof becomes the payload of the market.accept below, which
+  // the bidder verifies in submitAccept before provisioning.
+  const bidPayload = winner.payload;
+  const x402Url = String(bidPayload?.url ?? "");
+  let paymentReceiptRef: StrongRef | undefined;
+  if (x402Url) {
+    try {
+      assertSafeEgressUrl(x402Url);
+    } catch (err) {
+      throw new Error(`winning bid x402 url rejected: ${String(err)}`);
+    }
+    const acceptsX402Ref = await atprotoCreateRecord(agent, ACCEPTS_X402_NSID, {
+      $type: ACCEPTS_X402_NSID,
+      bid: bidRef,
+      payload: { $type: "com.atproto.repo.strongRef", uri: winner.record.payload.uri, cid: winner.record.payload.cid },
+      createdAt: new Date().toISOString(),
+    });
+    const receiptUrl = `${x402Url.replace(/\/+$/, "")}/${acceptsX402Ref.uri}/${acceptsX402Ref.cid}`;
+    log("settling x402 payment", { url: receiptUrl, acceptsX402: acceptsX402Ref.uri });
+    const res = await fetch(receiptUrl, { method: "GET", signal: AbortSignal.timeout(30000) });
+    if (!res.ok) {
+      throw new Error(`x402 payment failed ${res.status}: ${await res.text()}`);
+    }
+    const body = await res.json() as { uri?: string; cid?: string };
+    if (!body.uri || !body.cid) {
+      throw new Error(`x402 payment endpoint returned no receipts.x402 strongRef: ${JSON.stringify(body)}`);
+    }
+    paymentReceiptRef = { $type: "com.atproto.repo.strongRef", uri: body.uri, cid: body.cid };
+    log("x402 payment settled", { receiptsX402: paymentReceiptRef });
+  } else {
+    throw new Error(`winning bid ${winner.uri} has no x402 payment url; cannot settle`);
+  }
+
+  // Accept the winning bid. payload carries the receipts.x402 proof-of-payment;
+  // submitEvent tells the bidder where it can report events about the resource
+  // it provisions directly, bypassing the firehose — mirrors rfp.submitBid.
   const acceptRecord: Record<string, unknown> = {
     $type: ACCEPT_NSID,
     rfp: rfpRef,
     bid: bidRef,
+    payload: paymentReceiptRef,
     createdAt: new Date().toISOString(),
   };
   if (spindleHostname) {
@@ -898,16 +980,17 @@ export async function marketRFPSubmitWorkflow(
   const rbacRef = await atprotoCreateRecord(agent, RBAC_NSID, rbacRecord);
   log("com.fedproxy.rbac created", { uri: rbacRef.uri, subject: agentDid, serviceName });
 
-  // Submit the accept to the bidder via its submitAccept procedure (creates
-  // market.receipt). The response carries a strongRef to the receipt plus the
-  // bidder's submitEvent endpoint — the channel we use to tell it to delete
-  // the VM later, since the bidder treats provisioned VMs as a black box and
-  // can't observe that itself. Routed through our PDS via service-proxying:
-  // bidPayload.url holds a service DID ref (did:web:HOST#pdr_market).
+  // Settlement leg: submit the accept to the bidder via its submitAccept
+  // procedure (provisions the resource, creates market.receipt). The response
+  // carries a strongRef to the receipt plus the bidder's submitEvent endpoint —
+  // the channel we use to tell it to delete the VM later, since the bidder
+  // treats provisioned VMs as a black box and can't observe that itself. Routed
+  // through our PDS via service-proxying: the bid's submitAccept field holds a
+  // service DID ref (did:web:HOST#pdr_market), distinct from the x402 payment
+  // url used for the payment leg above.
   let receiptRef: StrongRef | undefined;
   let providerSubmitEventUrl: string | undefined;
-  const bidPayload = winner.payload;
-  const bidderServiceRef = String(bidPayload?.url ?? "");
+  const bidderServiceRef = String(winner.record.submitAccept ?? "");
   if (bidderServiceRef) {
     log("submitting accept to bidder via submitAccept", { ref: bidderServiceRef, acceptUri: acceptRef.uri });
     try {

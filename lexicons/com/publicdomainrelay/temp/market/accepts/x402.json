@@ -1,0 +1,29 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.accepts.x402",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "The requester's acceptance of a bid's x402 payment terms. Minted before settling payment and passed (by AT-URI + CID) to the x402 GET endpoint named in the bids.x402 url; the bidder resolves it, verifies payment, and mints a com.publicdomainrelay.temp.market.receipts.x402 in response.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "bid"
+        ],
+        "properties": {
+          "bid": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the winning bid record (com.publicdomainrelay.temp.market.bid) whose bids.x402 payment terms are being accepted."
+          },
+          "payload": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the bid's payment terms record being accepted (for example a com.publicdomainrelay.temp.market.bids.x402)."
+          }
+        }
+      }
+    }
+  }
+}

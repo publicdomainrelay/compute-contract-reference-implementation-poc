@@ -26,7 +26,7 @@
           "payload": {
             "type": "ref",
             "ref": "com.atproto.repo.strongRef",
-            "description": "Strong reference to the accept record if there is anything to note about the acceptance (for example a com.publicdomainrelay.temp.market.accept.x402)."
+            "description": "Strong reference to the proof-of-payment record returned by the bid's payment flow (for example a com.publicdomainrelay.temp.market.receipts.x402 obtained from the x402 GET against the bids.x402 url). The bidder verifies this before provisioning."
           },
           "submitEvent": {
             "type": "string",

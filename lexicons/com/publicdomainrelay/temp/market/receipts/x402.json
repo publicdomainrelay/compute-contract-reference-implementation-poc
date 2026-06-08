@@ -1,0 +1,24 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.receipts.x402",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Proof-of-payment receipt minted by the bidder in response to a successful x402-gated GET against the bids.x402 url. Returned (by AT-URI + CID) to the requester, which uses it as the payload of the higher-level com.publicdomainrelay.temp.market.accept so the bidder can verify payment before provisioning.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "accept"
+        ],
+        "properties": {
+          "accept": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the com.publicdomainrelay.temp.market.accepts.x402 record that this payment settles."
+          }
+        }
+      }
+    }
+  }
+}

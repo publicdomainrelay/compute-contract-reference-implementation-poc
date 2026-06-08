@@ -27,6 +27,10 @@
             "type": "ref",
             "ref": "com.atproto.repo.strongRef",
             "description": "Strong reference to the bid record (for example a com.publicdomainrelay.temp.market.bids.x402)."
+          },
+          "submitAccept": {
+            "type": "string",
+            "description": "Service DID reference (did:web:HOST#pdr_market) of the bidder's market service. Once the requester has settled payment (via the x402 flow named in the bids.x402 payload) and minted a com.publicdomainrelay.temp.market.accept, it calls com.publicdomainrelay.temp.market.submitAccept via PDS service-proxying using this value as the atproto-proxy target to provision the resource and obtain a com.publicdomainrelay.temp.market.receipt."
           }
         }
       }
