@@ -56,7 +56,10 @@ const VM_DELETE_EVENT_NSID = "com.publicdomainrelay.temp.compute.events.vm.delet
 // Market service proxying (atproto PDS service-proxy)
 // ---------------------------------------------------------------------------
 
-const MARKET_SERVICE_ID = "pdr_market";
+const MARKET_SERVICE_ID = "pdr_temp_market";
+// Compute-contract event endpoint fragment, advertised separately from the
+// market service; submitEvent refs take the form `did:web:HOST#pdr_temp_compute_event`.
+const COMPUTE_EVENT_SERVICE_ID = "pdr_temp_compute_event";
 const SUBMIT_RFP_LXM    = "com.publicdomainrelay.temp.market.submitRfp";
 const SUBMIT_EVENT_LXM  = "com.publicdomainrelay.temp.market.submitEvent";
 const SUBMIT_ACCEPT_LXM = "com.publicdomainrelay.temp.market.submitAccept";
@@ -103,7 +106,7 @@ export type BidRecord = {
   rfp: StrongRef;
   payload: StrongRef;
   config?: StrongRef;
-  // Service DID ref (did:web:HOST#pdr_market) for the settlement leg
+  // Service DID ref (did:web:HOST#pdr_temp_market) for the settlement leg
   // (submitAccept via atproto-proxy), distinct from the payload's x402 url.
   submitAccept?: string;
 };
@@ -452,7 +455,7 @@ async function notifyBidderViaOffering(
     if (!endpointUrl || !Array.isArray(appliesTo)) continue;
     if (!appliesTo.includes(payloadNsid)) continue;
 
-    // endpointUrl now holds a market service DID ref (did:web:HOST#pdr_market).
+    // endpointUrl now holds a market service DID ref (did:web:HOST#pdr_temp_market).
     log("submitting RFP to vouched bidder", { bidderDid, endpointUrl, rfpUri });
     try {
       const res = await marketClient.call(
@@ -785,7 +788,7 @@ export async function marketRFPSubmitWorkflow(
   log("atproto authenticated", { did: agentDid, handle: config.handle });
 
   // XrpcClient over our own PDS session; market calls are service-proxied via
-  // the `atproto-proxy` header carrying a did:web:HOST#pdr_market service ref.
+  // the `atproto-proxy` header carrying a did:web:HOST#pdr_temp_market service ref.
   // deno-lint-ignore no-explicit-any
   const marketClient = new XrpcClient(session, marketLexicons as any);
 
@@ -907,7 +910,7 @@ export async function marketRFPSubmitWorkflow(
     createdAt: new Date().toISOString(),
   };
   if (spindleHostname) {
-    acceptRecord.submitEvent = `did:web:${spindleHostname}#${MARKET_SERVICE_ID}`;
+    acceptRecord.submitEvent = `did:web:${spindleHostname}#${COMPUTE_EVENT_SERVICE_ID}`;
   }
   const acceptRef = await atprotoCreateRecord(agent, ACCEPT_NSID, acceptRecord);
   log("market.accept created", { uri: acceptRef.uri });
@@ -986,7 +989,7 @@ export async function marketRFPSubmitWorkflow(
   // the channel we use to tell it to delete the VM later, since the bidder
   // treats provisioned VMs as a black box and can't observe that itself. Routed
   // through our PDS via service-proxying: the bid's submitAccept field holds a
-  // service DID ref (did:web:HOST#pdr_market), distinct from the x402 payment
+  // service DID ref (did:web:HOST#pdr_temp_market), distinct from the x402 payment
   // url used for the payment leg above.
   let receiptRef: StrongRef | undefined;
   let providerSubmitEventUrl: string | undefined;
@@ -1050,7 +1053,7 @@ export async function marketRFPSubmitWorkflow(
         createdAt: nowIso,
       };
       const eventRef = await atprotoCreateRecord(agent, EVENT_NSID, eventRecord);
-      // providerSubmitEventUrl holds a did:web:HOST#pdr_market service ref;
+      // providerSubmitEventUrl holds a did:web:HOST#pdr_temp_compute_event service ref;
       // route the submitEvent call through our PDS via service proxying.
       const res = await marketClient.call(
         SUBMIT_EVENT_LXM,

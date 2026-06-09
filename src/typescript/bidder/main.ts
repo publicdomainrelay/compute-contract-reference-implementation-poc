@@ -44,9 +44,12 @@ const SUBMIT_ACCEPT_NSID = "com.publicdomainrelay.temp.market.submitAccept";
 const VM_DELETE_EVENT_NSID = "com.publicdomainrelay.temp.compute.events.vm.delete";
 const RBAC_NSID = "com.fedproxy.rbac";
 
-// atproto-proxy market service: the bidder exposes a `pdr_market` service entry
-// in its did:web document; service DID refs take the form `did:web:HOST#pdr_market`.
-const MARKET_SERVICE_ID = "pdr_market";
+// atproto-proxy market service: the bidder exposes a `pdr_temp_market` service entry
+// in its did:web document; service DID refs take the form `did:web:HOST#pdr_temp_market`.
+const MARKET_SERVICE_ID = "pdr_temp_market";
+// Compute-contract event service: the bidder exposes a separate `pdr_temp_compute_event`
+// service entry; submitEvent refs take the form `did:web:HOST#pdr_temp_compute_event`.
+const COMPUTE_EVENT_SERVICE_ID = "pdr_temp_compute_event";
 const SUBMIT_BID_LXM = "com.publicdomainrelay.temp.market.submitBid";
 const SUBMIT_RFP_LXM = "com.publicdomainrelay.temp.market.submitRfp";
 const SUBMIT_EVENT_LXM = "com.publicdomainrelay.temp.market.submitEvent";
@@ -199,12 +202,14 @@ function atUriAuthority(uri: string): string {
 // Verifies an inter-service auth JWT for a market receiver endpoint. Mirrors the
 // spindle's validateTriggerServiceAuth: pass `null` as ownDid so verifyJwt
 // checks signature+lxm+expiry only, then assert `aud` by hand to tolerate both
-// the bare service DID and the full `#pdr_market` service ref. Returns the
+// the bare service DID and the full service ref. `serviceId` selects which
+// fragment the proxied token's `aud` is checked against (MARKET_SERVICE_ID for
+// the market endpoints, COMPUTE_EVENT_SERVICE_ID for submitEvent). Returns the
 // issuer DID (authority portion, without any fragment).
-async function validateMarketServiceAuth(authHeader: string | undefined | null, lxm: string): Promise<string> {
+async function validateMarketServiceAuth(authHeader: string | undefined | null, lxm: string, serviceId: string = MARKET_SERVICE_ID): Promise<string> {
   const token = extractBearer(authHeader);
   const serviceDid = bidderServiceDid();
-  const serviceRef = `${serviceDid}#${MARKET_SERVICE_ID}`;
+  const serviceRef = `${serviceDid}#${serviceId}`;
   const payload = await verifyJwt(token, null, lxm, (did: string) => idResolver.did.resolveAtprotoKey(did));
   const aud = (payload as Record<string, unknown>).aud as string | undefined;
   if (aud !== serviceDid && aud !== serviceRef) throw new Error(`unexpected audience ${aud ?? "(none)"}; expected ${serviceDid} or ${serviceRef}`);
@@ -780,15 +785,18 @@ if (!X402_MAKE_FREE) {
   );
 }
 
-// did:web document exposing the `pdr_market` service entry. The bidder only
-// RECEIVES service-auth tokens (no signing key needed here).
+// did:web document exposing the `pdr_temp_market` and `pdr_temp_compute_event` service
+// entries. The bidder only RECEIVES service-auth tokens (no signing key needed).
 app.get("/.well-known/did.json", (c) => {
   if (!BASE_URL) return c.json({ error: "NotFound", message: "BASE_URL not configured" }, 404);
   const host = new URL(BASE_URL).host;
   return c.json({
     "@context": ["https://www.w3.org/ns/did/v1"],
     id: `did:web:${host}`,
-    service: [{ id: `#${MARKET_SERVICE_ID}`, type: "PdrMarket", serviceEndpoint: `https://${host}` }],
+    service: [
+      { id: `#${MARKET_SERVICE_ID}`, type: "PDRTempMarket", serviceEndpoint: `https://${host}` },
+      { id: `#${COMPUTE_EVENT_SERVICE_ID}`, type: "PDRTempComputeEvent", serviceEndpoint: `https://${host}` },
+    ],
   });
 });
 
@@ -931,7 +939,7 @@ app.post(`/xrpc/${SUBMIT_ACCEPT_NSID}`, async (c) => {
   // down — either because the workflow finished or the policy engine never
   // came up. submitEventUrl is handed back below so the caller knows where to
   // send those events, keyed by a strongRef to this receipt.
-  const submitEventUrl = `${bidderServiceDid()}#${MARKET_SERVICE_ID}`;
+  const submitEventUrl = `${bidderServiceDid()}#${COMPUTE_EVENT_SERVICE_ID}`;
 
   const res = await agent.com.atproto.repo.createRecord({
     repo: agent.assertDid,
@@ -1040,7 +1048,7 @@ async function createAndSubmitBid(
   log("info", "bidRecord", { bidRecord: bidRecord });
 
   if (rfpRecord.submitBid) {
-    // rfpRecord.submitBid is now a service DID ref (did:web:HOST#pdr_market).
+    // rfpRecord.submitBid is now a service DID ref (did:web:HOST#pdr_temp_market).
     // Route the call through our PDS via atproto-proxy instead of raw fetch.
     try {
       await marketClient.call(
@@ -1177,7 +1185,7 @@ app.post(`/xrpc/${SUBMIT_EVENT_NSID}`, async (c) => {
   if (!uri || !cid || !record) return c.json({ error: "InvalidRequest", message: "missing uri, cid, or record" }, 400);
 
   let issuerDid: string;
-  try { issuerDid = await validateMarketServiceAuth(c.req.header("Authorization"), SUBMIT_EVENT_LXM); }
+  try { issuerDid = await validateMarketServiceAuth(c.req.header("Authorization"), SUBMIT_EVENT_LXM, COMPUTE_EVENT_SERVICE_ID); }
   catch (err) { log("warn", "submitEvent rejected: invalid service-auth token", { err: String(err) }); return c.json({ error: "Unauthorized", message: `invalid service-auth token: ${String(err)}` }, 401); }
   if (issuerDid !== atUriAuthority(uri)) { log("warn", "submitEvent rejected: token issuer does not match event author", { iss: issuerDid, uri }); return c.json({ error: "Forbidden", message: "service-auth token issuer must author the event record" }, 403); }
 

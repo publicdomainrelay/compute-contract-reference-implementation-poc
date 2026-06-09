@@ -12,7 +12,7 @@
         "properties": {
           "endpointUrl": {
             "type": "string",
-            "description": "Service DID reference (did:web:HOST#pdr_market) of the bidder's market service. RFP issuers call com.publicdomainrelay.temp.market.submitRfp via PDS service-proxying using this value as the atproto-proxy target."
+            "description": "Service DID reference (did:web:HOST#temp_market) of the bidder's market service. RFP issuers call com.publicdomainrelay.temp.market.submitRfp via PDS service-proxying using this value as the atproto-proxy target."
           },
           "appliesTo": {
             "type": "array",

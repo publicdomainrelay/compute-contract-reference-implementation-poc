@@ -42,7 +42,7 @@
             },
             "submitEvent": {
               "type": "string",
-              "description": "Service DID reference (did:web:HOST#pdr_market) of the bidder's market service, scoped to this receipt's strongRef. The requester calls com.publicdomainrelay.temp.market.submitEvent via PDS service-proxying using this value as the atproto-proxy target."
+              "description": "Service DID reference (did:web:HOST#compute_event) of the bidder's compute-event service, scoped to this receipt's strongRef. The requester calls com.publicdomainrelay.temp.market.submitEvent via PDS service-proxying using this value as the atproto-proxy target."
             }
           }
         }

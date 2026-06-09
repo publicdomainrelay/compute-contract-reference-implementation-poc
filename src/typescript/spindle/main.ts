@@ -779,9 +779,14 @@ const SPINDLE_SERVICE_ID = "tangled_spindle";
 
 // Market service endpoint identifier (DID-document `service` fragment) under
 // which this spindle advertises its market RECEIVER endpoints for PDS proxying.
-// Bidders/agents proxy to `did:web:<spindle>#pdr_market`; the proxied token's
+// Bidders/agents proxy to `did:web:<spindle>#pdr_temp_market`; the proxied token's
 // `aud` is the same reference (or the bare service DID on legacy PDSes).
-const MARKET_SERVICE_ID = "pdr_market";
+const MARKET_SERVICE_ID = "pdr_temp_market";
+// Compute-contract event endpoint identifier (DID-document `service` fragment).
+// The submitEvent receiver is advertised separately from the market service so
+// counterparties proxy lifecycle events to `did:web:<spindle>#pdr_temp_compute_event`;
+// the proxied token's `aud` is the same reference (or the bare service DID).
+const COMPUTE_EVENT_SERVICE_ID = "pdr_temp_compute_event";
 const SUBMIT_BID_LXM = "com.publicdomainrelay.temp.market.submitBid";
 const SUBMIT_EVENT_LXM = "com.publicdomainrelay.temp.market.submitEvent";
 
@@ -826,18 +831,19 @@ async function validateTriggerServiceAuth(authHeader: string | undefined | null,
 }
 
 // validateMarketServiceAuth — same PDS service-proxying verification as
-// validateTriggerServiceAuth, but for the market RECEIVER endpoints. The
-// service reference uses MARKET_SERVICE_ID and the bound lxm is passed in by
-// the caller (submitBid vs submitEvent). Returns the bare issuer DID.
-async function validateMarketServiceAuth(authHeader: string | undefined | null, hostname: string, lxm: string): Promise<string> {
+// validateTriggerServiceAuth, but for the market/compute-event RECEIVER
+// endpoints. The service reference uses `serviceId` (MARKET_SERVICE_ID for the
+// market endpoints, COMPUTE_EVENT_SERVICE_ID for submitEvent) and the bound lxm
+// is passed in by the caller. Returns the bare issuer DID.
+async function validateMarketServiceAuth(authHeader: string | undefined | null, hostname: string, lxm: string, serviceId: string = MARKET_SERVICE_ID): Promise<string> {
   const token = extractBearer(authHeader);
   const serviceDid = `did:web:${effectiveHostname(getOwnerDid(hostname))}`;
-  const serviceRef = `${serviceDid}#${MARKET_SERVICE_ID}`;
+  const serviceRef = `${serviceDid}#${serviceId}`;
 
   // Pass ownDid=null so verifyJwt only checks the signature, lxm, and expiry; we
   // assert the audience by hand just below. This lets us accept BOTH forms of
   // `aud` a proxying PDS may send: the full service reference
-  // (`did:web:<spindle>#pdr_market`, used by newer PDSes) and the bare service
+  // (`did:web:<spindle>#pdr_temp_market`, used by newer PDSes) and the bare service
   // DID (`did:web:<spindle>`) that the reference PDS emitted until Spring 2026
   // by stripping the fragment. Re-checking aud here preserves the
   // anti-forwarding guarantee verifyJwt's own aud check would otherwise give.
@@ -1459,7 +1465,12 @@ app.get("/.well-known/did.json", (c) => {
       },
       {
         id: `#${MARKET_SERVICE_ID}`,
-        type: "PdrMarket",
+        type: "PDRTempMarket",
+        serviceEndpoint: `https://${serviceHost}`,
+      },
+      {
+        id: `#${COMPUTE_EVENT_SERVICE_ID}`,
+        type: "PDRTempComputeEvent",
         serviceEndpoint: `https://${serviceHost}`,
       },
     ],
@@ -1937,7 +1948,7 @@ app.post("/xrpc/com.publicdomainrelay.temp.market.submitEvent", async (c) => {
 
   let issuerDid: string;
   try {
-    issuerDid = await validateMarketServiceAuth(c.req.header("Authorization"), c.req.header("host") ?? HOSTNAME, SUBMIT_EVENT_LXM);
+    issuerDid = await validateMarketServiceAuth(c.req.header("Authorization"), c.req.header("host") ?? HOSTNAME, SUBMIT_EVENT_LXM, COMPUTE_EVENT_SERVICE_ID);
   } catch (err) {
     log("warn", "submitEvent rejected: invalid service-auth token", { err: String(err) });
     return c.json({ error: "Unauthorized", message: `invalid service-auth token: ${String(err)}` }, 401);
