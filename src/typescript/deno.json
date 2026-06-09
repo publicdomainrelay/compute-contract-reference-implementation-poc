@@ -1,0 +1,12 @@
+{
+  "workspace": [
+    "./lib/atproto-helpers",
+    "./lib/compute",
+    "./lib/compute-provider-digitalocean",
+    "./lib/deno-hono-helpers",
+    "./lib/lexicons",
+    "./lib/market",
+    "./lib/market-free",
+    "./lib/market-x402"
+  ]
+}

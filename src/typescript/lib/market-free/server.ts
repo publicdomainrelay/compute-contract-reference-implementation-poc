@@ -18,8 +18,8 @@ import {
   type Resolved,
   strongRef,
   type StrongRef,
-} from "../market/mod.ts";
-import { ACCEPTS_FREE_NSID, RECEIPTS_FREE_NSID } from "../lexicons/mod.ts";
+} from "@publicdomainrelay/market";
+import { ACCEPTS_FREE_NSID, RECEIPTS_FREE_NSID } from "@publicdomainrelay/lexicons";
 import type { Main as AcceptsFree } from "../lexicons/com/publicdomainrelay/temp/market/accepts/free.defs.ts";
 import type { Main as ReceiptsFree } from "../lexicons/com/publicdomainrelay/temp/market/receipts/free.defs.ts";
 

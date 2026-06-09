@@ -16,8 +16,8 @@ import {
   noopLogger,
   strongRef,
   type StrongRef,
-} from "../market/mod.ts";
-import { ACCEPTS_FREE_NSID } from "../lexicons/mod.ts";
+} from "@publicdomainrelay/market";
+import { ACCEPTS_FREE_NSID } from "@publicdomainrelay/lexicons";
 
 export interface SettleFreeOptions {
   /** Authenticated agent for the buyer's repo (mints the accepts.free). */

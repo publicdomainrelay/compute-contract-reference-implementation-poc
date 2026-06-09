@@ -2,10 +2,10 @@
 // market.event payloads, plugged into createSubmitEventHandler's callback
 // routing table (callbacks[serviceId][payloadNsid]).
 
-import { parseAtUri } from "../market/resolve.ts";
-import type { EventCallback, EventDispatchContext, HandlerResult } from "../market/server.ts";
-import type { Receipt, Resolved } from "../market/types.ts";
-import type { VMDeleteEvent } from "../lexicons/mod.ts";
+import { parseAtUri } from "@publicdomainrelay/market";
+import type { EventCallback, EventDispatchContext, HandlerResult } from "@publicdomainrelay/market";
+import type { Receipt, Resolved } from "@publicdomainrelay/market";
+import type { VMDeleteEvent } from "@publicdomainrelay/lexicons";
 
 export type { VMDeleteEvent };
 

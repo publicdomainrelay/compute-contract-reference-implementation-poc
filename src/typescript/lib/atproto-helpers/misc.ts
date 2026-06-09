@@ -5,7 +5,7 @@
 import { Agent, CredentialSession } from "@atproto/api";
 import { IdResolver } from "@atproto/identity";
 import { getPdsEndpoint } from "@atproto/common-web";
-import { createMarketClient, type MarketClient } from "../market/mod.ts";
+import { createMarketClient, type MarketClient } from "@publicdomainrelay/market";
 
 export const idResolver = new IdResolver();
 export let agent: Agent;

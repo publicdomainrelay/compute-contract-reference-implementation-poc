@@ -18,8 +18,8 @@ import {
   type Resolved,
   strongRef,
   type StrongRef,
-} from "../market/mod.ts";
-import { ACCEPTS_X402_NSID, RECEIPTS_X402_NSID } from "../lexicons/mod.ts";
+} from "@publicdomainrelay/market";
+import { ACCEPTS_X402_NSID, RECEIPTS_X402_NSID } from "@publicdomainrelay/lexicons";
 import type { Main as AcceptsX402 } from "../lexicons/com/publicdomainrelay/temp/market/accepts/x402.defs.ts";
 import type { Main as ReceiptsX402 } from "../lexicons/com/publicdomainrelay/temp/market/receipts/x402.defs.ts";
 

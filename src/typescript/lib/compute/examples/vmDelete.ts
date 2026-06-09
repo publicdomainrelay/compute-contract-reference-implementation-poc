@@ -10,7 +10,7 @@
 //   deno run --allow-net --allow-env vmDelete.ts
 
 import { IdResolver } from "@atproto/identity";
-import { createRecordResolver, createSubmitEventHandler, DEFAULT_COMPUTE_EVENT_SERVICE_ID, SUBMIT_EVENT_NSID } from "../../market/mod.ts";
+import { createRecordResolver, createSubmitEventHandler, DEFAULT_COMPUTE_EVENT_SERVICE_ID, SUBMIT_EVENT_NSID } from "@publicdomainrelay/market";
 import { COMPUTE_EVENTS_VM_DELETE_NSID, createComputeEventDeleteHandler } from "../mod.ts";
 
 const BASE_URL = Deno.env.get("BASE_URL") ?? "https://bidder.example";

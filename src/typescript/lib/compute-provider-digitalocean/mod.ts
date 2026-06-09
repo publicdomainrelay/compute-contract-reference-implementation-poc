@@ -9,7 +9,7 @@
 
 import { Agent } from "@atproto/api";
 import { stringify as yamlStringify, parse as yamlParse } from "npm:yaml@^2.7.0";
-import { COMPUTE_CONFIG_WIF_SIMPLE_NSID } from "../lexicons/mod.ts";
+import { COMPUTE_CONFIG_WIF_SIMPLE_NSID } from "@publicdomainrelay/lexicons";
 
 export type StrongRef = { $type: "com.atproto.repo.strongRef"; uri: string; cid: string };
 

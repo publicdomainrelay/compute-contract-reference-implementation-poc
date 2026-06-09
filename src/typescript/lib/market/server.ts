@@ -18,7 +18,7 @@ import {
   SUBMIT_BID_LXM,
   SUBMIT_EVENT_LXM,
   SUBMIT_RFP_LXM,
-} from "../lexicons/mod.ts";
+} from "@publicdomainrelay/lexicons";
 import { verifyMarketServiceAuth } from "./auth.ts";
 import { atUriAuthority, nsidFromUri, type RecordResolver } from "./resolve.ts";
 import { noopLogger } from "./types.ts";

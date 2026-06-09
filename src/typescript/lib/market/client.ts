@@ -13,7 +13,7 @@ import {
   SUBMIT_BID_NSID,
   SUBMIT_EVENT_NSID,
   SUBMIT_RFP_NSID,
-} from "../lexicons/mod.ts";
+} from "@publicdomainrelay/lexicons";
 import type { StrongRef } from "./types.ts";
 
 /**

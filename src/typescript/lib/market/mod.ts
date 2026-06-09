@@ -11,7 +11,7 @@
 // Runs on Deno (see deno.json import map) and Node (see package.json).
 
 export * from "./types.ts";
-export * from "../lexicons/mod.ts";
+export * from "@publicdomainrelay/lexicons";
 export * from "./resolve.ts";
 export * from "./records.ts";
 export * from "./auth.ts";
