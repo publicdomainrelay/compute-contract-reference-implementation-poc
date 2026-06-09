@@ -2,13 +2,14 @@
 // DigitalOcean + RBAC — provisioning backend for the bidder.
 //
 // Exposes createComputeProviderDigitalOcean(ctx), which wires the DO/RBAC
-// helpers (previously inline in main.ts) against the bidder's atproto agent,
-// logger, and env. Kept as a factory (rather than module-level state) because
-// `agent`/`agentDid` are only available after loginAgent() resolves.
+// helpers against the bidder's atproto agent and env. Kept as a factory
+// (rather than module-level state) because `agent`/`agentDid` are only
+// available after loginAgent() resolves.
 // ---------------------------------------------------------------------------
 
 import { Agent } from "@atproto/api";
 import { stringify as yamlStringify, parse as yamlParse } from "npm:yaml@^2.7.0";
+import { COMPUTE_CONFIG_WIF_SIMPLE_NSID } from "../lexicons-compute/mod.ts";
 
 export type StrongRef = { $type: "com.atproto.repo.strongRef"; uri: string; cid: string };
 
@@ -31,13 +32,26 @@ export interface ComputeProviderDigitalOceanCtx {
   getAgent: () => Agent;
   getAgentDid: () => string;
   log: Logger;
-  rbacNsid: string;
+  acceptPathRecord: string;
   acceptPathVm: string;
   digitaloceanBaseUrl: string;
   doToken: string;
   rbacRepoRoot: string;
   parseAtUri: (uri: string) => { repo: string; collection: string; rkey: string };
-  canonicalJson: (value: unknown) => string;
+}
+
+// RBAC NSID is specific to the DigitalOcean/homelab RBAC integration.
+const RBAC_NSID = "com.fedproxy.rbac";
+
+// JSON.stringify with sorted keys — used to compare RBAC records for
+// idempotency regardless of the key order the PDS returns them in.
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 type DOContext = { rbacRepoRoot: string; teamUuid: string };
@@ -47,13 +61,12 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     getAgent,
     getAgentDid,
     log,
-    rbacNsid: RBAC_NSID,
+    acceptPathRecord: ACCEPT_PATH_RECORD,
     acceptPathVm: ACCEPT_PATH_VM,
     digitaloceanBaseUrl: DIGITALOCEAN_BASE_URL,
     doToken: DO_TOKEN,
     rbacRepoRoot: RBAC_REPO_ROOT,
     parseAtUri,
-    canonicalJson,
   } = ctx;
 
   async function atprotoCreateRecord(collection: string, record: Record<string, unknown>): Promise<StrongRef> {
@@ -392,6 +405,26 @@ echo "password=\${TOKEN}"
     return "#cloud-config\n" + yamlStringify(obj, { lineWidth: 0 });
   }
 
+  // Creates the com.publicdomainrelay.temp.compute.config.wif.simple record
+  // that the bid advertises. Encodes the DO OIDC exchange parameters so the
+  // VM can mint its own short-lived credentials without a long-lived secret.
+  async function createBidConfig(nowIso: string): Promise<StrongRef> {
+    const doctx = await makeDoctx();
+    return atprotoCreateRecord(COMPUTE_CONFIG_WIF_SIMPLE_NSID, {
+      $type: COMPUTE_CONFIG_WIF_SIMPLE_NSID,
+      accept_path: ACCEPT_PATH_RECORD,
+      issuer_uri: DIGITALOCEAN_BASE_URL,
+      to_issue: "exchange-custom-droplet-oidc-poc",
+      actx: doctx.teamUuid,
+      actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
+      token_path: "/root/secrets/digitalocean.com/serviceaccount/token",
+      url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
+      url_route: "/v1/oidc/issue",
+      subject: "actx:{actx}:plc:{did-plc-key}:role:{role}",
+      createdAt: nowIso,
+    });
+  }
+
   async function createDroplet(vm: VM, requesterDid: string): Promise<{ json: unknown; rbacRef: StrongRef }> {
     const requesterPlc = requesterDid.split(":").slice(-1)[0];
     const rfpRkey = (vm._uri ?? "").split("/")[4] ?? "unknown";
@@ -437,7 +470,7 @@ echo "password=\${TOKEN}"
   }
 
   return {
-    makeDoctx,
+    createBidConfig,
     createDroplet,
     deleteDroplet,
     deleteRbacRecord,
