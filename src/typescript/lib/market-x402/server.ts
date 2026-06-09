@@ -19,8 +19,9 @@ import {
   strongRef,
   type StrongRef,
 } from "../market/mod.ts";
-import { ACCEPTS_X402_NSID, RECEIPTS_X402_NSID } from "./nsids.ts";
-import type { AcceptsX402, ReceiptsX402 } from "./types.ts";
+import { ACCEPTS_X402_NSID, RECEIPTS_X402_NSID } from "../lexicons/mod.ts";
+import type { Main as AcceptsX402 } from "../lexicons/com/publicdomainrelay/temp/market/accepts/x402.defs.ts";
+import type { Main as ReceiptsX402 } from "../lexicons/com/publicdomainrelay/temp/market/receipts/x402.defs.ts";
 
 /** Error carrying an HTTP status, so callers can map it to their framework. */
 export class X402PaymentError extends Error {

@@ -11,11 +11,10 @@
 // Runs on Deno (see deno.json import map) and Node (see package.json).
 
 export * from "./types.ts";
-export * from "./nsids.ts";
+export * from "../lexicons/mod.ts";
 export * from "./resolve.ts";
 export * from "./records.ts";
 export * from "./auth.ts";
 export * from "./egress.ts";
 export * from "./server.ts";
 export * from "./client.ts";
-export { marketLexicons } from "./lexicons.ts";

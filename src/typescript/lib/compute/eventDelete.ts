@@ -5,7 +5,7 @@
 import { parseAtUri } from "../market/resolve.ts";
 import type { EventCallback, EventDispatchContext, HandlerResult } from "../market/server.ts";
 import type { Receipt, Resolved } from "../market/types.ts";
-import type { VMDeleteEvent } from "../lexicons-compute/mod.ts";
+import type { VMDeleteEvent } from "../lexicons/mod.ts";
 
 export type { VMDeleteEvent };
 

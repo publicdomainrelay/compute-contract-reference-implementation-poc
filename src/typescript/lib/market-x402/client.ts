@@ -9,7 +9,7 @@
 
 import type { Agent } from "@atproto/api";
 import { createRecord, type Logger, noopLogger, strongRef, type StrongRef } from "../market/mod.ts";
-import { ACCEPTS_X402_NSID } from "./nsids.ts";
+import { ACCEPTS_X402_NSID } from "../lexicons/mod.ts";
 import { assertSafeEgressUrl, type EgressOptions } from "./egress.ts";
 
 export interface SettleX402Options {

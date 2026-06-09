@@ -56,7 +56,7 @@ import { BIDS_FREE_NSID } from "../lib/market-free/mod.ts";
 import {
   COMPUTE_EVENTS_VM_DELETE_NSID,
   COMPUTE_VM_NSID,
-} from "../lib/lexicons-compute/mod.ts";
+} from "../lib/lexicons/mod.ts";
 
 // ---------------------------------------------------------------------------
 // NSID aliases

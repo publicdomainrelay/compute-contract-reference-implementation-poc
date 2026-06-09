@@ -19,8 +19,9 @@ import {
   strongRef,
   type StrongRef,
 } from "../market/mod.ts";
-import { ACCEPTS_FREE_NSID, RECEIPTS_FREE_NSID } from "./nsids.ts";
-import type { AcceptsFree, ReceiptsFree } from "./types.ts";
+import { ACCEPTS_FREE_NSID, RECEIPTS_FREE_NSID } from "../lexicons/mod.ts";
+import type { Main as AcceptsFree } from "../lexicons/com/publicdomainrelay/temp/market/accepts/free.defs.ts";
+import type { Main as ReceiptsFree } from "../lexicons/com/publicdomainrelay/temp/market/receipts/free.defs.ts";
 
 /** Error carrying an HTTP status, so callers can map it to their framework. */
 export class FreeGrantError extends Error {

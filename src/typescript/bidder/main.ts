@@ -44,7 +44,7 @@ import {
   type ComputeVM,
   COMPUTE_EVENTS_VM_DELETE_NSID,
   COMPUTE_VM_NSID,
-} from "../lib/lexicons-compute/mod.ts";
+} from "../lib/lexicons/mod.ts";
 import {
   agent,
   agentDid,

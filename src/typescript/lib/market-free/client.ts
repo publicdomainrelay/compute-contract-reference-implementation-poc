@@ -17,7 +17,7 @@ import {
   strongRef,
   type StrongRef,
 } from "../market/mod.ts";
-import { ACCEPTS_FREE_NSID } from "./nsids.ts";
+import { ACCEPTS_FREE_NSID } from "../lexicons/mod.ts";
 
 export interface SettleFreeOptions {
   /** Authenticated agent for the buyer's repo (mints the accepts.free). */

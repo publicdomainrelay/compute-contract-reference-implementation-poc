@@ -8,13 +8,12 @@
 // `did:web:HOST#<service-id>` ref to proxy to.
 
 import { XrpcClient } from "@atproto/xrpc";
-import { marketLexicons } from "./lexicons.ts";
 import {
   SUBMIT_ACCEPT_NSID,
   SUBMIT_BID_NSID,
   SUBMIT_EVENT_NSID,
   SUBMIT_RFP_NSID,
-} from "./nsids.ts";
+} from "../lexicons/mod.ts";
 import type { StrongRef } from "./types.ts";
 
 /**
@@ -62,8 +61,7 @@ export class MarketClient {
   readonly xrpc: XrpcClient;
 
   constructor(service: XrpcService) {
-    // deno-lint-ignore no-explicit-any
-    this.xrpc = new XrpcClient(service, marketLexicons as any);
+    this.xrpc = new XrpcClient(service);
   }
 
   /**

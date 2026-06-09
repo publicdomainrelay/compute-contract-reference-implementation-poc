@@ -13,8 +13,7 @@
 //
 // Runs on Deno (see deno.json import map) and Node (see package.json).
 
-export * from "./nsids.ts";
-export * from "./types.ts";
+export * from "../lexicons/mod.ts";
 export * from "./egress.ts";
 export * from "./client.ts";
 export * from "./server.ts";
