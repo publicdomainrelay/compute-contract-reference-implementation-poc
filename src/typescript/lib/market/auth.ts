@@ -1,0 +1,85 @@
+// Inter-service auth verification for market receiver endpoints.
+//
+// Every submit* procedure is meant to be called via PDS service-proxying
+// (the atproto-proxy header), which means the receiver gets an inter-service
+// auth JWT minted by the caller's PDS. We verify that token's signature, `lxm`,
+// and expiry, then assert its `aud` matches this service (bare DID or one of
+// the configured `did:web:HOST#<service-id>` refs). The DID key lookup is done
+// through the injected IdResolver, so callers share one identity layer.
+
+import { verifyJwt } from "@atproto/xrpc-server";
+import type { IdResolver } from "@atproto/identity";
+
+/** Extract the token from an `Authorization: Bearer <token>` header. */
+export function extractBearer(header: string | undefined | null): string {
+  const m = /^Bearer (.+)$/.exec((header ?? "").trim());
+  if (!m) throw new Error("missing or malformed Authorization Bearer header");
+  return m[1];
+}
+
+/** The bidder's own service DID, derived from its public hostname. */
+export function serviceDidForHost(hostname: string): string {
+  return `did:web:${hostname}`;
+}
+
+export type ServiceAuthResult = {
+  /** Issuer DID (authority portion, fragment stripped). */
+  issuerDid: string;
+  /** The exact `aud` value the token carried. */
+  audience: string;
+  /**
+   * Which configured service-id fragment the `aud` matched, or `undefined` when
+   * the token targeted the bare service DID (no fragment).
+   */
+  serviceId?: string;
+};
+
+export type VerifyMarketServiceAuthOptions = {
+  /** Raw value of the inbound Authorization header. */
+  authHeader: string | undefined | null;
+  /** This service's public hostname (the host of its did:web). */
+  hostname: string;
+  /** Expected `lxm` (lexicon method) the token must be scoped to. */
+  lxm: string;
+  /** Service-id fragments this endpoint will accept in the token `aud`. */
+  serviceIds: string[];
+  /** Identity resolver used to fetch the issuer's signing key. */
+  idResolver: IdResolver;
+};
+
+/**
+ * Verify an inter-service auth JWT for a market receiver endpoint.
+ *
+ * Follows the reference bidder's pattern: pass `null` as `ownDid` so
+ * {@link verifyJwt} checks signature + lxm + expiry only, then assert `aud` by
+ * hand to tolerate both the bare service DID and any of the configured service
+ * refs. Returns the issuer DID and which service-id (if any) the `aud` matched,
+ * so callers can route by service.
+ *
+ * @throws if the token is missing/malformed, fails verification, has an
+ *   unexpected `aud`, or carries no DID issuer.
+ */
+export async function verifyMarketServiceAuth(
+  opts: VerifyMarketServiceAuthOptions,
+): Promise<ServiceAuthResult> {
+  const { authHeader, hostname, lxm, serviceIds, idResolver } = opts;
+  const token = extractBearer(authHeader);
+  const serviceDid = serviceDidForHost(hostname);
+
+  const payload = await verifyJwt(token, null, lxm, (did: string) => idResolver.did.resolveAtprotoKey(did));
+
+  // Acceptable audiences: the bare service DID, plus one ref per service id.
+  const acceptable = new Map<string, string | undefined>();
+  acceptable.set(serviceDid, undefined);
+  for (const id of serviceIds) acceptable.set(`${serviceDid}#${id}`, id);
+
+  const aud = (payload as Record<string, unknown>).aud as string | undefined;
+  if (aud === undefined || !acceptable.has(aud)) {
+    throw new Error(`unexpected audience ${aud ?? "(none)"}; expected ${[...acceptable.keys()].join(" or ")}`);
+  }
+
+  const iss = (payload as Record<string, unknown>).iss as string | undefined;
+  if (!iss || !iss.startsWith("did:")) throw new Error("service auth token missing DID issuer");
+
+  return { issuerDid: iss.split("#")[0], audience: aud, serviceId: acceptable.get(aud) };
+}

@@ -20,9 +20,15 @@ import { HTTPFacilitatorClient } from "npm:@x402/core/server";
 import { Agent, CredentialSession } from "@atproto/api";
 import { IdResolver } from "@atproto/identity";
 import { getPdsEndpoint } from "@atproto/common-web";
-import { verifyJwt } from "@atproto/xrpc-server";
-import { XrpcClient } from "@atproto/xrpc";
 import { stringify as yamlStringify, parse as yamlParse } from "npm:yaml@^2.7.0";
+import {
+  createMarketClient,
+  createSubmitAcceptHandler,
+  createSubmitEventHandler,
+  createSubmitRfpHandler,
+  type MarketClient,
+  type MarketServerDeps,
+} from "../lib/market/mod.ts";
 
 // ---------------------------------------------------------------------------
 // NSID constants (mirrors models/publicdomainrelay.py)
@@ -38,7 +44,6 @@ const RECEIPTS_X402_NSID = "com.publicdomainrelay.temp.market.receipts.x402";
 const ACCEPT_NSID = "com.publicdomainrelay.temp.market.accept";
 const RECEIPT_NSID = "com.publicdomainrelay.temp.market.receipt";
 const OFFERING_NSID = "com.publicdomainrelay.temp.market.offering";
-const EVENT_NSID = "com.publicdomainrelay.temp.market.event";
 const SUBMIT_EVENT_NSID = "com.publicdomainrelay.temp.market.submitEvent";
 const SUBMIT_ACCEPT_NSID = "com.publicdomainrelay.temp.market.submitAccept";
 const VM_DELETE_EVENT_NSID = "com.publicdomainrelay.temp.compute.events.vm.delete";
@@ -50,10 +55,6 @@ const MARKET_SERVICE_ID = "pdr_temp_market";
 // Compute-contract event service: the bidder exposes a separate `pdr_temp_compute_event`
 // service entry; submitEvent refs take the form `did:web:HOST#pdr_temp_compute_event`.
 const COMPUTE_EVENT_SERVICE_ID = "pdr_temp_compute_event";
-const SUBMIT_BID_LXM = "com.publicdomainrelay.temp.market.submitBid";
-const SUBMIT_RFP_LXM = "com.publicdomainrelay.temp.market.submitRfp";
-const SUBMIT_EVENT_LXM = "com.publicdomainrelay.temp.market.submitEvent";
-const SUBMIT_ACCEPT_LXM = "com.publicdomainrelay.temp.market.submitAccept";
 
 // Maps `${receiptUri}#${receiptCid}` -> DigitalOcean droplet id, so that when
 // the requester reports a com.publicdomainrelay.temp.compute.events.vm.delete
@@ -157,65 +158,20 @@ const idResolver = new IdResolver();
 let agent: Agent;
 let agentDid = "";
 let session: CredentialSession;
-let marketClient: XrpcClient;
-
-// Minimal lexicon describing the submitBid procedure so the XrpcClient can
-// validate/encode the outbound call. Output is encoding-only (we don't inspect
-// the response body). The bidder is the CALLER here; the receiver validates.
-const marketLexicons = [{
-  lexicon: 1,
-  id: SUBMIT_BID_LXM,
-  defs: {
-    main: {
-      type: "procedure",
-      input: {
-        encoding: "application/json",
-        schema: {
-          type: "object",
-          required: ["uri", "cid", "record"],
-          properties: {
-            uri: { type: "string" },
-            cid: { type: "string" },
-            record: { type: "unknown" },
-          },
-        },
-      },
-      output: { encoding: "application/json" },
-    },
-  },
-}];
+// Client wrapper for the outbound market submit* calls (built on the
+// authenticated session in loginAgent). See ../lib/market.
+let marketClient: MarketClient;
 
 function bidderServiceDid(): string {
   return `did:web:${new URL(BASE_URL).host}`;
 }
 
-function extractBearer(header: string | undefined | null): string {
-  const m = /^Bearer (.+)$/.exec((header ?? "").trim());
-  if (!m) throw new Error("missing or malformed Authorization Bearer header");
-  return m[1];
-}
-
+// The authority (repo DID) portion of an at:// URI. Inter-service auth for the
+// market endpoints (token issuer must author the referenced record, audience
+// checks, etc.) now lives in ../lib/market; this stays for the local
+// payload-author checks below.
 function atUriAuthority(uri: string): string {
   return uri.replace("at://", "").split("/")[0];
-}
-
-// Verifies an inter-service auth JWT for a market receiver endpoint. Mirrors the
-// spindle's validateTriggerServiceAuth: pass `null` as ownDid so verifyJwt
-// checks signature+lxm+expiry only, then assert `aud` by hand to tolerate both
-// the bare service DID and the full service ref. `serviceId` selects which
-// fragment the proxied token's `aud` is checked against (MARKET_SERVICE_ID for
-// the market endpoints, COMPUTE_EVENT_SERVICE_ID for submitEvent). Returns the
-// issuer DID (authority portion, without any fragment).
-async function validateMarketServiceAuth(authHeader: string | undefined | null, lxm: string, serviceId: string = MARKET_SERVICE_ID): Promise<string> {
-  const token = extractBearer(authHeader);
-  const serviceDid = bidderServiceDid();
-  const serviceRef = `${serviceDid}#${serviceId}`;
-  const payload = await verifyJwt(token, null, lxm, (did: string) => idResolver.did.resolveAtprotoKey(did));
-  const aud = (payload as Record<string, unknown>).aud as string | undefined;
-  if (aud !== serviceDid && aud !== serviceRef) throw new Error(`unexpected audience ${aud ?? "(none)"}; expected ${serviceDid} or ${serviceRef}`);
-  const iss = (payload as Record<string, unknown>).iss as string | undefined;
-  if (!iss || !iss.startsWith("did:")) throw new Error("service auth token missing DID issuer");
-  return iss.split("#")[0];
 }
 
 async function loginAgent(): Promise<void> {
@@ -233,9 +189,9 @@ async function loginAgent(): Promise<void> {
   await session.login({ identifier: ATPROTO_HANDLE, password: ATPROTO_PASSWORD });
   agent = new Agent(session);
   agentDid = session.did ?? did;
-  // agent cannot register custom NSIDs, so build a dedicated XrpcClient on the
-  // same authenticated session for the proxied market submitBid call.
-  marketClient = new XrpcClient(session, marketLexicons as any);
+  // agent cannot register custom NSIDs, so the market client wraps a dedicated
+  // XrpcClient on the same authenticated session for the proxied submit* calls.
+  marketClient = createMarketClient(session);
   console.error(`[atproto] logged in as ${agentDid}`);
 }
 
@@ -714,6 +670,17 @@ async function deleteDroplet(dropletId: number | string, reason: string): Promis
 
 const app = new Hono();
 
+// Shared deps for the ../lib/market server handlers. We inject our existing
+// resolveAs (so the version guard + HTTPError behavior is preserved) rather
+// than the library's default resolver, and reuse the module-level idResolver
+// for service-auth JWT verification. hostname is the host of our did:web.
+const marketDeps: MarketServerDeps = {
+  hostname: BASE_URL ? new URL(BASE_URL).host : "",
+  idResolver,
+  resolve: { resolve: <T>(ref: { uri: string; cid: string }) => resolveAs<T>(ref.uri, ref.cid) },
+  log,
+};
+
 // README rendering — best effort, falls back to plain text.
 let readmeHtml = "<html><body><h1>compute-contract-provider-relay-digitalocean</h1></body></html>";
 async function loadReadme(): Promise<void> {
@@ -863,21 +830,13 @@ app.get("/x402/receipt/*", async (c) => {
 // accept record.
 // ---------------------------------------------------------------------------
 
-app.post(`/xrpc/${SUBMIT_ACCEPT_NSID}`, async (c) => {
-  let body: { acceptUri?: string; acceptCid?: string };
-  try { body = await c.req.json(); } catch { return c.json({ error: "InvalidRequest", message: "invalid JSON" }, 400); }
-  const { acceptUri, acceptCid } = body;
-  if (!acceptUri || !acceptCid) return c.json({ error: "InvalidRequest", message: "missing acceptUri or acceptCid" }, 400);
-  if (!CID_RE.test(acceptCid)) return c.json({ error: "InvalidRequest", message: "invalid acceptCid" }, 400);
-
-  let issuerDid: string;
-  try { issuerDid = await validateMarketServiceAuth(c.req.header("Authorization"), SUBMIT_ACCEPT_LXM); }
-  catch (err) { log("warn", "submitAccept rejected: invalid service-auth token", { err: String(err) }); return c.json({ error: "Unauthorized", message: `invalid service-auth token: ${String(err)}` }, 401); }
-  if (issuerDid !== atUriAuthority(acceptUri)) { log("warn", "submitAccept rejected: token issuer does not match accept author", { iss: issuerDid, acceptUri }); return c.json({ error: "Forbidden", message: "service-auth token issuer must author the accept record" }, 403); }
-
-  log("info", "submitAccept received", { acceptUri, acceptCid });
-
-  const accept = await resolveAs<Accept>(acceptUri, acceptCid);
+// Auth (service-auth verification + "token issuer must author the accept
+// record") and accept resolution are handled by ../lib/market; the onAccept
+// callback below is the settlement logic that is specific to this bidder.
+const marketSubmitAccept = createSubmitAcceptHandler({
+  deps: marketDeps,
+  serviceIds: [MARKET_SERVICE_ID],
+  onAccept: async ({ acceptUri, acceptCid, accept }) => {
   console.error("[receipt] accept:", accept._uri);
   const bid = await resolveAs<Bid>(accept.bid.uri, accept.bid.cid);
   console.error("[receipt] bid:", bid._uri);
@@ -980,8 +939,11 @@ app.post(`/xrpc/${SUBMIT_ACCEPT_NSID}`, async (c) => {
     log("warn", "no droplet id returned, cannot map receipt to droplet for cleanup", { dropletJson });
   }
 
-  return c.json({ id, uri: res.data.uri, cid: res.data.cid, submitEvent: submitEventUrl });
+    return { body: { id, uri: res.data.uri, cid: res.data.cid, submitEvent: submitEventUrl } };
+  },
 });
+
+app.post(`/xrpc/${SUBMIT_ACCEPT_NSID}`, (c) => marketSubmitAccept(c.req.raw));
 
 // ---------------------------------------------------------------------------
 // Shared bid-creation logic used by /hook/rfp and /xrpc/…submitRfp.
@@ -1051,12 +1013,11 @@ async function createAndSubmitBid(
     // rfpRecord.submitBid is now a service DID ref (did:web:HOST#pdr_temp_market).
     // Route the call through our PDS via atproto-proxy instead of raw fetch.
     try {
-      await marketClient.call(
-        SUBMIT_BID_LXM,
-        {},
-        { uri: bidRecord.data.uri, cid: bidRecord.data.cid, record: bid },
-        { headers: { "atproto-proxy": rfpRecord.submitBid } },
-      );
+      await marketClient.submitBid(rfpRecord.submitBid, {
+        uri: bidRecord.data.uri,
+        cid: bidRecord.data.cid,
+        record: bid,
+      });
       log("info", "submitBid proxied call", { ref: rfpRecord.submitBid });
     } catch (err) {
       log("warn", "submitBid proxied call failed", { ref: rfpRecord.submitBid, err: String(err) });
@@ -1127,44 +1088,37 @@ app.post("/hook/rfp", async (c) => {
 // POST /xrpc/com.publicdomainrelay.temp.market.submitRfp  { rfpUri, rfpCid }
 // ---------------------------------------------------------------------------
 
-app.post("/xrpc/com.publicdomainrelay.temp.market.submitRfp", async (c) => {
-  let body: { rfpUri?: string; rfpCid?: string };
-  try { body = await c.req.json(); } catch { return c.json({ error: "InvalidRequest", message: "invalid JSON" }, 400); }
-  const { rfpUri, rfpCid } = body;
-  if (!rfpUri || !rfpCid) return c.json({ error: "InvalidRequest", message: "missing rfpUri or rfpCid" }, 400);
+// Auth + RFP resolution handled by ../lib/market; onRfp is the bidder-specific
+// applicability check + bid creation. ctx.payloadNsid is the RFP payload's
+// collection NSID (e.g. com.publicdomainrelay.temp.compute.vm).
+const marketSubmitRfp = createSubmitRfpHandler({
+  deps: marketDeps,
+  serviceIds: [MARKET_SERVICE_ID],
+  onRfp: async ({ rfpUri, rfpCid, rfp, payloadNsid, req }) => {
+    // Check that our offering covers the RFP payload type — best-effort.
+    const listRes = await agent.com.atproto.repo.listRecords({ repo: agentDid, collection: OFFERING_NSID, limit: 100 });
+    const applicable = listRes.data.records.some((r) => {
+      const v = r.value as Record<string, unknown>;
+      const appliesTo = v.appliesTo as string[] | undefined;
+      return Array.isArray(appliesTo) && (appliesTo.includes(payloadNsid) || appliesTo.includes(VM_NSID));
+    });
+    if (!applicable) {
+      log("info", "submitRfp not applicable", { rfpUri, payloadNsid });
+      return { status: 400, body: { error: "NotApplicable", message: `no offering for ${payloadNsid}` } };
+    }
 
-  let issuerDid: string;
-  try { issuerDid = await validateMarketServiceAuth(c.req.header("Authorization"), SUBMIT_RFP_LXM); }
-  catch (err) { log("warn", "submitRfp rejected: invalid service-auth token", { err: String(err) }); return c.json({ error: "Unauthorized", message: `invalid service-auth token: ${String(err)}` }, 401); }
-  if (issuerDid !== atUriAuthority(rfpUri)) { log("warn", "submitRfp rejected: token issuer does not match RFP author", { iss: issuerDid, rfpUri }); return c.json({ error: "Forbidden", message: "service-auth token issuer must author the RFP record" }, 403); }
+    const { repo: rfpOwnerDid } = parseAtUri(rfpUri);
 
-  log("info", "submitRfp received", { rfpUri, rfpCid });
+    const { bidUri, bidCid } =
+      await createAndSubmitBid(rfpUri, rfpCid, rfp, x402UrlTemplate(req.url));
 
-  const rfpRecord = await resolveAs<RFP>(rfpUri, rfpCid);
+    log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
 
-  // Check that our offering covers the RFP payload type — best-effort; proceed if unknown.
-  const payloadNsid = rfpRecord.payload?.$type ?? (rfpRecord.payload?.uri ?? "").split("/")[3];
-
-  const listRes = await agent.com.atproto.repo.listRecords({ repo: agentDid, collection: OFFERING_NSID, limit: 100 });
-  const applicable = listRes.data.records.some((r) => {
-    const v = r.value as Record<string, unknown>;
-    const appliesTo = v.appliesTo as string[] | undefined;
-    return Array.isArray(appliesTo) && (appliesTo.includes(payloadNsid) || appliesTo.includes(VM_NSID));
-  });
-  if (!applicable) {
-    log("info", "submitRfp not applicable", { rfpUri, payloadNsid });
-    return c.json({ error: "NotApplicable", message: `no offering for ${payloadNsid}` }, 400);
-  }
-
-  const { repo: rfpOwnerDid } = parseAtUri(rfpUri);
-
-  const { bidUri, bidCid } =
-    await createAndSubmitBid(rfpUri, rfpCid, rfpRecord, x402UrlTemplate(c.req.url));
-
-  log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
-
-  return c.json({ ok: true, bidUri, bidCid });
+    return { body: { ok: true, bidUri, bidCid } };
+  },
 });
+
+app.post("/xrpc/com.publicdomainrelay.temp.market.submitRfp", (c) => marketSubmitRfp(c.req.raw));
 
 // ---------------------------------------------------------------------------
 // POST /xrpc/com.publicdomainrelay.temp.market.submitEvent  { uri, cid, record }
@@ -1178,76 +1132,77 @@ app.post("/xrpc/com.publicdomainrelay.temp.market.submitRfp", async (c) => {
 // and tear down the matching droplet.
 // ---------------------------------------------------------------------------
 
-app.post(`/xrpc/${SUBMIT_EVENT_NSID}`, async (c) => {
-  let body: { uri?: string; cid?: string; record?: Event };
-  try { body = await c.req.json(); } catch { return c.json({ error: "InvalidRequest", message: "invalid JSON" }, 400); }
-  const { uri, cid, record } = body;
-  if (!uri || !cid || !record) return c.json({ error: "InvalidRequest", message: "missing uri, cid, or record" }, 400);
+// Auth + event resolution + dispatch are handled by ../lib/market's
+// createSubmitEventHandler: it verifies the service-auth token, requires the
+// issuer to author the event record, resolves the event, and routes it to
+// callbacks[serviceId][payloadNsid]. Our only callback handles the
+// compute.events.vm.delete payload, keyed under the compute-event service id.
+const marketSubmitEvent = createSubmitEventHandler({
+  deps: marketDeps,
+  // Reached via the requester's accept/receipt submitEvent ref
+  // (did:web:HOST#pdr_temp_compute_event).
+  serviceIds: [COMPUTE_EVENT_SERVICE_ID],
+  // Synchronous (not background) so the "unknown receipt"/authorization errors
+  // below surface in the HTTP response, matching the previous behavior.
+  callbacks: {
+    [COMPUTE_EVENT_SERVICE_ID]: {
+      [VM_DELETE_EVENT_NSID]: async ({ event, issuerDid, resolve, log }) => {
+        const receiptKey = `${event.receipt.uri}#${event.receipt.cid}`;
+        log("info", "submitEvent: resolved receiptKey", {
+          receiptKey,
+          knownDropletReceiptKeys: [...receiptDroplets.keys()],
+          knownRbacReceiptKeys: [...receiptRbacRecords.keys()],
+        });
+        const dropletId = receiptDroplets.get(receiptKey);
+        if (dropletId === undefined) {
+          log("warn", "submitEvent: no droplet tracked for receipt", { receiptKey, receipt: event.receipt });
+          return { status: 400, body: { error: "InvalidRequest", message: "unknown receipt" } };
+        }
 
-  let issuerDid: string;
-  try { issuerDid = await validateMarketServiceAuth(c.req.header("Authorization"), SUBMIT_EVENT_LXM, COMPUTE_EVENT_SERVICE_ID); }
-  catch (err) { log("warn", "submitEvent rejected: invalid service-auth token", { err: String(err) }); return c.json({ error: "Unauthorized", message: `invalid service-auth token: ${String(err)}` }, 401); }
-  if (issuerDid !== atUriAuthority(uri)) { log("warn", "submitEvent rejected: token issuer does not match event author", { iss: issuerDid, uri }); return c.json({ error: "Forbidden", message: "service-auth token issuer must author the event record" }, 403); }
+        // We were dispatched here precisely because the payload NSID is
+        // VM_DELETE_EVENT_NSID; resolve the payload for its `reason` field.
+        const payload = await resolve.resolve<Record<string, unknown>>(event.payload);
 
-  log("info", "submitEvent received", { uri, cid });
+        // Only the DID that issued the market.accept settling this contract may tear
+        // down the droplet. The token issuer is already verified to author the event
+        // record (by the library); here we additionally require it to be that
+        // accept's author, so a third party who authors their own vm.delete event
+        // cannot delete a droplet they didn't pay for.
+        const acceptAuthor = receiptAcceptAuthors.get(receiptKey);
+        if (acceptAuthor === undefined) {
+          log("warn", "submitEvent: no accept author tracked for receipt, refusing delete", { receiptKey });
+          return { status: 403, body: { error: "Forbidden", message: "no accept author recorded for receipt" } };
+        }
+        if (issuerDid !== acceptAuthor) {
+          log("warn", "submitEvent rejected: token issuer is not the market.accept author", { iss: issuerDid, acceptAuthor, receiptKey });
+          return { status: 403, body: { error: "Forbidden", message: "only the market.accept issuer may delete the droplet" } };
+        }
 
-  const eventRecord = await resolveAs<Event & { $type?: string }>(uri, cid);
-  if (eventRecord.$type !== EVENT_NSID) return c.json({ error: "InvalidRequest", message: `expected ${EVENT_NSID}` }, 400);
-  const receiptKey = `${eventRecord.receipt.uri}#${eventRecord.receipt.cid}`;
-  log("info", "submitEvent: resolved receiptKey", {
-    receiptKey,
-    knownDropletReceiptKeys: [...receiptDroplets.keys()],
-    knownRbacReceiptKeys: [...receiptRbacRecords.keys()],
-  });
-  const dropletId = receiptDroplets.get(receiptKey);
-  if (dropletId === undefined) {
-    log("warn", "submitEvent: no droplet tracked for receipt", { receiptKey, receipt: eventRecord.receipt });
-    return c.json({ error: "InvalidRequest", message: "unknown receipt" }, 400);
-  }
+        const deleteEvent = payload as unknown as VMDeleteEvent;
+        const reason = deleteEvent.reason ?? "vm.delete event received";
+        await deleteDroplet(dropletId, reason);
+        receiptDroplets.delete(receiptKey);
+        receiptAcceptAuthors.delete(receiptKey);
 
-  const payload = await resolveAs<Record<string, unknown>>(eventRecord.payload.uri, eventRecord.payload.cid);
-  const payloadNsid = (payload as { $type?: string }).$type ?? eventRecord.payload.uri.split("/")[3];
-  if (payloadNsid !== VM_DELETE_EVENT_NSID) {
-    log("info", "submitEvent: ignoring non-delete event", { payloadNsid });
-    return c.json({ ok: true });
-  }
-
-  // Only the DID that issued the market.accept settling this contract may tear
-  // down the droplet. The token issuer is already verified to author the event
-  // record above; here we additionally require it to be that accept's author,
-  // so a third party who authors their own vm.delete event cannot delete a
-  // droplet they didn't pay for.
-  const acceptAuthor = receiptAcceptAuthors.get(receiptKey);
-  if (acceptAuthor === undefined) {
-    log("warn", "submitEvent: no accept author tracked for receipt, refusing delete", { receiptKey });
-    return c.json({ error: "Forbidden", message: "no accept author recorded for receipt" }, 403);
-  }
-  if (issuerDid !== acceptAuthor) {
-    log("warn", "submitEvent rejected: token issuer is not the market.accept author", { iss: issuerDid, acceptAuthor, receiptKey });
-    return c.json({ error: "Forbidden", message: "only the market.accept issuer may delete the droplet" }, 403);
-  }
-
-  const deleteEvent = payload as unknown as VMDeleteEvent;
-  const reason = deleteEvent.reason ?? "vm.delete event received";
-  await deleteDroplet(dropletId, reason);
-  receiptDroplets.delete(receiptKey);
-  receiptAcceptAuthors.delete(receiptKey);
-
-  const rbacRef = receiptRbacRecords.get(receiptKey);
-  if (rbacRef) {
-    log("info", "submitEvent: rbac record found for receipt, deleting", { receiptKey, rbacUri: rbacRef.uri, rbacCid: rbacRef.cid });
-    await deleteRbacRecord(rbacRef, reason);
-    receiptRbacRecords.delete(receiptKey);
-  } else {
-    log("warn", "submitEvent: no rbac record tracked for receipt, skipping cleanup", {
-      receiptKey,
-      receiptRbacRecordsSize: receiptRbacRecords.size,
-      knownRbacReceiptKeys: [...receiptRbacRecords.keys()],
-    });
-  }
-
-  return c.json({ ok: true });
+        const rbacRef = receiptRbacRecords.get(receiptKey);
+        if (rbacRef) {
+          log("info", "submitEvent: rbac record found for receipt, deleting", { receiptKey, rbacUri: rbacRef.uri, rbacCid: rbacRef.cid });
+          await deleteRbacRecord(rbacRef, reason);
+          receiptRbacRecords.delete(receiptKey);
+        } else {
+          log("warn", "submitEvent: no rbac record tracked for receipt, skipping cleanup", {
+            receiptKey,
+            receiptRbacRecordsSize: receiptRbacRecords.size,
+            knownRbacReceiptKeys: [...receiptRbacRecords.keys()],
+          });
+        }
+        return { body: { ok: true } };
+      },
+    },
+  },
 });
+
+app.post(`/xrpc/${SUBMIT_EVENT_NSID}`, (c) => marketSubmitEvent(c.req.raw));
 
 // ---------------------------------------------------------------------------
 // main
