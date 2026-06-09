@@ -1,25 +1,31 @@
-// Deno + Hono port of server.py.
-// Endpoints: GET / (README html),
-// GET /x402/receipt/<accepts.x402-at-uri>/<cid> (x402 payment-gated; mints a
-//   com.publicdomainrelay.temp.market.receipts.x402 proof-of-payment record),
-// POST /xrpc/com.publicdomainrelay.temp.market.submitAccept (atproto-proxy
-// settlement; resolves accept->bid->rfp->vm, provisions droplet, writes receipt),
-// POST /hook/rfp (firehose webhook -> creates bid+config+payload records).
+// Deno + Hono reference bidder for the com.publicdomainrelay.temp.market.*
+// protocol. Endpoints:
+//   GET  /                                          (README html)
+//   GET  /.well-known/did.json                      (did:web service entries)
+//   GET  /<settlement receipt endpoint>/*           (mints the accept payload;
+//                                                     x402 = paid, free = open)
+//   POST /xrpc/…market.submitRfp                     (bid on an incoming RFP)
+//   POST /xrpc/…market.submitAccept                  (settle: provision + receipt)
+//   POST /xrpc/…market.submitEvent                   (vm.delete teardown)
+//
+// How a contract settles (paying via x402, or granting for free) is chosen at
+// startup behind the Settlement abstraction (./settlement.ts); the provisioning
+// logic below never branches on it.
 //
 // Run: deno run --allow-net --allow-env --allow-run --allow-read --allow-write main.ts
 //
-// $ RBAC_REPO_ROOT="${HOME}/src/rbac/homelab/wid-atp" X402_MAKE_FREE=1 DIGITALOCEAN_BASE_URL=https://homelab.johnandersen777.bsky.social.fedproxy.com deno run --allow-all --watch main.ts
+// $ RBAC_REPO_ROOT="${HOME}/src/rbac/homelab/wid-atp" SETTLEMENT=free DIGITALOCEAN_BASE_URL=https://homelab.johnandersen777.bsky.social.fedproxy.com deno run --allow-all --watch main.ts
 
-
-import { Hono } from "npm:hono@^4.12.23";
+import { Hono } from "hono";
 import { HTTPError, registerErrorMiddleware } from "../lib/deno-hono-helpers/mod.ts";
 import {
   createSubmitAcceptHandler,
   createSubmitEventHandler,
   createSubmitRfpHandler,
   type MarketServerDeps,
-  type Accept,
   type Bid,
+  type LogLevel,
+  type RecordResolver,
   type RFP,
   type StrongRef,
   ACCEPT_NSID,
@@ -40,29 +46,24 @@ import {
   COMPUTE_VM_NSID,
 } from "../lib/lexicons-compute/mod.ts";
 import {
-  type BidsX402,
-  ACCEPTS_X402_NSID,
-  BIDS_X402_NSID,
-  RECEIPTS_X402_NSID,
-} from "../lib/lexicons-market-x402/mod.ts";
-import {
   agent,
   agentDid,
-  atUriAuthority,
   idResolver,
   loginAgent,
   marketClient,
   ownServiceDidWeb,
   parseAtUri,
   resolveAs,
-} from "../lib/atproto-helpers/misc.ts";
-
+} from "../lib/atproto-helpers/mod.ts";
 import { createComputeProviderDigitalOcean } from "../lib/compute-provider-digitalocean/mod.ts";
-import { setupX402, x402UrlTemplate } from "./bids_x402.ts";
+import { reqEnv, optUrl } from "./env.ts";
+import { createFreeSettlement } from "./bids_free.ts";
+import { createX402Settlement } from "./bids_x402.ts";
+import { type SettlementCtx, settlementModeFromEnv } from "./settlement.ts";
 
 // ---------------------------------------------------------------------------
-// NSID aliases — local names for ergonomics; canonical values come from
-// the lexicons-* packages imported above.
+// NSID aliases — local names for ergonomics; canonical values come from the
+// lexicons-* packages imported above.
 // ---------------------------------------------------------------------------
 
 const VM_NSID = COMPUTE_VM_NSID;
@@ -75,13 +76,9 @@ const COMPUTE_EVENT_SERVICE_ID = DEFAULT_COMPUTE_EVENT_SERVICE_ID;
 type ActiveContract = { dropletId: number | string; rbacRef: StrongRef; acceptAuthor: string };
 const activeContracts = new Map<string, ActiveContract>();
 
-const CID_RE = /^(bafy|z)[A-Za-z0-9]+$/;
-
 // ---------------------------------------------------------------------------
 // Structured logger — JSON to stderr
 // ---------------------------------------------------------------------------
-
-import type { LogLevel } from "../lib/lexicons-market/mod.ts";
 
 const enc = new TextEncoder();
 
@@ -90,10 +87,7 @@ function log(level: LogLevel, msg: string, fields: Record<string, unknown> = {})
   Deno.stderr.writeSync(enc.encode(entry + "\n"));
 }
 
-// ---------------------------------------------------------------------------
 // local type aliases (resolved forms add _uri/_cid via resolveAs<T>)
-// ---------------------------------------------------------------------------
-
 type VM = ComputeVM;
 type WIFSimple = ComputeConfigWifSimple;
 
@@ -101,35 +95,21 @@ type WIFSimple = ComputeConfigWifSimple;
 // env / config
 // ---------------------------------------------------------------------------
 
-function reqEnv(name: string): string {
-  const v = Deno.env.get(name);
-  if (!v) { console.error(`${name} is not set`); Deno.exit(1); }
-  return v;
-}
-
 const cfg = {
   atproto: {
     handle:   reqEnv("ATPROTO_HANDLE"),
     password: reqEnv("ATPROTO_PASSWORD"),
   },
   server: {
-    baseUrl: (Deno.env.get("BASE_URL") ?? "").replace(/\/+$/, ""),
+    baseUrl: optUrl("BASE_URL"),
     port:    Number(Deno.env.get("PORT") ?? 4021),
-  },
-  market: {
-    [ACCEPTS_X402_NSID]: {
-      payTo:           reqEnv("RECV_ADDR"),
-      cdpApiKeyId:     reqEnv("CDP_RECV_API_KEY_ID"),
-      cdpApiKeySecret: reqEnv("CDP_RECV_API_KEY_SECRET"),
-      makeFree:        Deno.env.has("X402_MAKE_FREE"),
-    },
   },
   compute: {
     providers: {
       [VM_NSID]: {
         digitalocean: {
           token:            reqEnv("DIGITALOCEAN_TOKEN"),
-          baseUrl:          (Deno.env.get("DIGITALOCEAN_BASE_URL") ?? "https://droplet-oidc.its1337.com").replace(/\/+$/, ""),
+          baseUrl:          optUrl("DIGITALOCEAN_BASE_URL", "https://droplet-oidc.its1337.com"),
           rbacRepoRoot:     (() => { const p = reqEnv("RBAC_REPO_ROOT"); try { return Deno.realPathSync(p); } catch { return p; } })(),
           acceptPathRecord: "$HOME/secrets/publicdomainrelay.com/market/accept.json",
           acceptPathVm:     "/root/secrets/publicdomainrelay.com/market/accept.json",
@@ -192,28 +172,43 @@ async function ensureOfferingRecord(): Promise<void> {
       createdAt: new Date().toISOString(),
     },
   });
-  const ref = {
-    $type: "com.atproto.repo.strongRef",
-    uri: res.data.uri,
-    cid: res.data.cid,
-  };
-  log("info", "offering record created", { ref });
+  log("info", "offering record created", {
+    ref: { $type: "com.atproto.repo.strongRef", uri: res.data.uri, cid: res.data.cid },
+  });
 }
 
 // ---------------------------------------------------------------------------
-// hono app
+// shared deps
 // ---------------------------------------------------------------------------
 
-// Shared deps for the ../lib/market server handlers. We inject our existing
-// resolveAs (so the version guard + HTTPError behavior is preserved) rather
-// than the library's default resolver, and reuse the module-level idResolver
-// for service-auth JWT verification. hostname is the host of our did:web.
+// Strong-ref resolver shared by the market handlers and the settlement layer.
+// We inject our own resolveAs (preserving its version guard + HTTPError
+// behavior) rather than the library's default resolver.
+const recordResolver: RecordResolver = {
+  resolve: <T>(ref: { uri: string; cid: string }) => resolveAs<T>(ref.uri, ref.cid),
+};
+
+// Shared deps for the ../lib/market server handlers. hostname is the host of our
+// did:web; idResolver is reused for service-auth JWT verification.
 const marketDeps: MarketServerDeps = {
   hostname: cfg.server.baseUrl ? new URL(cfg.server.baseUrl).host : "",
   idResolver,
-  resolve: { resolve: <T>(ref: { uri: string; cid: string }) => resolveAs<T>(ref.uri, ref.cid) },
+  resolve: recordResolver,
   log,
 };
+
+// Settlement layer (x402 = paid, free = no-cost). Chosen once at startup; the
+// rest of the bidder is settlement-agnostic. getAgent is a getter because
+// `agent` is only assigned once loginAgent() resolves.
+const settlementCtx: SettlementCtx = {
+  getAgent: () => agent,
+  resolve: recordResolver,
+  log,
+  baseUrl: cfg.server.baseUrl,
+};
+const settlement = settlementModeFromEnv() === "free"
+  ? createFreeSettlement(settlementCtx)
+  : createX402Settlement(settlementCtx);
 
 // DigitalOcean provisioning + RBAC backend. Wrapped behind getters since
 // `agent`/`agentDid` are only assigned once loginAgent() resolves.
@@ -239,125 +234,111 @@ const {
 // ---------------------------------------------------------------------------
 // POST /xrpc/com.publicdomainrelay.temp.market.submitAccept  { acceptUri, acceptCid }
 //
-// Settles the contract: resolves accept->bid->rfp->vm, provisions the
-// resource, mints a market.receipt record, and returns a strongRef to it plus
-// the bidder's submitEvent service DID reference. Must be called via PDS
-// service-proxying (atproto-proxy); the receiver verifies the inter-service
-// auth JWT and requires its issuer to be the DID that authored the referenced
-// accept record.
+// Settles the contract: verifies the accept payload (the receipt our settlement
+// layer issued), resolves accept->bid->rfp->vm, provisions the droplet, mints a
+// market.receipt, and returns a strongRef to it plus the submitEvent service ref.
+// Auth (service-auth verification + "token issuer must author the accept
+// record") and accept resolution are handled by ../lib/market.
 // ---------------------------------------------------------------------------
 
-// Auth (service-auth verification + "token issuer must author the accept
-// record") and accept resolution are handled by ../lib/market; the onAccept
-// callback below is the settlement logic that is specific to this bidder.
 const marketSubmitAccept = createSubmitAcceptHandler({
   deps: marketDeps,
   serviceIds: [MARKET_SERVICE_ID],
   onAccept: async ({ acceptUri, acceptCid, accept }) => {
-  console.error("[receipt] accept:", accept._uri);
-  const bid = await resolveAs<Bid>(accept.bid.uri, accept.bid.cid);
-  console.error("[receipt] bid:", bid._uri);
+    log("info", "settling accept", { accept: accept._uri });
+    const bid = await resolveAs<Bid>(accept.bid.uri, accept.bid.cid);
 
-  if (bid.rfp.uri !== accept.rfp.uri || bid.rfp.cid !== accept.rfp.cid) {
-    throw new HTTPError(400, "Accept.rfp does not match Bid.rfp");
-  }
+    if (bid.rfp.uri !== accept.rfp.uri || bid.rfp.cid !== accept.rfp.cid) {
+      throw new HTTPError(400, "Accept.rfp does not match Bid.rfp");
+    }
 
-  // Verify payment: accept.payload must be a receipts.x402 proof-of-payment
-  // record minted by us (this bidder) via the x402 receipt endpoint. Without it
-  // we have no evidence the requester paid, so we refuse to provision.
-  if (!accept.payload) throw new HTTPError(402, "Accept.payload (receipts.x402 proof-of-payment) is required");
-  const paymentReceipt = await resolveAs<{ $type?: string }>(accept.payload.uri, accept.payload.cid);
-  const paymentNsid = paymentReceipt.$type ?? accept.payload.uri.split("/")[3];
-  if (paymentNsid !== RECEIPTS_X402_NSID) {
-    throw new HTTPError(402, `Accept.payload must be a ${RECEIPTS_X402_NSID}, got ${paymentNsid}`);
-  }
-  if (atUriAuthority(accept.payload.uri) !== agent.assertDid) {
-    throw new HTTPError(402, "Accept.payload proof-of-payment must be authored by this bidder");
-  }
-  log("info", "payment verified", { receiptsX402: accept.payload.uri });
+    // Verify settlement: accept.payload must be the receipt our settlement layer
+    // issued (proof of payment for x402, proof of grant for free). Without it we
+    // have no evidence the contract is settled, so we refuse to provision.
+    await settlement.verifyAcceptPayload(accept.payload);
+    const payloadRef = accept.payload!;
 
-  const rfp = await resolveAs<RFP>(accept.rfp.uri, accept.rfp.cid);
-  const vm = await resolveAs<VM>(rfp.payload.uri, rfp.payload.cid);
-  const bidPayload = await resolveAs<BidsX402>(bid.payload.uri, bid.payload.cid);
-  let bidConfig: (WIFSimple & { _uri: string; _cid: string }) | null = null;
-  if (bid.config) {
-    bidConfig = await resolveAs<ComputeConfigWifSimple>(bid.config.uri, bid.config.cid);
-  }
+    const rfp = await resolveAs<RFP>(accept.rfp.uri, accept.rfp.cid);
+    const vm = await resolveAs<VM>(rfp.payload.uri, rfp.payload.cid);
+    const bidPayload = await resolveAs<Record<string, unknown>>(bid.payload.uri, bid.payload.cid);
+    let bidConfig: (WIFSimple & { _uri: string; _cid: string }) | null = null;
+    if (bid.config) {
+      bidConfig = await resolveAs<ComputeConfigWifSimple>(bid.config.uri, bid.config.cid);
+    }
 
-  const stripPriv = (o: Record<string, unknown>) => {
-    const { _uri: _u, _cid: _c, ...rest } = o as Record<string, unknown> & { _uri?: string; _cid?: string };
-    return rest;
-  };
-
-  const bundle = {
-    $type: ACCEPT_NSID,
-    accept: { uri: accept._uri, cid: accept._cid, value: stripPriv(accept as unknown as Record<string, unknown>) },
-    rfp: { uri: rfp._uri, cid: rfp._cid, value: stripPriv(rfp as unknown as Record<string, unknown>) },
-    bid: { uri: bid._uri, cid: bid._cid, value: stripPriv(bid as unknown as Record<string, unknown>) },
-    bid_payload: { uri: bidPayload._uri, cid: bidPayload._cid, value: stripPriv(bidPayload as unknown as Record<string, unknown>) },
-    bid_config: bidConfig
-      ? { uri: bidConfig._uri, cid: bidConfig._cid, value: stripPriv(bidConfig as unknown as Record<string, unknown>) }
-      : null,
-    vm: { uri: vm._uri, cid: vm._cid, value: stripPriv(vm as unknown as Record<string, unknown>) },
-  };
-
-  vm.user_data = injectAcceptBundle(vm.user_data, bundle);
-
-  const { repo: requesterDid } = parseAtUri(accept._uri);
-  // TODO retry droplet creation on failure
-  const { json: dropletJson, rbacRef } = await createDroplet(vm, requesterDid) as { json: { droplet?: { id?: number | string } }; rbacRef: StrongRef };
-  const dropletId = dropletJson.droplet?.id;
-
-  // The bidder treats the VM as a black box — it has no visibility into the
-  // policy engine running inside it. The requester is the one watching the VM
-  // come up and the workflow run to completion, so it reports back via
-  // submitEvent (compute.events.vm.delete) when the droplet should be torn
-  // down — either because the workflow finished or the policy engine never
-  // came up. submitEventUrl is handed back below so the caller knows where to
-  // send those events, keyed by a strongRef to this receipt.
-  const submitEventUrl = `${ownServiceDidWeb(cfg.server.baseUrl)}#${COMPUTE_EVENT_SERVICE_ID}`;
-
-  const res = await agent.com.atproto.repo.createRecord({
-    repo: agent.assertDid,
-    collection: RECEIPT_NSID,
-    record: {
-      $type: RECEIPT_NSID,
-      rfp: { $type: "com.atproto.repo.strongRef", uri: accept.rfp.uri, cid: accept.rfp.cid },
-      bid: { $type: "com.atproto.repo.strongRef", uri: bid._uri, cid: bid._cid },
-      accept: { $type: "com.atproto.repo.strongRef", uri: acceptUri, cid: acceptCid },
-      payload: { $type: "com.atproto.repo.strongRef", uri: accept.payload.uri, cid: accept.payload.cid },
-      submitEvent: submitEventUrl,
-      createdAt: new Date().toISOString(),
-    },
-  });
-
-  const id = res.data.uri.split("/").slice(-1)[0];
-
-  if (dropletId !== undefined) {
-    const receiptKey = `${res.data.uri}#${res.data.cid}`;
-    // requesterDid is the authority of the accept AT-URI — only this DID may
-    // later drive a vm.delete that tears down this droplet.
-    activeContracts.set(receiptKey, { dropletId, rbacRef, acceptAuthor: requesterDid });
-    log("info", "tracking droplet for receipt", {
-      receiptKey,
-      receiptUri: res.data.uri,
-      receiptCid: res.data.cid,
-      dropletId,
-      rbacUri: rbacRef.uri,
-      rbacCid: rbacRef.cid,
-      acceptAuthor: requesterDid,
-      activeContractsSize: activeContracts.size,
+    const stripPriv = (o: Record<string, unknown>) => {
+      const { _uri: _u, _cid: _c, ...rest } = o as Record<string, unknown> & { _uri?: string; _cid?: string };
+      return rest;
+    };
+    const refValue = (o: { _uri: string; _cid: string } & Record<string, unknown>) => ({
+      uri: o._uri,
+      cid: o._cid,
+      value: stripPriv(o),
     });
-  } else {
-    log("warn", "no droplet id returned, cannot map receipt to droplet for cleanup", { dropletJson });
-  }
+
+    const bundle = {
+      $type: ACCEPT_NSID,
+      accept: refValue(accept as unknown as { _uri: string; _cid: string } & Record<string, unknown>),
+      rfp: refValue(rfp as unknown as { _uri: string; _cid: string } & Record<string, unknown>),
+      bid: refValue(bid as unknown as { _uri: string; _cid: string } & Record<string, unknown>),
+      bid_payload: refValue(bidPayload as { _uri: string; _cid: string } & Record<string, unknown>),
+      bid_config: bidConfig ? refValue(bidConfig) : null,
+      vm: refValue(vm as unknown as { _uri: string; _cid: string } & Record<string, unknown>),
+    };
+
+    vm.user_data = injectAcceptBundle(vm.user_data, bundle);
+
+    const { repo: requesterDid } = parseAtUri(accept._uri);
+    // TODO retry droplet creation on failure
+    const { json: dropletJson, rbacRef } = await createDroplet(vm, requesterDid) as { json: { droplet?: { id?: number | string } }; rbacRef: StrongRef };
+    const dropletId = dropletJson.droplet?.id;
+
+    // The bidder treats the VM as a black box. The requester watches it come up
+    // and reports back via submitEvent (compute.events.vm.delete) when the
+    // droplet should be torn down. submitEventUrl is handed back below so the
+    // caller knows where to send those events, keyed by a strongRef to this receipt.
+    const submitEventUrl = `${ownServiceDidWeb(cfg.server.baseUrl)}#${COMPUTE_EVENT_SERVICE_ID}`;
+
+    const res = await agent.com.atproto.repo.createRecord({
+      repo: agent.assertDid,
+      collection: RECEIPT_NSID,
+      record: {
+        $type: RECEIPT_NSID,
+        rfp: { $type: "com.atproto.repo.strongRef", uri: accept.rfp.uri, cid: accept.rfp.cid },
+        bid: { $type: "com.atproto.repo.strongRef", uri: bid._uri, cid: bid._cid },
+        accept: { $type: "com.atproto.repo.strongRef", uri: acceptUri, cid: acceptCid },
+        payload: { $type: "com.atproto.repo.strongRef", uri: payloadRef.uri, cid: payloadRef.cid },
+        submitEvent: submitEventUrl,
+        createdAt: new Date().toISOString(),
+      },
+    });
+
+    const id = res.data.uri.split("/").slice(-1)[0];
+
+    if (dropletId !== undefined) {
+      const receiptKey = `${res.data.uri}#${res.data.cid}`;
+      // requesterDid is the authority of the accept AT-URI — only this DID may
+      // later drive a vm.delete that tears down this droplet.
+      activeContracts.set(receiptKey, { dropletId, rbacRef, acceptAuthor: requesterDid });
+      log("info", "tracking droplet for receipt", {
+        receiptKey,
+        receiptUri: res.data.uri,
+        receiptCid: res.data.cid,
+        dropletId,
+        rbacUri: rbacRef.uri,
+        acceptAuthor: requesterDid,
+        activeContractsSize: activeContracts.size,
+      });
+    } else {
+      log("warn", "no droplet id returned, cannot map receipt to droplet for cleanup", { dropletJson });
+    }
 
     return { body: { id, uri: res.data.uri, cid: res.data.cid, submitEvent: submitEventUrl } };
   },
 });
 
 // ---------------------------------------------------------------------------
-// Shared bid-creation logic used by /hook/rfp and /xrpc/…submitRfp.
+// Bid creation, driven by /xrpc/…submitRfp.
 // ---------------------------------------------------------------------------
 
 async function createAndSubmitBid(
@@ -365,31 +346,20 @@ async function createAndSubmitBid(
   rfpCid: string,
   rfpRecord: RFP,
   receiptUrl: string,
-): Promise<{ configUri: string; configCid: string; payloadUri: string; payloadCid: string; bidUri: string; bidCid: string }> {
+): Promise<{ bidUri: string; bidCid: string }> {
   const nowIso = new Date().toISOString();
   const configRef = await createBidConfig(nowIso);
-
-  const payloadRecord = await agent.com.atproto.repo.createRecord({
-    repo: agent.assertDid,
-    collection: BIDS_X402_NSID,
-    record: {
-      $type: BIDS_X402_NSID,
-      cost: 1,
-      currency: "USDC",
-      frequency: "monthly",
-      prepay: true,
-      url: receiptUrl,
-      createdAt: nowIso,
-    },
-  });
+  // The bid payload (bids.x402 / bids.free) is whatever the settlement layer
+  // advertises; it carries the receipt-endpoint url the requester will settle at.
+  const payloadRef = await settlement.createBidPayload(receiptUrl, nowIso);
 
   const bid = {
     $type: BID_NSID,
     rfp: { $type: "com.atproto.repo.strongRef", uri: rfpUri, cid: rfpCid },
     config: { $type: "com.atproto.repo.strongRef", uri: configRef.uri, cid: configRef.cid },
-    payload: { $type: "com.atproto.repo.strongRef", uri: payloadRecord.data.uri, cid: payloadRecord.data.cid },
+    payload: { $type: "com.atproto.repo.strongRef", uri: payloadRef.uri, cid: payloadRef.cid },
     // Service DID ref for the settlement leg (submitAccept via atproto-proxy),
-    // distinct from the payload's x402 payment url (the payment leg).
+    // distinct from the payload's receipt url (the settle leg).
     submitAccept: `${ownServiceDidWeb(cfg.server.baseUrl)}#${MARKET_SERVICE_ID}`,
     createdAt: nowIso,
   };
@@ -399,8 +369,7 @@ async function createAndSubmitBid(
     collection: BID_NSID,
     record: bid,
   });
-
-  log("info", "bidRecord", { bidRecord: bidRecord });
+  log("info", "bidRecord", { bidRecord });
 
   if (rfpRecord.submitBid) {
     // rfpRecord.submitBid is a service DID ref (did:web:HOST#pdr_temp_market).
@@ -417,14 +386,7 @@ async function createAndSubmitBid(
     }
   }
 
-  return {
-    configUri: configRef.uri,
-    configCid: configRef.cid,
-    payloadUri: payloadRecord.data.uri,
-    payloadCid: payloadRecord.data.cid,
-    bidUri: bidRecord.data.uri,
-    bidCid: bidRecord.data.cid,
-  };
+  return { bidUri: bidRecord.data.uri, bidCid: bidRecord.data.cid };
 }
 
 const marketSubmitRfp = createSubmitRfpHandler({
@@ -433,25 +395,19 @@ const marketSubmitRfp = createSubmitRfpHandler({
     [MARKET_SERVICE_ID]: {
       [VM_NSID]: async ({ rfpUri, rfpCid, rfp, req }) => {
         const { repo: rfpOwnerDid } = parseAtUri(rfpUri);
-
-        const { bidUri, bidCid } =
-          await createAndSubmitBid(rfpUri, rfpCid, rfp, x402UrlTemplate(cfg.server.baseUrl, req.url));
-
+        const { bidUri, bidCid } = await createAndSubmitBid(rfpUri, rfpCid, rfp, settlement.receiptUrl(req.url));
         log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
-
         return { body: { ok: true, bidUri, bidCid } };
       },
     },
   },
 });
 
-
 const marketSubmitEvent = createSubmitEventHandler({
   deps: marketDeps,
   // Reached via the requester's accept/receipt submitEvent ref
-  // (did:web:HOST#pdr_temp_compute_event).
-  // Synchronous (not background) so the "unknown receipt"/authorization errors
-  // below surface in the HTTP response, matching the previous behavior.
+  // (did:web:HOST#pdr_temp_compute_event). Synchronous (not background) so the
+  // "unknown receipt"/authorization errors surface in the HTTP response.
   callbacks: {
     [COMPUTE_EVENT_SERVICE_ID]: {
       [VM_DELETE_EVENT_NSID]: createComputeEventDeleteHandler({
@@ -481,17 +437,19 @@ const marketSubmitEvent = createSubmitEventHandler({
   },
 });
 
+// ---------------------------------------------------------------------------
+// hono app
+// ---------------------------------------------------------------------------
 
 const makeApp = () => {
   const app = new Hono();
-
   registerErrorMiddleware(app);
 
   const readmeHtml = "<html><body><h1>compute-contract-provider-relay-digitalocean</h1></body></html>";
   app.get("/", (c) => c.html(readmeHtml));
 
-  // did:web document exposing the `pdr_temp_market` and `pdr_temp_compute_event` service
-  // entries. The bidder only RECEIVES service-auth tokens (no signing key needed).
+  // did:web document exposing the `pdr_temp_market` and `pdr_temp_compute_event`
+  // service entries. The bidder only RECEIVES service-auth tokens (no signing key).
   app.get("/.well-known/did.json", (c) => {
     if (!cfg.server.baseUrl) return c.json({ error: "NotFound", message: "BASE_URL not configured" }, 404);
     const host = new URL(cfg.server.baseUrl).host;
@@ -505,24 +463,9 @@ const makeApp = () => {
     });
   });
 
-  // Configure market flow routes
+  // Market flow + the settlement receipt endpoint (x402 paid, or free open).
   app.post(`/xrpc/${SUBMIT_RFP_NSID}`, (c) => marketSubmitRfp(c.req.raw));
-  // accepts.x402 for payments (will not require payment if X402_MAKE_FREE=1)
-  const x402Cfg = cfg.market[ACCEPTS_X402_NSID];
-  setupX402(x402Cfg.makeFree, {
-    app,
-    getAgent: () => agent,
-    log,
-    baseUrl: cfg.server.baseUrl,
-    payTo: x402Cfg.payTo,
-    cdpApiKeyId: x402Cfg.cdpApiKeyId,
-    cdpApiKeySecret: x402Cfg.cdpApiKeySecret,
-    acceptsX402Nsid: ACCEPTS_X402_NSID,
-    receiptsX402Nsid: RECEIPTS_X402_NSID,
-    cidRe: CID_RE,
-    resolveAs,
-    httpError: HTTPError,
-  });
+  settlement.mount(app);
   app.post(`/xrpc/${SUBMIT_ACCEPT_NSID}`, (c) => marketSubmitAccept(c.req.raw));
   app.post(`/xrpc/${SUBMIT_EVENT_NSID}`, (c) => marketSubmitEvent(c.req.raw));
 
@@ -540,7 +483,7 @@ const main = async () => {
   const app = makeApp();
   const { port } = cfg.server;
   Deno.serve({ port, hostname: "0.0.0.0", onListen: ({ port, hostname }) => {
-    console.error(`[server] listening on http://${hostname}:${port}`);
+    console.error(`[server] listening on http://${hostname}:${port} (settlement: ${settlement.mode})`);
   } }, app.fetch);
 };
 

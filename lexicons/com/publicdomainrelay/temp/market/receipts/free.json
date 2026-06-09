@@ -1,0 +1,24 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.receipts.free",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Proof-of-grant receipt minted by the bidder in response to a GET against the bids.free url. No payment is involved; the receipt is the bidder's verifiable record that it agreed to provide the resource for free. Returned (by AT-URI + CID) to the requester, which uses it as the payload of the higher-level com.publicdomainrelay.temp.market.accept so the bidder can verify the grant before provisioning. The free counterpart of com.publicdomainrelay.temp.market.receipts.x402.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "accept"
+        ],
+        "properties": {
+          "accept": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the com.publicdomainrelay.temp.market.accepts.free record that this grant settles."
+          }
+        }
+      }
+    }
+  }
+}

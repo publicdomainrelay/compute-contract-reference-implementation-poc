@@ -1,0 +1,27 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.bids.free",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Bid payload offering compute at no cost. The free counterpart of com.publicdomainrelay.temp.market.bids.x402: there is no payment, but settlement still flows through a receipt so the bidder retains a verifiable record that it granted the resource. To settle, the requester mints a com.publicdomainrelay.temp.market.accepts.free record, then issues a (non-payment-gated) GET to `{url}/{accepts.free AT-URI}/{accepts.free CID}`; the bidder mints and returns a com.publicdomainrelay.temp.market.receipts.free proof-of-grant record. That receipt is then used as the payload of the higher-level com.publicdomainrelay.temp.market.accept.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Grant endpoint URL. The requester GETs `{url}/{accepts.free AT-URI}/{accepts.free CID}` (no payment required) and the bidder returns a com.publicdomainrelay.temp.market.receipts.free proof-of-grant record."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Optional human-readable reason the compute is offered for free, e.g. 'open-source CI' or 'promotional'."
+          }
+        }
+      }
+    }
+  }
+}

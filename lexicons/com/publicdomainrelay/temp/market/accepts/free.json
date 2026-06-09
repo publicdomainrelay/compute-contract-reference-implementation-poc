@@ -1,0 +1,29 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.accepts.free",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "The requester's acceptance of a bid's free (no-cost) terms. Minted before settling and passed (by AT-URI + CID) to the grant endpoint named in the bids.free url; the bidder resolves it and mints a com.publicdomainrelay.temp.market.receipts.free in response. The free counterpart of com.publicdomainrelay.temp.market.accepts.x402.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "bid"
+        ],
+        "properties": {
+          "bid": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the winning bid record (com.publicdomainrelay.temp.market.bid) whose bids.free terms are being accepted."
+          },
+          "payload": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the bid's terms record being accepted (for example a com.publicdomainrelay.temp.market.bids.free)."
+          }
+        }
+      }
+    }
+  }
+}

@@ -29,12 +29,23 @@ It also exports the small pieces both producers and consumers share:
 - **auth** — `verifyServiceAuth` (alias of `verifyMarketServiceAuth`): the same
   inter-service-auth JWT verification the handlers use, exposed for *other*
   PDS-service-proxied endpoints (the reference spindle reuses it for its trigger).
+- **egress** — `assertSafeEgressUrl` / `EgressOptions`: an SSRF guard for the one
+  outbound request a settlement layer makes to a counterparty-supplied `url`
+  (used by both the `market-x402` and `market-free` companions).
 
-Payments are out of scope here on purpose: a `market.accept` carries an opaque
-`payload` strongRef and `submitAccept` doesn't care what it is. The
-**[`@publicdomainrelay/market-x402`](../market-x402/README.md)** companion library
-defines that payload for x402 and the settlement plumbing on both sides; import it
-only if you settle with x402.
+Settlement is out of scope here on purpose: a `market.accept` carries an opaque
+`payload` strongRef and `submitAccept` doesn't care what it is. Two companion
+libraries define what that payload is and the plumbing on both sides — import
+whichever (if any) matches how you settle:
+
+- **[`@publicdomainrelay/market-x402`](../market-x402/README.md)** — settle by
+  **paying** (the `payload` is a proof-of-payment `receipts.x402`).
+- **[`@publicdomainrelay/market-free`](../market-free/README.md)** — settle for
+  **free** (the `payload` is a proof-of-grant `receipts.free`).
+
+Both share the same shape (`bids.* → accepts.* → receipts.*`, a `url` the buyer
+GETs to obtain the receipt), so the buyer and seller code paths are identical
+apart from which one you wire in — see each library's `examples/`.
 
 ## Runtimes
 
@@ -132,6 +143,19 @@ await market.submitRfp("did:web:bidder.example#pdr_temp_market", { rfpUri, rfpCi
 await market.submitBid(rfp.submitBid!, { uri, cid, record: bidRecord });
 const receipt = await market.submitAccept(bid.submitAccept!, { acceptUri, acceptCid });
 await market.submitEvent(receipt.submitEvent, { uri, cid, record: eventRecord });
+```
+
+## Examples
+
+Two runnable, self-contained examples in [`examples/`](./examples/):
+
+- [`examples/server.ts`](./examples/server.ts) — a minimal receiver mounting all
+  four procedures on `Deno.serve`.
+- [`examples/client.ts`](./examples/client.ts) — a `MarketClient` driving one
+  contract (`submitRfp` → `submitBid` → `submitAccept` → `submitEvent`).
+
+```
+deno run --allow-net --allow-env examples/server.ts
 ```
 
 ## Reference usage

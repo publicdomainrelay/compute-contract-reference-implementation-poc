@@ -15,6 +15,7 @@ export * from "./nsids.ts";
 export * from "./resolve.ts";
 export * from "./records.ts";
 export * from "./auth.ts";
+export * from "./egress.ts";
 export * from "./server.ts";
 export * from "./client.ts";
 export { marketLexicons } from "./lexicons.ts";
