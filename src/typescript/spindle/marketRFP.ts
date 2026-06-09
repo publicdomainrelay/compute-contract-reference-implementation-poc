@@ -41,48 +41,40 @@ import {
   type MarketClient,
   resolvePds,
   type StrongRef,
+  ACCEPT_NSID,
+  BID_NSID,
+  DEFAULT_COMPUTE_EVENT_SERVICE_ID,
+  DEFAULT_MARKET_SERVICE_ID,
+  EVENT_NSID,
+  OFFERING_NSID,
+  RECEIPT_NSID,
+  RFP_NSID,
+  type Bid,
 } from "../lib/market/mod.ts";
 import { BIDS_X402_NSID, settleX402Payment } from "../lib/market-x402/mod.ts";
+import {
+  COMPUTE_EVENTS_VM_DELETE_NSID,
+  COMPUTE_VM_NSID,
+} from "../lib/lexicons-compute/mod.ts";
 
 // ---------------------------------------------------------------------------
-// NSIDs
+// NSID aliases
 // ---------------------------------------------------------------------------
 
-const VM_NSID     = "com.publicdomainrelay.temp.compute.vm";
-const RFP_NSID    = "com.publicdomainrelay.temp.market.rfp";
-const BID_NSID    = "com.publicdomainrelay.temp.market.bid";
-const ACCEPT_NSID = "com.publicdomainrelay.temp.market.accept";
-const RECEIPT_NSID = "com.publicdomainrelay.temp.market.receipt";
+const VM_NSID = COMPUTE_VM_NSID;
+const VM_DELETE_EVENT_NSID = COMPUTE_EVENTS_VM_DELETE_NSID;
+const MARKET_SERVICE_ID = DEFAULT_MARKET_SERVICE_ID;
+const COMPUTE_EVENT_SERVICE_ID = DEFAULT_COMPUTE_EVENT_SERVICE_ID;
 const RBAC_NSID   = "com.fedproxy.rbac";
 const SSH_KEY_NSID = "com.fedproxy.sshPublicKey";
-const EVENT_NSID = "com.publicdomainrelay.temp.market.event";
-const VM_DELETE_EVENT_NSID = "com.publicdomainrelay.temp.compute.events.vm.delete";
-
-// ---------------------------------------------------------------------------
-// Market service proxying (atproto PDS service-proxy)
-// ---------------------------------------------------------------------------
-
-const MARKET_SERVICE_ID = "pdr_temp_market";
-// Compute-contract event endpoint fragment, advertised separately from the
-// market service; submitEvent refs take the form `did:web:HOST#pdr_temp_compute_event`.
-const COMPUTE_EVENT_SERVICE_ID = "pdr_temp_compute_event";
-// Market submit procedures are now called through the MarketClient from
-// ../lib/market (which carries its own embedded lexicons); the spindle no longer
-// declares them here. The x402 payment leg lives in ../lib/market-x402.
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type BidRecord = {
-  $type: string;
-  rfp: StrongRef;
-  payload: StrongRef;
-  config?: StrongRef;
-  // Service DID ref (did:web:HOST#pdr_temp_market) for the settlement leg
-  // (submitAccept via atproto-proxy), distinct from the payload's x402 url.
-  submitAccept?: string;
-};
+// BidRecord is the canonical Bid type with an explicit $type discriminant,
+// re-exported for spindle consumers.
+export type BidRecord = Bid & { $type: string };
 
 type CollectedBid = {
   did: string;
@@ -310,7 +302,6 @@ runcmd:
 // Offering / vouch discovery — find bidders via repo owner + collaborator vouches
 // ---------------------------------------------------------------------------
 
-const OFFERING_NSID = "com.publicdomainrelay.temp.market.offering";
 const VOUCH_NSID    = "sh.tangled.graph.vouch";
 const KNOT_MEMBER_NSID = "sh.tangled.knot.member";
 

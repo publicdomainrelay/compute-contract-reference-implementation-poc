@@ -19,8 +19,37 @@ import {
   createSubmitEventHandler,
   createSubmitRfpHandler,
   type MarketServerDeps,
+  type Accept,
+  type Bid,
+  type RFP,
+  type StrongRef,
+  ACCEPT_NSID,
+  BID_NSID,
+  DEFAULT_COMPUTE_EVENT_SERVICE_ID,
+  DEFAULT_MARKET_SERVICE_ID,
+  OFFERING_NSID,
+  RECEIPT_NSID,
+  RFP_NSID,
+  SUBMIT_ACCEPT_NSID,
+  SUBMIT_EVENT_NSID,
+  SUBMIT_RFP_NSID,
 } from "../lib/market/mod.ts";
 import { createComputeEventDeleteHandler } from "../lib/compute/mod.ts";
+import {
+  type ComputeConfigWifSimple,
+  type ComputeVM,
+  type VMDeleteEvent,
+  COMPUTE_CONFIG_WIF_SIMPLE_NSID,
+  COMPUTE_EVENTS_VM_DELETE_NSID,
+  COMPUTE_VM_NSID,
+} from "../lib/lexicons-compute/mod.ts";
+import {
+  type AcceptsX402,
+  type BidsX402,
+  ACCEPTS_X402_NSID,
+  BIDS_X402_NSID,
+  RECEIPTS_X402_NSID,
+} from "../lib/lexicons-market-x402/mod.ts";
 import {
   agent,
   agentDid,
@@ -37,31 +66,16 @@ import { createComputeProviderDigitalOcean } from "./compute_provider_digitaloce
 import { setupX402, x402UrlTemplate } from "./bids_x402.ts";
 
 // ---------------------------------------------------------------------------
-// NSID constants (mirrors models/publicdomainrelay.py)
+// NSID aliases — local names for ergonomics; canonical values come from
+// the lexicons-* packages imported above.
 // ---------------------------------------------------------------------------
 
-const VM_NSID = "com.publicdomainrelay.temp.compute.vm";
-const WIF_SIMPLE_NSID = "com.publicdomainrelay.temp.compute.config.wif.simple";
-const RFP_NSID = "com.publicdomainrelay.temp.market.rfp";
-const BID_NSID = "com.publicdomainrelay.temp.market.bid";
-const BIDS_X402_NSID = "com.publicdomainrelay.temp.market.bids.x402";
-const ACCEPTS_X402_NSID = "com.publicdomainrelay.temp.market.accepts.x402";
-const RECEIPTS_X402_NSID = "com.publicdomainrelay.temp.market.receipts.x402";
-const ACCEPT_NSID = "com.publicdomainrelay.temp.market.accept";
-const RECEIPT_NSID = "com.publicdomainrelay.temp.market.receipt";
-const OFFERING_NSID = "com.publicdomainrelay.temp.market.offering";
-const SUBMIT_EVENT_NSID = "com.publicdomainrelay.temp.market.submitEvent";
-const SUBMIT_ACCEPT_NSID = "com.publicdomainrelay.temp.market.submitAccept";
-const SUBMIT_RFP_NSID = "com.publicdomainrelay.temp.market.submitRfp";
-const VM_DELETE_EVENT_NSID = "com.publicdomainrelay.temp.compute.events.vm.delete";
+const VM_NSID = COMPUTE_VM_NSID;
+const WIF_SIMPLE_NSID = COMPUTE_CONFIG_WIF_SIMPLE_NSID;
+const VM_DELETE_EVENT_NSID = COMPUTE_EVENTS_VM_DELETE_NSID;
+const MARKET_SERVICE_ID = DEFAULT_MARKET_SERVICE_ID;
+const COMPUTE_EVENT_SERVICE_ID = DEFAULT_COMPUTE_EVENT_SERVICE_ID;
 const RBAC_NSID = "com.fedproxy.rbac";
-
-// atproto-proxy market service: the bidder exposes a `pdr_temp_market` service entry
-// in its did:web document; service DID refs take the form `did:web:HOST#pdr_temp_market`.
-const MARKET_SERVICE_ID = "pdr_temp_market";
-// Compute-contract event service: the bidder exposes a separate `pdr_temp_compute_event`
-// service entry; submitEvent refs take the form `did:web:HOST#pdr_temp_compute_event`.
-const COMPUTE_EVENT_SERVICE_ID = "pdr_temp_compute_event";
 
 // Maps `${receiptUri}#${receiptCid}` -> DigitalOcean droplet id, so that when
 // the requester reports a com.publicdomainrelay.temp.compute.events.vm.delete
@@ -86,7 +100,7 @@ const CID_RE = /^(bafy|z)[A-Za-z0-9]+$/;
 // Structured logger — JSON to stderr
 // ---------------------------------------------------------------------------
 
-type LogLevel = "info" | "warn" | "error" | "debug";
+import type { LogLevel } from "../lib/lexicons-market/mod.ts";
 
 const enc = new TextEncoder();
 
@@ -107,31 +121,11 @@ function canonicalJson(value: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
-// types (loose — these are wire-shape, not strict pydantic validators)
+// local type aliases (resolved forms add _uri/_cid via resolveAs<T>)
 // ---------------------------------------------------------------------------
 
-type StrongRef = { $type: "com.atproto.repo.strongRef"; uri: string; cid: string };
-
-type VM = {
-  cpus: number;
-  mem: string;
-  disk: string;
-  network: string;
-  role: string;
-  user_data: string;
-  location?: { country?: string; region?: string };
-  _uri?: string;
-  _cid?: string;
-};
-
-type RFP = { payload: StrongRef; submitBid?: string; _uri?: string; _cid?: string };
-type Bid = { rfp: StrongRef; payload: StrongRef; config?: StrongRef; _uri?: string; _cid?: string };
-type Accept = { rfp: StrongRef; bid: StrongRef; payload?: StrongRef; submitEvent?: string; _uri?: string; _cid?: string };
-type Event = { receipt: StrongRef; payload: StrongRef; _uri?: string; _cid?: string };
-type VMDeleteEvent = { reason: string; _uri?: string; _cid?: string };
-type BidsX402 = { cost: unknown; currency: string; frequency: string; prepay: boolean; url: string; _uri?: string; _cid?: string };
-type AcceptsX402 = { bid: StrongRef; payload?: StrongRef; _uri?: string; _cid?: string };
-type WIFSimple = Record<string, unknown> & { _uri?: string; _cid?: string };
+type VM = ComputeVM;
+type WIFSimple = ComputeConfigWifSimple;
 
 // ---------------------------------------------------------------------------
 // env
@@ -282,7 +276,7 @@ const marketSubmitAccept = createSubmitAcceptHandler({
   const bidPayload = await resolveAs<BidsX402>(bid.payload.uri, bid.payload.cid);
   let bidConfig: (WIFSimple & { _uri: string; _cid: string }) | null = null;
   if (bid.config) {
-    bidConfig = await resolveAs<WIFSimple>(bid.config.uri, bid.config.cid);
+    bidConfig = await resolveAs<ComputeConfigWifSimple>(bid.config.uri, bid.config.cid);
   }
 
   const stripPriv = (o: Record<string, unknown>) => {
@@ -426,7 +420,7 @@ async function createAndSubmitBid(
   log("info", "bidRecord", { bidRecord: bidRecord });
 
   if (rfpRecord.submitBid) {
-    // rfpRecord.submitBid is now a service DID ref (did:web:HOST#pdr_temp_market).
+    // rfpRecord.submitBid is a service DID ref (did:web:HOST#pdr_temp_market).
     // Route the call through our PDS via atproto-proxy instead of raw fetch.
     try {
       await marketClient.submitBid(rfpRecord.submitBid, {

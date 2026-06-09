@@ -1,22 +1,13 @@
 // Handler factory for com.publicdomainrelay.temp.compute.events.vm.delete
 // market.event payloads, plugged into createSubmitEventHandler's callback
 // routing table (callbacks[serviceId][payloadNsid]).
-//
-// Domain logic — whether a droplet is still tracked for the receipt and how to
-// tear it down — stays the caller's concern via `assertRunningCompute` /
-// `deleteRunningCompute`; this factory owns the shared authorization rule: only
-// the DID that issued the market.accept settling the contract may submit a
-// vm.delete for it (the library already verified the token issuer authored the
-// event record itself, so a third party can't forge someone else's teardown).
 
 import { parseAtUri } from "../market/resolve.ts";
 import type { EventCallback, EventDispatchContext, HandlerResult } from "../market/server.ts";
 import type { Receipt, Resolved } from "../market/types.ts";
+import type { VMDeleteEvent } from "../lexicons-compute/mod.ts";
 
-/** com.publicdomainrelay.temp.compute.events.vm.delete payload. */
-export type VMDeleteEvent = {
-  reason: string;
-};
+export type { VMDeleteEvent };
 
 /**
  * Checked before authorization/teardown. Return a `HandlerResult` to short-
