@@ -45,6 +45,7 @@ const RECEIPT_NSID = "com.publicdomainrelay.temp.market.receipt";
 const OFFERING_NSID = "com.publicdomainrelay.temp.market.offering";
 const SUBMIT_EVENT_NSID = "com.publicdomainrelay.temp.market.submitEvent";
 const SUBMIT_ACCEPT_NSID = "com.publicdomainrelay.temp.market.submitAccept";
+const SUBMIT_RFP_NSID = "com.publicdomainrelay.temp.market.submitRfp";
 const VM_DELETE_EVENT_NSID = "com.publicdomainrelay.temp.compute.events.vm.delete";
 const RBAC_NSID = "com.fedproxy.rbac";
 
@@ -286,8 +287,6 @@ async function ensureOfferingRecord(): Promise<void> {
 // hono app
 // ---------------------------------------------------------------------------
 
-const app = new Hono();
-
 // Shared deps for the ../lib/market server handlers. We inject our existing
 // resolveAs (so the version guard + HTTPError behavior is preserved) rather
 // than the library's default resolver, and reuse the module-level idResolver
@@ -319,63 +318,6 @@ const {
   rbacRepoRoot: RBAC_REPO_ROOT,
   parseAtUri,
   canonicalJson,
-});
-
-// README rendering — best effort, falls back to plain text.
-let readmeHtml = "<html><body><h1>compute-contract-provider-relay-digitalocean</h1></body></html>";
-async function loadReadme(): Promise<void> {
-  try {
-    const md = await Deno.readTextFile(new URL("./README.md", import.meta.url));
-    const title = md.split("\n")[0].replace(/^#\s+/, "");
-    const esc = md.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    readmeHtml = `<html><title>${title}</title><body><pre>${esc}</pre></body></html>`;
-  } catch (err) {
-    console.error("[readme] load failed:", (err as Error).message);
-  }
-}
-
-app.get("/", (c) => c.html(readmeHtml));
-
-
-// Configure x402 for payments (or X402_MAKE_FREE=1)
-setupX402(X402_MAKE_FREE, {
-  app,
-  getAgent: () => agent,
-  log,
-  baseUrl: BASE_URL,
-  payTo: PAY_TO,
-  cdpApiKeyId: CDP_API_KEY_ID,
-  cdpApiKeySecret: CDP_API_KEY_SECRET,
-  acceptsX402Nsid: ACCEPTS_X402_NSID,
-  receiptsX402Nsid: RECEIPTS_X402_NSID,
-  cidRe: CID_RE,
-  resolveAs,
-  httpError: HTTPError,
-});
-
-
-// did:web document exposing the `pdr_temp_market` and `pdr_temp_compute_event` service
-// entries. The bidder only RECEIVES service-auth tokens (no signing key needed).
-app.get("/.well-known/did.json", (c) => {
-  if (!BASE_URL) return c.json({ error: "NotFound", message: "BASE_URL not configured" }, 404);
-  const host = new URL(BASE_URL).host;
-  return c.json({
-    "@context": ["https://www.w3.org/ns/did/v1"],
-    id: `did:web:${host}`,
-    service: [
-      { id: `#${MARKET_SERVICE_ID}`, type: "PDRTempMarket", serviceEndpoint: `https://${host}` },
-      { id: `#${COMPUTE_EVENT_SERVICE_ID}`, type: "PDRTempComputeEvent", serviceEndpoint: `https://${host}` },
-    ],
-  });
-});
-
-// JSON error envelope
-app.onError((err, c) => {
-  if (err instanceof HTTPError) {
-    return c.json({ error: "http_error", code: err.status, detail: err.detail }, err.status as ContentfulStatusCode);
-  }
-  console.error("[err]", (err as Error).stack ?? err);
-  return c.json({ error: "internal", detail: (err as Error).message }, 500);
 });
 
 // ---------------------------------------------------------------------------
@@ -502,8 +444,6 @@ const marketSubmitAccept = createSubmitAcceptHandler({
   },
 });
 
-app.post(`/xrpc/${SUBMIT_ACCEPT_NSID}`, (c) => marketSubmitAccept(c.req.raw));
-
 // ---------------------------------------------------------------------------
 // Shared bid-creation logic used by /hook/rfp and /xrpc/…submitRfp.
 // ---------------------------------------------------------------------------
@@ -620,8 +560,6 @@ const marketSubmitRfp = createSubmitRfpHandler({
   },
 });
 
-app.post("/xrpc/com.publicdomainrelay.temp.market.submitRfp", (c) => marketSubmitRfp(c.req.raw));
-
 
 const marketSubmitEvent = createSubmitEventHandler({
   deps: marketDeps,
@@ -673,7 +611,59 @@ const marketSubmitEvent = createSubmitEventHandler({
   },
 });
 
-app.post(`/xrpc/${SUBMIT_EVENT_NSID}`, (c) => marketSubmitEvent(c.req.raw));
+
+const makeApp = () => {
+  const app = new Hono();
+
+  // JSON error envelope
+  app.onError((err, c) => {
+    if (err instanceof HTTPError) {
+      return c.json({ error: "http_error", code: err.status, detail: err.detail }, err.status as ContentfulStatusCode);
+    }
+    console.error("[err]", (err as Error).stack ?? err);
+    return c.json({ error: "internal", detail: (err as Error).message }, 500);
+  });
+
+  const readmeHtml = "<html><body><h1>compute-contract-provider-relay-digitalocean</h1></body></html>";
+  app.get("/", (c) => c.html(readmeHtml));
+
+  // did:web document exposing the `pdr_temp_market` and `pdr_temp_compute_event` service
+  // entries. The bidder only RECEIVES service-auth tokens (no signing key needed).
+  app.get("/.well-known/did.json", (c) => {
+    if (!BASE_URL) return c.json({ error: "NotFound", message: "BASE_URL not configured" }, 404);
+    const host = new URL(BASE_URL).host;
+    return c.json({
+      "@context": ["https://www.w3.org/ns/did/v1"],
+      id: `did:web:${host}`,
+      service: [
+        { id: `#${MARKET_SERVICE_ID}`, type: "PDRTempMarket", serviceEndpoint: `https://${host}` },
+        { id: `#${COMPUTE_EVENT_SERVICE_ID}`, type: "PDRTempComputeEvent", serviceEndpoint: `https://${host}` },
+      ],
+    });
+  });
+
+  // Configure market flow routes
+  app.post(`/xrpc/${SUBMIT_RFP_NSID}`, (c) => marketSubmitRfp(c.req.raw));
+  // accepts.x402 for payments (will not require payment if X402_MAKE_FREE=1)
+  setupX402(X402_MAKE_FREE, {
+    app,
+    getAgent: () => agent,
+    log,
+    baseUrl: BASE_URL,
+    payTo: PAY_TO,
+    cdpApiKeyId: CDP_API_KEY_ID,
+    cdpApiKeySecret: CDP_API_KEY_SECRET,
+    acceptsX402Nsid: ACCEPTS_X402_NSID,
+    receiptsX402Nsid: RECEIPTS_X402_NSID,
+    cidRe: CID_RE,
+    resolveAs,
+    httpError: HTTPError,
+  });
+  app.post(`/xrpc/${SUBMIT_ACCEPT_NSID}`, (c) => marketSubmitAccept(c.req.raw));
+  app.post(`/xrpc/${SUBMIT_EVENT_NSID}`, (c) => marketSubmitEvent(c.req.raw));
+
+  return app;
+};
 
 // ---------------------------------------------------------------------------
 // main
@@ -681,10 +671,10 @@ app.post(`/xrpc/${SUBMIT_EVENT_NSID}`, (c) => marketSubmitEvent(c.req.raw));
 
 const main = async () => {
   void VM_NSID; // referenced for parity / future use
-  await loadReadme();
   await loginAgent();
   await configureAccountAuthRbac();
   await ensureOfferingRecord();
+  const app = makeApp();
   const port = Number(Deno.env.get("PORT") ?? 4021);
   Deno.serve({ port, hostname: "0.0.0.0", onListen: ({ port, hostname }) => {
     console.error(`[server] listening on http://${hostname}:${port}`);
