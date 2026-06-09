@@ -29,12 +29,18 @@
 
 import { Agent, CredentialSession } from "npm:@atproto/api";
 import { IdResolver } from "npm:@atproto/identity";
-import { verifyJwt } from "npm:@atproto/xrpc-server";
 import { Hono } from "jsr:@hono/hono";
 import type { Context } from "jsr:@hono/hono";
 import { cors } from "jsr:@hono/hono/cors";
 import { parse as parseYaml } from "jsr:@std/yaml";
 import { marketRFPSubmitWorkflow, marketRFPConfigFromEnv, pendingBids, type BidRecord } from "./marketRFP.ts";
+import {
+  createRecordResolver,
+  createSubmitBidHandler,
+  createSubmitEventHandler,
+  type MarketServerDeps,
+  verifyServiceAuth,
+} from "../lib/market/mod.ts";
 
 // ---------------------------------------------------------------------------
 // Structured logger — JSON to stderr
@@ -787,91 +793,42 @@ const MARKET_SERVICE_ID = "pdr_temp_market";
 // counterparties proxy lifecycle events to `did:web:<spindle>#pdr_temp_compute_event`;
 // the proxied token's `aud` is the same reference (or the bare service DID).
 const COMPUTE_EVENT_SERVICE_ID = "pdr_temp_compute_event";
-const SUBMIT_BID_LXM = "com.publicdomainrelay.temp.market.submitBid";
-const SUBMIT_EVENT_LXM = "com.publicdomainrelay.temp.market.submitEvent";
 
 const idResolver = new IdResolver();
 
-function extractBearer(header: string | undefined | null): string {
-  if (!header) throw new Error("missing Authorization header");
-  const m = /^Bearer\s+(\S+)$/i.exec(header);
-  if (!m) throw new Error("Authorization header must be 'Bearer <token>'");
-  return m[1];
+// Inter-service auth for PDS-service-proxied endpoints is verified by
+// ../lib/market's verifyServiceAuth: signature + lxm + expiry (via verifyJwt),
+// then a hand-checked `aud` that tolerates both the bare service DID and the full
+// `did:web:HOST#<service-id>` ref (the reference PDS stripped the fragment until
+// Spring 2026). The spindle is multi-tenant, so the service DID host is derived
+// per-request from the inbound Host header. The trigger endpoint calls this
+// directly; the market receiver endpoints get it through the handler factories.
+function spindleServiceHostname(hostHeader: string | undefined | null): string {
+  return effectiveHostname(getOwnerDid(hostHeader ?? HOSTNAME));
 }
 
 async function validateTriggerServiceAuth(authHeader: string | undefined | null, hostname: string): Promise<string> {
-  const token = extractBearer(authHeader);
-  const serviceDid = `did:web:${effectiveHostname(getOwnerDid(hostname))}`;
-  const serviceRef = `${serviceDid}#${SPINDLE_SERVICE_ID}`;
-
-  // Pass ownDid=null so verifyJwt only checks the signature, lxm, and expiry; we
-  // assert the audience by hand just below. This lets us accept BOTH forms of
-  // `aud` a proxying PDS may send: the full service reference
-  // (`did:web:<spindle>#tangled_spindle`, used by newer PDSes) and the bare
-  // service DID (`did:web:<spindle>`) that the reference PDS emitted until Spring
-  // 2026 by stripping the fragment. Re-checking aud here preserves the
-  // anti-forwarding guarantee verifyJwt's own aud check would otherwise give.
-  // See atproto.com/specs/xrpc#service-proxying.
-  const payload = await verifyJwt(token, null, TRIGGER_LXM, async (did: string) => {
-    return await idResolver.did.resolveAtprotoKey(did);
+  const auth = await verifyServiceAuth({
+    authHeader,
+    hostname: spindleServiceHostname(hostname),
+    lxm: TRIGGER_LXM,
+    serviceIds: [SPINDLE_SERVICE_ID],
+    idResolver,
   });
-
-  const aud = (payload as Record<string, unknown>).aud as string | undefined;
-  if (aud !== serviceDid && aud !== serviceRef) {
-    throw new Error(`unexpected audience ${aud ?? "(none)"}; expected ${serviceDid} or ${serviceRef}`);
-  }
-
-  const iss = (payload as Record<string, unknown>).iss as string | undefined;
-  if (!iss || !iss.startsWith("did:")) {
-    throw new Error("service auth token missing DID issuer");
-  }
-  // Strip any service fragment from the issuer (legacy tokens could carry one)
-  // so it compares cleanly against the trigger's bare `actor` DID.
-  return iss.split("#")[0];
+  // issuerDid has any service fragment stripped, so it compares cleanly against
+  // the trigger's bare `actor` DID at the call site.
+  return auth.issuerDid;
 }
 
-// validateMarketServiceAuth — same PDS service-proxying verification as
-// validateTriggerServiceAuth, but for the market/compute-event RECEIVER
-// endpoints. The service reference uses `serviceId` (MARKET_SERVICE_ID for the
-// market endpoints, COMPUTE_EVENT_SERVICE_ID for submitEvent) and the bound lxm
-// is passed in by the caller. Returns the bare issuer DID.
-async function validateMarketServiceAuth(authHeader: string | undefined | null, hostname: string, lxm: string, serviceId: string = MARKET_SERVICE_ID): Promise<string> {
-  const token = extractBearer(authHeader);
-  const serviceDid = `did:web:${effectiveHostname(getOwnerDid(hostname))}`;
-  const serviceRef = `${serviceDid}#${serviceId}`;
-
-  // Pass ownDid=null so verifyJwt only checks the signature, lxm, and expiry; we
-  // assert the audience by hand just below. This lets us accept BOTH forms of
-  // `aud` a proxying PDS may send: the full service reference
-  // (`did:web:<spindle>#pdr_temp_market`, used by newer PDSes) and the bare service
-  // DID (`did:web:<spindle>`) that the reference PDS emitted until Spring 2026
-  // by stripping the fragment. Re-checking aud here preserves the
-  // anti-forwarding guarantee verifyJwt's own aud check would otherwise give.
-  // See atproto.com/specs/xrpc#service-proxying.
-  const payload = await verifyJwt(token, null, lxm, async (did: string) => {
-    return await idResolver.did.resolveAtprotoKey(did);
-  });
-
-  const aud = (payload as Record<string, unknown>).aud as string | undefined;
-  if (aud !== serviceDid && aud !== serviceRef) {
-    throw new Error(`unexpected audience ${aud ?? "(none)"}; expected ${serviceDid} or ${serviceRef}`);
-  }
-
-  const iss = (payload as Record<string, unknown>).iss as string | undefined;
-  if (!iss || !iss.startsWith("did:")) {
-    throw new Error("service auth token missing DID issuer");
-  }
-  // Strip any service fragment from the issuer (legacy tokens could carry one)
-  // so it compares cleanly against the record author's bare DID.
-  return iss.split("#")[0];
-}
-
-// Authority (repo DID) of the primary AT-URI in a market request body. The
-// verified token issuer must equal this so a caller can only submit records
-// they authored.
-function atUriAuthority(uri: string): string {
-  return uri.replace("at://", "").split("/")[0];
-}
+// Shared deps for the ../lib/market receiver handlers (submitBid, submitEvent).
+// `hostname` is a function because the service DID varies per tenant; `resolve`
+// fetches strongRef'd records through the same IdResolver used for key lookup.
+const marketDeps: MarketServerDeps = {
+  hostname: (req) => spindleServiceHostname(req.headers.get("host")),
+  idResolver,
+  resolve: createRecordResolver(idResolver),
+  log,
+};
 
 async function repoRegisteredToThisSpindle(hostname: string, repoDid: string): Promise<bool> {
   const ownerDid = getOwnerDid(hostname);
@@ -1896,71 +1853,38 @@ app.post("/xrpc/sh.tangled.repo.removeSecret", async (c) => {
   return c.body(null, 200);
 });
 
-// /xrpc/com.publicdomainrelay.temp.market.submitBid  { uri, cid, rfpUri }
-// Bidders POST here when RFP.submitBid is set, bypassing the firehose.
-// uri+cid identify the bid AT record; rfpUri routes it to the right collector.
-app.post("/xrpc/com.publicdomainrelay.temp.market.submitBid", async (c) => {
-  let body: { uri?: string; cid?: string; record?: BidRecord };
-  try { body = await c.req.json(); } catch { return c.json({ error: "InvalidRequest", message: "invalid JSON" }, 400); }
-  const { uri, cid, record } = body;
-  if (!uri || !cid || !record ) return c.json({ error: "InvalidRequest", message: "missing uri, cid, or record" }, 400);
-
-  let issuerDid: string;
-  try {
-    issuerDid = await validateMarketServiceAuth(c.req.header("Authorization"), c.req.header("host") ?? HOSTNAME, SUBMIT_BID_LXM);
-  } catch (err) {
-    log("warn", "submitBid rejected: invalid service-auth token", { err: String(err) });
-    return c.json({ error: "Unauthorized", message: `invalid service-auth token: ${String(err)}` }, 401);
-  }
-  if (issuerDid !== atUriAuthority(uri)) {
-    log("warn", "submitBid rejected: token issuer does not match bid author", { iss: issuerDid, uri });
-    return c.json({ error: "Forbidden", message: "service-auth token issuer must author the bid record" }, 403);
-  }
-
-  const rfpUri = record.rfp.uri;
-
-  const did = uri.replace("at://", "").split("/")[0];
-  const queue = pendingBids.get(rfpUri) ?? [];
-  queue.push({
-    did,
-    uri,
-    cid,
-    record: record,
-  });
-  pendingBids.set(rfpUri, queue);
-
-  log("info", "submitBid received", { uri, cid, rfpUri });
-  return c.json({ ok: true });
+// /xrpc/com.publicdomainrelay.temp.market.submitBid  { uri, cid, record }
+// Bidders POST here when RFP.submitBid is set, bypassing the firehose. Auth
+// (service-auth + "issuer must author the bid record") and body parsing are
+// handled by ../lib/market; onBid routes the bid to its RFP's collector queue.
+const marketSubmitBid = createSubmitBidHandler({
+  deps: marketDeps,
+  serviceIds: [MARKET_SERVICE_ID],
+  onBid: ({ uri, cid, record, log }) => {
+    const bid = record as unknown as BidRecord;
+    const rfpUri = bid.rfp.uri;
+    const did = uri.replace("at://", "").split("/")[0];
+    const queue = pendingBids.get(rfpUri) ?? [];
+    queue.push({ did, uri, cid, record: bid });
+    pendingBids.set(rfpUri, queue);
+    log("info", "submitBid received", { uri, cid, rfpUri });
+  },
 });
+app.post("/xrpc/com.publicdomainrelay.temp.market.submitBid", (c) => marketSubmitBid(c.req.raw));
 
 // /xrpc/com.publicdomainrelay.temp.market.submitEvent  { uri, cid, record }
-// Bidders POST here when accept.submitEvent is set, bypassing the firehose,
-// to report lifecycle events about the VM they provisioned for us (e.g.
-// compute.events.vm.started / .onNetwork — things they can observe about the
-// resource itself, as opposed to the workflow running inside it).
-app.post("/xrpc/com.publicdomainrelay.temp.market.submitEvent", async (c) => {
-  let body: { uri?: string; cid?: string; record?: { receipt?: { uri?: string; cid?: string }; payload?: { uri?: string; cid?: string } } };
-  try { body = await c.req.json(); } catch { return c.json({ error: "InvalidRequest", message: "invalid JSON" }, 400); }
-  const { uri, cid, record } = body;
-  if (!uri || !cid || !record?.receipt || !record?.payload) {
-    return c.json({ error: "InvalidRequest", message: "missing uri, cid, or record" }, 400);
-  }
-
-  let issuerDid: string;
-  try {
-    issuerDid = await validateMarketServiceAuth(c.req.header("Authorization"), c.req.header("host") ?? HOSTNAME, SUBMIT_EVENT_LXM, COMPUTE_EVENT_SERVICE_ID);
-  } catch (err) {
-    log("warn", "submitEvent rejected: invalid service-auth token", { err: String(err) });
-    return c.json({ error: "Unauthorized", message: `invalid service-auth token: ${String(err)}` }, 401);
-  }
-  if (issuerDid !== atUriAuthority(uri)) {
-    log("warn", "submitEvent rejected: token issuer does not match event author", { iss: issuerDid, uri });
-    return c.json({ error: "Forbidden", message: "service-auth token issuer must author the event record" }, 403);
-  }
-
-  log("info", "submitEvent received", { uri, cid, receipt: record.receipt, payload: record.payload });
-  return c.json({ ok: true });
+// Bidders POST here when accept.submitEvent is set, to report lifecycle events
+// about the VM they provisioned for us (e.g. compute.events.vm.started). Auth,
+// event resolution, and dispatch are handled by ../lib/market's
+// createSubmitEventHandler. We take no per-event-type action yet, so the
+// callbacks table is empty and every event is acknowledged with 200 { ok: true }
+// (the handler still verifies the token and that its issuer authored the event).
+const marketSubmitEvent = createSubmitEventHandler({
+  deps: marketDeps,
+  serviceIds: [COMPUTE_EVENT_SERVICE_ID],
+  callbacks: { [COMPUTE_EVENT_SERVICE_ID]: {} },
 });
+app.post("/xrpc/com.publicdomainrelay.temp.market.submitEvent", (c) => marketSubmitEvent(c.req.raw));
 
 // handleTrigger — accept a pipeline trigger and kick off workflow execution.
 // Body mirrors the fields from sh.tangled.pipeline that the knot dispatches to

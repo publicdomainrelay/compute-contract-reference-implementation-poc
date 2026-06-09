@@ -32,9 +32,17 @@
 //   PE_READY_TIMEOUT_MS     How long to wait for PE to respond (default: 120000)
 
 import { Agent, CredentialSession } from "npm:@atproto/api";
-import { XrpcClient } from "@atproto/xrpc";
 import { IdResolver } from "npm:@atproto/identity";
-import { getPdsEndpoint } from "npm:@atproto/common-web";
+import {
+  createMarketClient,
+  createRecord as atprotoCreateRecord,
+  deleteRecord as atprotoDeleteRecord,
+  listRecordsAll,
+  type MarketClient,
+  resolvePds,
+  type StrongRef,
+} from "../lib/market/mod.ts";
+import { BIDS_X402_NSID, settleX402Payment } from "../lib/market-x402/mod.ts";
 
 // ---------------------------------------------------------------------------
 // NSIDs
@@ -45,8 +53,6 @@ const RFP_NSID    = "com.publicdomainrelay.temp.market.rfp";
 const BID_NSID    = "com.publicdomainrelay.temp.market.bid";
 const ACCEPT_NSID = "com.publicdomainrelay.temp.market.accept";
 const RECEIPT_NSID = "com.publicdomainrelay.temp.market.receipt";
-const BIDS_X402_NSID = "com.publicdomainrelay.temp.market.bids.x402";
-const ACCEPTS_X402_NSID = "com.publicdomainrelay.temp.market.accepts.x402";
 const RBAC_NSID   = "com.fedproxy.rbac";
 const SSH_KEY_NSID = "com.fedproxy.sshPublicKey";
 const EVENT_NSID = "com.publicdomainrelay.temp.market.event";
@@ -60,46 +66,13 @@ const MARKET_SERVICE_ID = "pdr_temp_market";
 // Compute-contract event endpoint fragment, advertised separately from the
 // market service; submitEvent refs take the form `did:web:HOST#pdr_temp_compute_event`.
 const COMPUTE_EVENT_SERVICE_ID = "pdr_temp_compute_event";
-const SUBMIT_RFP_LXM    = "com.publicdomainrelay.temp.market.submitRfp";
-const SUBMIT_EVENT_LXM  = "com.publicdomainrelay.temp.market.submitEvent";
-const SUBMIT_ACCEPT_LXM = "com.publicdomainrelay.temp.market.submitAccept";
-
-const marketLexicons = [
-  {
-    lexicon: 1,
-    id: SUBMIT_RFP_LXM,
-    defs: { main: { type: "procedure",
-      input: { encoding: "application/json", schema: { type: "object", required: ["rfpUri", "rfpCid"],
-        properties: { rfpUri: { type: "string" }, rfpCid: { type: "string" } } } },
-      output: { encoding: "application/json" } } },
-  },
-  {
-    lexicon: 1,
-    id: SUBMIT_EVENT_LXM,
-    defs: { main: { type: "procedure",
-      input: { encoding: "application/json", schema: { type: "object", required: ["uri", "cid", "record"],
-        properties: { uri: { type: "string" }, cid: { type: "string" }, record: { type: "unknown" } } } },
-      output: { encoding: "application/json" } } },
-  },
-  {
-    lexicon: 1,
-    id: SUBMIT_ACCEPT_LXM,
-    defs: { main: { type: "procedure",
-      input: { encoding: "application/json", schema: { type: "object", required: ["acceptUri", "acceptCid"],
-        properties: { acceptUri: { type: "string" }, acceptCid: { type: "string" } } } },
-      output: { encoding: "application/json" } } },
-  },
-];
+// Market submit procedures are now called through the MarketClient from
+// ../lib/market (which carries its own embedded lexicons); the spindle no longer
+// declares them here. The x402 payment leg lives in ../lib/market-x402.
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-type StrongRef = {
-  $type: "com.atproto.repo.strongRef";
-  uri: string;
-  cid: string;
-};
 
 export type BidRecord = {
   $type: string;
@@ -187,40 +160,13 @@ function makeLogger(onLog?: (line: string) => void): RFPLogger {
   };
 }
 
-async function resolvePDS(did: string): Promise<string> {
-  const resolver = new IdResolver();
-  const doc = await resolver.did.resolve(did);
-  if (!doc) throw new Error(`Could not resolve DID ${did}`);
-  const pds = getPdsEndpoint(doc);
-  if (!pds) throw new Error(`No PDS endpoint for ${did}`);
-  return pds;
-}
+// Identity resolver shared by PDS lookups. createRecord / deleteRecord /
+// listRecordsAll are imported from ../lib/market (aliased to the names this
+// module has always used); resolvePDS just wraps the library's resolvePds.
+const idResolver = new IdResolver();
 
-async function atprotoCreateRecord(
-  agent: Agent,
-  collection: string,
-  record: Record<string, unknown>,
-): Promise<StrongRef> {
-  const res = await agent.com.atproto.repo.createRecord({
-    repo: agent.assertDid,
-    collection,
-    record,
-  });
-  return {
-    $type: "com.atproto.repo.strongRef",
-    uri: res.data.uri,
-    cid: res.data.cid,
-  };
-}
-
-function parseAtUri(uri: string): { repo: string; collection: string; rkey: string } {
-  const parts = uri.slice("at://".length).split("/");
-  return { repo: parts[0], collection: parts[1], rkey: parts[2] };
-}
-
-async function atprotoDeleteRecord(agent: Agent, ref: StrongRef): Promise<void> {
-  const { repo, collection, rkey } = parseAtUri(ref.uri);
-  await agent.com.atproto.repo.deleteRecord({ repo, collection, rkey });
+function resolvePDS(did: string): Promise<string> {
+  return resolvePds(idResolver, did);
 }
 
 // Validates a URL before egressing to it (the x402 payment endpoint comes from
@@ -368,30 +314,6 @@ const OFFERING_NSID = "com.publicdomainrelay.temp.market.offering";
 const VOUCH_NSID    = "sh.tangled.graph.vouch";
 const KNOT_MEMBER_NSID = "sh.tangled.knot.member";
 
-async function listRecordsAll(
-  pdsUrl: string,
-  repo: string,
-  collection: string,
-): Promise<Array<{ uri: string; cid: string; value: Record<string, unknown> }>> {
-  const records: Array<{ uri: string; cid: string; value: Record<string, unknown> }> = [];
-  let cursor: string | undefined;
-  do {
-    const url = new URL(`${pdsUrl}/xrpc/com.atproto.repo.listRecords`);
-    url.searchParams.set("repo", repo);
-    url.searchParams.set("collection", collection);
-    url.searchParams.set("limit", "100");
-    if (cursor) url.searchParams.set("cursor", cursor);
-    const res = await fetch(url.toString(), { signal: AbortSignal.timeout(10000) });
-    if (!res.ok) break;
-    const data = await res.json() as { records: Array<{ uri: string; cid: string; value: unknown }>; cursor?: string };
-    for (const r of data.records) {
-      records.push({ uri: r.uri, cid: r.cid, value: r.value as Record<string, unknown> });
-    }
-    cursor = data.cursor;
-  } while (cursor);
-  return records;
-}
-
 // Get DIDs vouched for by a given account.
 async function getVouchedDids(did: string, log: RFPLogger): Promise<string[]> {
   try {
@@ -430,7 +352,7 @@ async function notifyBidderViaOffering(
   rfpUri: string,
   rfpCid: string,
   payloadNsid: string,
-  marketClient: XrpcClient,
+  marketClient: MarketClient,
   log: RFPLogger,
 ): Promise<void> {
   let pds: string;
@@ -458,13 +380,8 @@ async function notifyBidderViaOffering(
     // endpointUrl now holds a market service DID ref (did:web:HOST#pdr_temp_market).
     log("submitting RFP to vouched bidder", { bidderDid, endpointUrl, rfpUri });
     try {
-      const res = await marketClient.call(
-        SUBMIT_RFP_LXM,
-        {},
-        { rfpUri, rfpCid },
-        { headers: { "atproto-proxy": endpointUrl } },
-      );
-      log("submitRfp response", { bidderDid, success: res.success });
+      const res = await marketClient.submitRfp(endpointUrl, { rfpUri, rfpCid });
+      log("submitRfp response", { bidderDid, success: res.ok });
     } catch (err) {
       log("submitRfp failed", { bidderDid, endpointUrl, err: String(err) });
     }
@@ -478,7 +395,7 @@ async function discoverAndNotifyBidders(
   rfpUri: string,
   rfpCid: string,
   payloadNsid: string,
-  marketClient: XrpcClient,
+  marketClient: MarketClient,
   log: RFPLogger,
 ): Promise<Set<string>> {
   log("discovering bidders via vouches", { owner: trigger.actor, knot: trigger.knot });
@@ -787,10 +704,9 @@ export async function marketRFPSubmitWorkflow(
   const agentDidPlcKey = agentDid.split(":")[2];
   log("atproto authenticated", { did: agentDid, handle: config.handle });
 
-  // XrpcClient over our own PDS session; market calls are service-proxied via
-  // the `atproto-proxy` header carrying a did:web:HOST#pdr_temp_market service ref.
-  // deno-lint-ignore no-explicit-any
-  const marketClient = new XrpcClient(session, marketLexicons as any);
+  // MarketClient over our own PDS session; each method service-proxies via the
+  // `atproto-proxy` header carrying the target's service DID ref. See ../lib/market.
+  const marketClient = createMarketClient(session);
 
   // Build user_data with policy-engine bootstrap
   const userData = buildUserData(serviceName);
@@ -868,36 +784,22 @@ export async function marketRFPSubmitWorkflow(
   // bidder responds (after payment clears) with a receipts.x402 proof-of-payment
   // strongRef. That proof becomes the payload of the market.accept below, which
   // the bidder verifies in submitAccept before provisioning.
+  // Payment settlement is the x402 leg of the protocol; ../lib/market-x402 mints
+  // the accepts.x402, GETs the bidder's payment endpoint, and returns the
+  // receipts.x402 proof-of-payment strongRef we use as the market.accept payload.
   const bidPayload = winner.payload;
   const x402Url = String(bidPayload?.url ?? "");
-  let paymentReceiptRef: StrongRef | undefined;
-  if (x402Url) {
-    try {
-      assertSafeEgressUrl(x402Url);
-    } catch (err) {
-      throw new Error(`winning bid x402 url rejected: ${String(err)}`);
-    }
-    const acceptsX402Ref = await atprotoCreateRecord(agent, ACCEPTS_X402_NSID, {
-      $type: ACCEPTS_X402_NSID,
-      bid: bidRef,
-      payload: { $type: "com.atproto.repo.strongRef", uri: winner.record.payload.uri, cid: winner.record.payload.cid },
-      createdAt: new Date().toISOString(),
-    });
-    const receiptUrl = `${x402Url.replace(/\/+$/, "")}/${acceptsX402Ref.uri}/${acceptsX402Ref.cid}`;
-    log("settling x402 payment", { url: receiptUrl, acceptsX402: acceptsX402Ref.uri });
-    const res = await fetch(receiptUrl, { method: "GET", signal: AbortSignal.timeout(30000) });
-    if (!res.ok) {
-      throw new Error(`x402 payment failed ${res.status}: ${await res.text()}`);
-    }
-    const body = await res.json() as { uri?: string; cid?: string };
-    if (!body.uri || !body.cid) {
-      throw new Error(`x402 payment endpoint returned no receipts.x402 strongRef: ${JSON.stringify(body)}`);
-    }
-    paymentReceiptRef = { $type: "com.atproto.repo.strongRef", uri: body.uri, cid: body.cid };
-    log("x402 payment settled", { receiptsX402: paymentReceiptRef });
-  } else {
+  if (!x402Url) {
     throw new Error(`winning bid ${winner.uri} has no x402 payment url; cannot settle`);
   }
+  const paymentReceiptRef: StrongRef = await settleX402Payment({
+    agent,
+    bid: bidRef,
+    bidPayload: winner.record.payload,
+    url: x402Url,
+    egress: { blockPrivate: !!Deno.env.get("MARKET_BLOCK_PRIVATE_EGRESS") },
+    log: (_level, msg, fields) => log(msg, fields),
+  });
 
   // Accept the winning bid. payload carries the receipts.x402 proof-of-payment;
   // submitEvent tells the bidder where it can report events about the resource
@@ -997,13 +899,10 @@ export async function marketRFPSubmitWorkflow(
   if (bidderServiceRef) {
     log("submitting accept to bidder via submitAccept", { ref: bidderServiceRef, acceptUri: acceptRef.uri });
     try {
-      const res = await marketClient.call(
-        SUBMIT_ACCEPT_LXM,
-        {},
-        { acceptUri: acceptRef.uri, acceptCid: acceptRef.cid },
-        { headers: { "atproto-proxy": bidderServiceRef } },
-      );
-      const body = res.data as { uri?: string; cid?: string; submitEvent?: string };
+      const body = await marketClient.submitAccept(bidderServiceRef, {
+        acceptUri: acceptRef.uri,
+        acceptCid: acceptRef.cid,
+      });
       if (body.uri && body.cid) {
         receiptRef = { $type: "com.atproto.repo.strongRef", uri: body.uri, cid: body.cid };
       }
@@ -1055,13 +954,12 @@ export async function marketRFPSubmitWorkflow(
       const eventRef = await atprotoCreateRecord(agent, EVENT_NSID, eventRecord);
       // providerSubmitEventUrl holds a did:web:HOST#pdr_temp_compute_event service ref;
       // route the submitEvent call through our PDS via service proxying.
-      const res = await marketClient.call(
-        SUBMIT_EVENT_LXM,
-        {},
-        { uri: eventRef.uri, cid: eventRef.cid, record: eventRecord },
-        { headers: { "atproto-proxy": providerSubmitEventUrl } },
-      );
-      log("submitEvent vm.delete POST", { url: providerSubmitEventUrl, reason, success: res.success });
+      const res = await marketClient.submitEvent(providerSubmitEventUrl, {
+        uri: eventRef.uri,
+        cid: eventRef.cid,
+        record: eventRecord,
+      });
+      log("submitEvent vm.delete POST", { url: providerSubmitEventUrl, reason, success: res.ok });
     } catch (err) {
       log("submitEvent vm.delete POST failed", { url: providerSubmitEventUrl, reason, err: String(err) });
     }

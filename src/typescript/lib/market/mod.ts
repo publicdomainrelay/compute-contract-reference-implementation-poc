@@ -13,6 +13,7 @@
 export * from "./types.ts";
 export * from "./nsids.ts";
 export * from "./resolve.ts";
+export * from "./records.ts";
 export * from "./auth.ts";
 export * from "./server.ts";
 export * from "./client.ts";

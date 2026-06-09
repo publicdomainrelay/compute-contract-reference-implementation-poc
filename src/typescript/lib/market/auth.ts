@@ -83,3 +83,18 @@ export async function verifyMarketServiceAuth(
 
   return { issuerDid: iss.split("#")[0], audience: aud, serviceId: acceptable.get(aud) };
 }
+
+// The verification above is not actually market-specific — it takes the `lxm`
+// and the accepted `serviceIds` as arguments, so it works for ANY atproto
+// inter-service-auth (PDS service-proxying) endpoint. The spindle, for example,
+// reuses it for its `…tangled.spindle.trigger` endpoint. These generic aliases
+// say so at the call site without forcing a market vocabulary on unrelated code.
+export type VerifyServiceAuthOptions = VerifyMarketServiceAuthOptions;
+
+/**
+ * Verify an atproto inter-service auth JWT for a PDS-service-proxied endpoint.
+ * Generic alias for {@link verifyMarketServiceAuth}; see that function for the
+ * full contract. Returns the issuer DID (fragment stripped) and which configured
+ * service-id the token's `aud` matched (if any).
+ */
+export const verifyServiceAuth = verifyMarketServiceAuth;

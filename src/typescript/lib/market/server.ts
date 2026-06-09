@@ -27,8 +27,14 @@ import type { Accept, Bid, Logger, MarketEvent, Resolved, RFP } from "./types.ts
 
 /** Shared dependencies every market server handler needs. */
 export interface MarketServerDeps {
-  /** This service's public hostname (host of its did:web). */
-  hostname: string;
+  /**
+   * This service's public hostname (host of its did:web), used to build the
+   * acceptable `aud` values for inbound service-auth tokens. Pass a string when
+   * the service answers for a single did:web (the reference bidder). Pass a
+   * function when the host varies per request — e.g. a multi-tenant spindle that
+   * derives `did:web:<owner-subdomain>` from the inbound `Host` header.
+   */
+  hostname: string | ((req: Request) => string);
   /** Identity resolver used to look up issuer signing keys for JWT verification. */
   idResolver: IdResolver;
   /** Strong-ref resolver used to fetch referenced records. */
@@ -93,7 +99,7 @@ async function authorize(
   try {
     auth = await verifyMarketServiceAuth({
       authHeader: req.headers.get("authorization"),
-      hostname: deps.hostname,
+      hostname: typeof deps.hostname === "function" ? deps.hostname(req) : deps.hostname,
       lxm,
       serviceIds,
       idResolver: deps.idResolver,

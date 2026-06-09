@@ -22,6 +22,20 @@ injection — you pass an `IdResolver` (for JWT key lookup) and a `RecordResolve
 (for fetching referenced records), so you can share a single identity/cache
 layer or swap implementations (e.g. fixtures in tests).
 
+It also exports the small pieces both producers and consumers share:
+
+- **records** — `createRecord` / `deleteRecord` / `listRecordsAll` / `resolvePds`,
+  the write-and-discover helpers for the records you author (`./records.ts`).
+- **auth** — `verifyServiceAuth` (alias of `verifyMarketServiceAuth`): the same
+  inter-service-auth JWT verification the handlers use, exposed for *other*
+  PDS-service-proxied endpoints (the reference spindle reuses it for its trigger).
+
+Payments are out of scope here on purpose: a `market.accept` carries an opaque
+`payload` strongRef and `submitAccept` doesn't care what it is. The
+**[`@publicdomainrelay/market-x402`](../market-x402/README.md)** companion library
+defines that payload for x402 and the settlement plumbing on both sides; import it
+only if you settle with x402.
+
 ## Runtimes
 
 - **Deno** — import via the `deno.json` import map (`deno run`/`deno check`
@@ -47,7 +61,10 @@ import { IdResolver } from "@atproto/identity";
 
 const idResolver = new IdResolver();
 const deps: MarketServerDeps = {
-  hostname: new URL(BASE_URL).host, // host of this service's did:web
+  // host of this service's did:web. Pass a function `(req) => string` instead
+  // when the host varies per request — e.g. a multi-tenant spindle deriving
+  // `did:web:<owner-subdomain>` from the inbound Host header.
+  hostname: new URL(BASE_URL).host,
   idResolver,
   resolve: createRecordResolver(idResolver), // or inject your own
   log: (level, msg, fields) => console.error(level, msg, fields),
