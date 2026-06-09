@@ -1,0 +1,16 @@
+{
+  "name": "@publicdomainrelay/compute",
+  "version": "0.0.0",
+  "description": "Handler factories for com.publicdomainrelay.temp.compute.* event payloads (companion to @publicdomainrelay/market).",
+  "type": "module",
+  "exports": {
+    ".": "./mod.ts"
+  },
+  "peerDependencies": {
+    "@publicdomainrelay/market": "^0.0.0"
+  },
+  "comments": {
+    "parent": "Imports @publicdomainrelay/market by relative path (../market/mod.ts) in this monorepo. Published separately, depend on @publicdomainrelay/market instead.",
+    "node": "Sources are TypeScript with explicit .ts import specifiers (Deno convention); load via a TS-aware loader (tsx / ts-node ESM) or a bundler/tsc that preserves .ts resolution. Runtime code uses only web-standard types — no Deno.* or node:* APIs."
+  }
+}

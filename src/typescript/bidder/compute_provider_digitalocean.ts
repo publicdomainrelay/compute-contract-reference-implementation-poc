@@ -1,0 +1,447 @@
+// ---------------------------------------------------------------------------
+// DigitalOcean + RBAC — provisioning backend for the bidder.
+//
+// Exposes createComputeProviderDigitalOcean(ctx), which wires the DO/RBAC
+// helpers (previously inline in main.ts) against the bidder's atproto agent,
+// logger, and env. Kept as a factory (rather than module-level state) because
+// `agent`/`agentDid` are only available after loginAgent() resolves.
+// ---------------------------------------------------------------------------
+
+import { Agent } from "@atproto/api";
+import { stringify as yamlStringify, parse as yamlParse } from "npm:yaml@^2.7.0";
+
+export type StrongRef = { $type: "com.atproto.repo.strongRef"; uri: string; cid: string };
+
+export type VM = {
+  cpus: number;
+  mem: string;
+  disk: string;
+  network: string;
+  role: string;
+  user_data: string;
+  location?: { country?: string; region?: string };
+  _uri?: string;
+  _cid?: string;
+};
+
+type LogLevel = "info" | "warn" | "error" | "debug";
+type Logger = (level: LogLevel, msg: string, fields?: Record<string, unknown>) => void;
+
+export interface ComputeProviderDigitalOceanCtx {
+  getAgent: () => Agent;
+  getAgentDid: () => string;
+  log: Logger;
+  rbacNsid: string;
+  acceptPathVm: string;
+  digitaloceanBaseUrl: string;
+  doToken: string;
+  rbacRepoRoot: string;
+  parseAtUri: (uri: string) => { repo: string; collection: string; rkey: string };
+  canonicalJson: (value: unknown) => string;
+}
+
+type DOContext = { rbacRepoRoot: string; teamUuid: string };
+
+export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOceanCtx) {
+  const {
+    getAgent,
+    getAgentDid,
+    log,
+    rbacNsid: RBAC_NSID,
+    acceptPathVm: ACCEPT_PATH_VM,
+    digitaloceanBaseUrl: DIGITALOCEAN_BASE_URL,
+    doToken: DO_TOKEN,
+    rbacRepoRoot: RBAC_REPO_ROOT,
+    parseAtUri,
+    canonicalJson,
+  } = ctx;
+
+  async function atprotoCreateRecord(collection: string, record: Record<string, unknown>): Promise<StrongRef> {
+    const agent = getAgent();
+    const res = await agent.com.atproto.repo.createRecord({
+      repo: agent.assertDid,
+      collection,
+      record,
+    });
+    return { $type: "com.atproto.repo.strongRef", uri: res.data.uri, cid: res.data.cid };
+  }
+
+  // Derive did:web: from the service base URL for use as getServiceAuth aud.
+  function urlToDid(url: string): string {
+    const host = new URL(url).host;
+    return `did:web:${host}`;
+  }
+
+  // Get a short-lived ATProto service auth token targeting the DO/QEMU endpoint.
+  // These are non-OIDC JWTs: signed by the PDS, iss=agentDid, validated via DID doc.
+  async function getServiceAuthToken(): Promise<string> {
+    const aud = urlToDid(DIGITALOCEAN_BASE_URL);
+    // cannot request a method-less token with an expiration more than a minute in the future
+    const exp = Math.floor(Date.now() / 1000) + 60; // 1 min
+    log("info", "calling getServiceAuth", { aud, exp });
+    const res = await getAgent().com.atproto.server.getServiceAuth({ aud, exp });
+    return res.data.token;
+  }
+
+  async function makeDoctx(): Promise<DOContext> {
+    const token = await getServiceAuthToken();
+    const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/account`, {
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+    });
+    const json = await res.json();
+    console.error("[do] /v2/account:", JSON.stringify(json));
+    if (res.status >= 400) throw new Error(`DO /v2/account ${res.status}: ${JSON.stringify(json)}`);
+
+    let uuid = json.account.team.uuid;
+    // Handle custom/homelab did:plc as actx / team uuid
+    if (uuid.startsWith("did:plc:")) {
+      uuid = uuid.substring(8);
+    }
+    const result = { rbacRepoRoot: RBAC_REPO_ROOT, teamUuid: uuid };
+    console.error("[do] /v2/account fixedup:", JSON.stringify(result));
+    return result;
+  }
+
+  async function runProc(cmd: string[], cwd: string): Promise<{ code: number; stdout: Uint8Array; stderr: Uint8Array }> {
+    const proc = new Deno.Command(cmd[0], { args: cmd.slice(1), cwd, stdin: "null", stdout: "piped", stderr: "piped" });
+    const out = await proc.output();
+    if (out.code !== 0) {
+      console.error(`[exec] ${cmd.join(" ")} -> ${out.code}`);
+      console.error(`[exec] stdout: ${new TextDecoder().decode(out.stdout)}`);
+      console.error(`[exec] stderr: ${new TextDecoder().decode(out.stderr)}`);
+    }
+    return { code: out.code, stdout: out.stdout, stderr: out.stderr };
+  }
+
+  async function isDir(p: string): Promise<boolean> {
+    try { return (await Deno.stat(p)).isDirectory; } catch { return false; }
+  }
+
+  async function configureDropletRbac(doctx: DOContext, vm: VM, requesterDid: string): Promise<StrongRef> {
+    const requesterPlc = requesterDid.split(":").slice(-1)[0];
+    const slug = `${doctx.teamUuid}-${requesterPlc}-${vm.role}`;
+    const roleName = `ex-${slug}`;
+
+    const rbacRecord = {
+      $type: RBAC_NSID,
+      protects: {
+        [roleName]: {
+          service: `${DIGITALOCEAN_BASE_URL}`,
+          scope: 'droplets.wid',
+        }
+      },
+      roles: {
+        [roleName]: {
+          role_name: roleName,
+          definition: {
+            aud: `api://DigitalOcean?actx=${doctx.teamUuid}`,
+            sub: `actx:${doctx.teamUuid}:plc:${requesterPlc}:role:${vm.role}`,
+            policies: [roleName],
+          },
+        },
+      },
+      policies: {
+        [roleName]: {
+          meta: {
+            policy: roleName,
+          },
+          schemas: {
+            "/v1/oidc/issue": {
+              type: "object",
+              $schema: "http://json-schema.org/draft-07/schema#",
+              required: ["capability", "allowed_parameters"],
+              properties: {
+                capability: {
+                  enum: ["create"],
+                },
+                allowed_parameters: {
+                  type: "object",
+                  properties: {
+                    aud: { type: "string" },
+                    sub: {
+                      type: "string",
+                      const: `actx:${doctx.teamUuid}:plc:${requesterPlc}:role:${vm.role}`,
+                    },
+                    ttl: {
+                      type: "number",
+                      const: 3600,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      custom_claims_roles_index: {
+        job_workflow_ref: {},
+      },
+      createdAt: new Date().toISOString(),
+    };
+    console.error(`[com.fedproxy.rbac] creating`);
+    const rbacRef = await atprotoCreateRecord(RBAC_NSID, rbacRecord);
+    console.error(`[com.fedproxy.rbac] created`);
+
+    const rbac = doctx.rbacRepoRoot;
+    if (!(await isDir(`${rbac}/.git`))) {
+      await Deno.mkdir(rbac, { recursive: true });
+      const home = Deno.env.get("HOME") ?? "/root";
+      const credHelperDir = `${home}/.local/scripts`;
+      const credHelperPath = `${credHelperDir}/git-credential-rbac-digitalocean.sh`;
+      const credHelper = `#!/usr/bin/env bash
+
+TOKEN="${DO_TOKEN}"
+
+while IFS='=' read -r key value; do
+  if [[ -n "$key" && -n "$value" ]]; then
+    if [[ "$key" == "protocol" || "$key" == "host" ]]; then
+      echo "$key=$value"
+    fi
+  fi
+done
+
+echo "username=token"
+echo "password=\${TOKEN}"
+`;
+      await Deno.mkdir(credHelperDir, { recursive: true });
+      await Deno.writeTextFile(credHelperPath, credHelper);
+      await Deno.chmod(credHelperPath, 0o700);
+
+      const helperAbs = await Deno.realPath(credHelperPath);
+      const cmds: string[][] = [
+        ["git", "config", "--global", `credential.${DIGITALOCEAN_BASE_URL}/_rbac/DigitalOcean/.helper`, `!${helperAbs}`],
+        ["git", "init"],
+        ["git", "remote", "add", "origin", `${DIGITALOCEAN_BASE_URL}/_rbac/DigitalOcean/${doctx.teamUuid}`],
+        ["git", "pull", "origin", "main"],
+        ["git", "branch", "--set-upstream-to=origin/main"],
+      ];
+      for (const cmd of cmds) {
+        console.error(`[rbac] ${cmd.join(" ")}`);
+        const r = await runProc(cmd, rbac);
+        if (r.code !== 0) {
+          if (cmd[1] === "pull" && new TextDecoder().decode(r.stderr).includes("couldn't find remote ref main")) continue;
+          if (cmd[1] === "branch" && new TextDecoder().decode(r.stderr).includes("no commit on branch")) continue;
+          console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
+        }
+      }
+    }
+
+    const policyPath = `${rbac}/policies/ex-${slug}.hcl`;
+    const policyEx = `path "/v1/oidc/issue" {
+  capabilities = ["create"]
+  allowed_parameters = {
+    "aud" = "*"
+    "sub" = "actx:${doctx.teamUuid}:plc:${requesterPlc}:role:${vm.role}"
+    "ttl" = 3600
+  }
+}
+`;
+    const rolePath = `${rbac}/droplet-roles/ex-${slug}.hcl`;
+    const roleEx = `role "ex-${slug}" {
+  aud      = "api://DigitalOcean?actx=${doctx.teamUuid}"
+  sub      = "actx:${doctx.teamUuid}:plc:${requesterPlc}:role:${vm.role}"
+  policies = ["ex-${slug}"]
+}
+`;
+    await Deno.mkdir(`${rbac}/policies`, { recursive: true });
+    await Deno.mkdir(`${rbac}/droplet-roles`, { recursive: true });
+    await Deno.writeTextFile(policyPath, policyEx);
+    await Deno.writeTextFile(rolePath, roleEx);
+
+    const commitCmds: string[][] = [
+      ["git", "add", "-A"],
+      ["git", "commit", "-m", "feat: rbac for compute-contract"],
+      ["git", "push", "-u", "origin", "main"],
+    ];
+    for (const cmd of commitCmds) {
+      console.error(`[rbac] running ${cmd.join(" ")}`);
+      const r = await runProc(cmd, rbac);
+      if (r.code !== 0) {
+        if (cmd[1] === "commit" && new TextDecoder().decode(r.stdout).includes("nothing to commit")) continue;
+        console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
+      }
+      console.error(`[rbac] ran ${cmd.join(" ")} exited code (${r.code})`);
+    }
+
+    const schemaCmds: string[][] = [
+      ["git", "fetch", "--all"],
+      ["bash", "-xec", "git show origin/schema:rbac.json | yq -P"],
+    ];
+    for (const cmd of schemaCmds) {
+      const r = await runProc(cmd, rbac);
+      if (r.code !== 0) {
+        console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
+      }
+    }
+
+    return rbacRef;
+  }
+
+  // Deletes a com.fedproxy.rbac record previously minted for a droplet, e.g.
+  // when the droplet is torn down via a vm.delete event.
+  async function deleteRbacRecord(rbacRef: StrongRef, reason: string): Promise<void> {
+    const agent = getAgent();
+    const { repo, collection, rkey } = parseAtUri(rbacRef.uri);
+    log("info", "deleting rbac record", { uri: rbacRef.uri, cid: rbacRef.cid, repo, collection, rkey, agentDid: agent.assertDid, reason });
+    try {
+      const res = await agent.com.atproto.repo.deleteRecord({ repo, collection, rkey });
+      log("info", "rbac record deleted", { uri: rbacRef.uri, reason, status: res.success, headers: res.headers });
+    } catch (err) {
+      log("error", "failed to delete rbac record", {
+        uri: rbacRef.uri,
+        repo,
+        collection,
+        rkey,
+        reason,
+        err: String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
+    }
+  }
+
+  // Creates a separate com.fedproxy.rbac record for scope=account.auth.
+  // Protects /v2/account and /v2/droplets* using ATProto service auth tokens
+  // (com.atproto.server.getServiceAuth — iss=agentDid, validated via DID doc keys).
+  async function configureAccountAuthRbac(): Promise<void> {
+    const agentDid = getAgentDid();
+    const roleName = `account-auth-${agentDid.split(":").slice(-1)[0]}`;
+
+    const rbacRecord = {
+      $type: RBAC_NSID,
+      protects: {
+        [roleName]: {
+          service: `${DIGITALOCEAN_BASE_URL}`,
+          scope: "account.auth",
+        },
+      },
+      roles: {
+        // ATProto service auth: iss and sub are both the bidder's DID.
+        // getServiceAuth tokens have iss=agentDid, validated via DID document keys.
+        [roleName]: {
+          role_name: roleName,
+          definition: {
+            iss: agentDid,
+            sub: agentDid,
+            policies: [roleName],
+          },
+        },
+      },
+      policies: {
+        [roleName]: {
+          meta: { policy: roleName },
+          schemas: {
+            "/v2/account": {
+              type: "object",
+              properties: { capability: { enum: ["read"] } },
+            },
+            "/v2/droplets": {
+              type: "object",
+              properties: { capability: { enum: ["read", "create"] } },
+            },
+            "/v2/droplets/*": {
+              type: "object",
+              properties: { capability: { enum: ["read", "update", "delete"] } },
+            },
+          },
+        },
+      },
+      createdAt: new Date().toISOString(),
+    };
+
+    const agent = getAgent();
+    const listRes = await agent.com.atproto.repo.listRecords({
+      repo: agentDid,
+      collection: RBAC_NSID,
+      limit: 100,
+    });
+    const { createdAt: _createdAt, ...rbacRecordData } = rbacRecord;
+    const wanted = canonicalJson(rbacRecordData);
+    const existing = listRes.data.records.find((r) => {
+      const { createdAt: _existingCreatedAt, ...value } = r.value as Record<string, unknown>;
+      return canonicalJson(value) === wanted;
+    });
+    if (existing) {
+      console.error(`[com.fedproxy.rbac] account.auth record already exists (${existing.uri})`);
+      return;
+    }
+
+    console.error(`[com.fedproxy.rbac] creating account.auth record`);
+    await atprotoCreateRecord(RBAC_NSID, rbacRecord);
+    console.error(`[com.fedproxy.rbac] account.auth record created`);
+  }
+
+  function injectAcceptBundle(userData: string, bundle: Record<string, unknown>): string {
+    // deno-lint-ignore no-explicit-any
+    let obj: Record<string, any> = {};
+    try {
+      const parsed = userData ? yamlParse(userData.replace(/^#cloud-config\s*/i, "")) : null;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        obj = parsed as Record<string, unknown>;
+      }
+    } catch { /* fall through with empty obj */ }
+    const writeFiles = (obj.write_files ??= []) as unknown[];
+    writeFiles.push({
+      path: ACCEPT_PATH_VM,
+      owner: "root:root",
+      permissions: "0600",
+      content: JSON.stringify(bundle, null, 2),
+    });
+    const runcmd = (obj.runcmd ??= []) as unknown[];
+    const parent = ACCEPT_PATH_VM.split("/").slice(0, -1).join("/");
+    runcmd.unshift(["sh", "-c", `install -d -m 0700 -o root -g root ${parent}`]);
+    return "#cloud-config\n" + yamlStringify(obj, { lineWidth: 0 });
+  }
+
+  async function createDroplet(vm: VM, requesterDid: string): Promise<{ json: unknown; rbacRef: StrongRef }> {
+    const requesterPlc = requesterDid.split(":").slice(-1)[0];
+    const rfpRkey = (vm._uri ?? "").split("/")[4] ?? "unknown";
+    const name = `${requesterPlc}-${rfpRkey}-${vm._cid ?? ""}`;
+    const body = {
+      name,
+      region: "sfo3", // TODO pick based on vm.location
+      size: "s-1vcpu-512mb-10gb",
+      // Must match distro
+      image: "ubuntu",
+      user_data: vm.user_data,
+      with_droplet_agent: true,
+      tags: [`oidc-sub:plc:${requesterPlc}`, `oidc-sub:role:${vm.role}`],
+    };
+    console.error("[do] droplet request:", JSON.stringify(body));
+    const doctx = await makeDoctx();
+    const rbacRef = await configureDropletRbac(doctx, vm, requesterDid);
+    const token = await getServiceAuthToken();
+    const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/droplets`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json();
+    console.error("[do] /v2/droplets:", JSON.stringify(json));
+    if (res.status >= 400) throw new Error(`DO /v2/droplets ${res.status}: ${JSON.stringify(json)}`);
+    return { json, rbacRef };
+  }
+
+  async function deleteDroplet(dropletId: number | string, reason: string): Promise<void> {
+    log("info", "deleting droplet", { dropletId, reason });
+    const token = await getServiceAuthToken();
+    const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/droplets/${dropletId}`, {
+      method: "DELETE",
+      headers: { "Authorization": `Bearer ${token}` },
+    });
+    if (res.status >= 400 && res.status !== 404) {
+      const body = await res.text();
+      log("error", "DO delete droplet failed", { dropletId, status: res.status, body });
+      return;
+    }
+    log("info", "droplet deleted", { dropletId, reason });
+  }
+
+  return {
+    makeDoctx,
+    createDroplet,
+    deleteDroplet,
+    deleteRbacRecord,
+    configureAccountAuthRbac,
+    injectAcceptBundle,
+  };
+}

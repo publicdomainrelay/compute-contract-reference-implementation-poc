@@ -13,10 +13,6 @@
 
 import { Hono } from "npm:hono@^4.12.23";
 import type { ContentfulStatusCode } from "npm:hono@^4.12.23/utils/http-status";
-// x402 middleware (Hono variant per CDP docs).
-import { paymentMiddleware, x402ResourceServer } from "npm:@x402/hono";
-import { ExactEvmScheme } from "npm:@x402/evm/exact/server";
-import { HTTPFacilitatorClient } from "npm:@x402/core/server";
 import { Agent, CredentialSession } from "@atproto/api";
 import { IdResolver } from "@atproto/identity";
 import { getPdsEndpoint } from "@atproto/common-web";
@@ -29,6 +25,9 @@ import {
   type MarketClient,
   type MarketServerDeps,
 } from "../lib/market/mod.ts";
+import { createComputeEventDeleteHandler } from "../lib/compute/mod.ts";
+import { createComputeProviderDigitalOcean } from "./compute_provider_digitalocean.ts";
+import { setupX402, x402UrlTemplate } from "./bids_x402.ts";
 
 // ---------------------------------------------------------------------------
 // NSID constants (mirrors models/publicdomainrelay.py)
@@ -244,330 +243,6 @@ class HTTPError extends Error {
 // ATProto
 // ---------------------------------------------------------------------------
 
-async function atprotoCreateRecord(
-  agent: Agent,
-  collection: string,
-  record: Record<string, unknown>,
-): Promise<StrongRef> {
-  const res = await agent.com.atproto.repo.createRecord({
-    repo: agent.assertDid,
-    collection,
-    record,
-  });
-  return {
-    $type: "com.atproto.repo.strongRef",
-    uri: res.data.uri,
-    cid: res.data.cid,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// DigitalOcean + RBAC
-// ---------------------------------------------------------------------------
-
-type DOContext = { rbacRepoRoot: string; teamUuid: string };
-
-// Derive did:web: from the service base URL for use as getServiceAuth aud.
-function urlToDid(url: string): string {
-  const host = new URL(url).host;
-  return `did:web:${host}`;
-}
-
-// Get a short-lived ATProto service auth token targeting the DO/QEMU endpoint.
-// These are non-OIDC JWTs: signed by the PDS, iss=agentDid, validated via DID doc.
-async function getServiceAuthToken(): Promise<string> {
-  const aud = urlToDid(DIGITALOCEAN_BASE_URL);
-  // cannot request a method-less token with an expiration more than a minute in the futur
-  const exp = Math.floor(Date.now() / 1000) + 60; // 1 min
-  log("info", "calling getServiceAuth", { aud: aud, exp: exp });
-  const res = await agent.com.atproto.server.getServiceAuth({ aud, exp });
-  return res.data.token;
-}
-
-async function makeDoctx(): Promise<DOContext> {
-  const token = await getServiceAuthToken();
-  const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/account`, {
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-  });
-  const json = await res.json();
-  console.error("[do] /v2/account:", JSON.stringify(json));
-  if (res.status >= 400) throw new Error(`DO /v2/account ${res.status}: ${JSON.stringify(json)}`);
-
-  let uuid = json.account.team.uuid;
-  // Handle custom/homelab did:plc as actx / team uuid
-  if (uuid.startsWith("did:plc:")) {
-    uuid = uuid.substring(8);
-  }
-  const result = { rbacRepoRoot: RBAC_REPO_ROOT, teamUuid: uuid };
-  console.error("[do] /v2/account fixedup:", JSON.stringify(result));
-  return result;
-}
-
-async function runProc(cmd: string[], cwd: string): Promise<{ code: number; stdout: Uint8Array; stderr: Uint8Array }> {
-  const proc = new Deno.Command(cmd[0], { args: cmd.slice(1), cwd, stdin: "null", stdout: "piped", stderr: "piped" });
-  const out = await proc.output();
-  if (out.code !== 0) {
-    console.error(`[exec] ${cmd.join(" ")} -> ${out.code}`);
-    console.error(`[exec] stdout: ${new TextDecoder().decode(out.stdout)}`);
-    console.error(`[exec] stderr: ${new TextDecoder().decode(out.stderr)}`);
-  }
-  return { code: out.code, stdout: out.stdout, stderr: out.stderr };
-}
-
-async function isDir(p: string): Promise<boolean> {
-  try { return (await Deno.stat(p)).isDirectory; } catch { return false; }
-}
-
-async function configureDropletRbac(doctx: DOContext, vm: VM, requesterDid: string): Promise<StrongRef> {
-  const requesterPlc = requesterDid.split(":").slice(-1)[0];
-  const slug = `${doctx.teamUuid}-${requesterPlc}-${vm.role}`;
-  const roleName = `ex-${slug}`;
-
-  const rbacRecord = {
-    $type: RBAC_NSID,
-    protects: {
-      [roleName]: {
-        service: `${DIGITALOCEAN_BASE_URL}`,
-        scope: 'droplets.wid',
-      }
-    },
-    roles: {
-      [roleName]: {
-        role_name: roleName,
-        definition: {
-          aud: `api://DigitalOcean?actx=${doctx.teamUuid}`,
-          sub: `actx:${doctx.teamUuid}:plc:${requesterPlc}:role:${vm.role}`,
-          policies: [roleName],
-        },
-      },
-    },
-    policies: {
-      [roleName]: {
-        meta: {
-          policy: roleName,
-        },
-        schemas: {
-          "/v1/oidc/issue": {
-            type: "object",
-            $schema: "http://json-schema.org/draft-07/schema#",
-            required: ["capability", "allowed_parameters"],
-            properties: {
-              capability: {
-                enum: ["create"],
-              },
-              allowed_parameters: {
-                type: "object",
-                properties: {
-                  aud: { type: "string" },
-                  sub: {
-                    type: "string",
-                    const: `actx:${doctx.teamUuid}:plc:${requesterPlc}:role:${vm.role}`,
-                  },
-                  ttl: {
-                    type: "number",
-                    const: 3600,
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    },
-    custom_claims_roles_index: {
-      job_workflow_ref: {},
-    },
-    createdAt: new Date().toISOString(),
-  };
-  console.error(`[com.fedproxy.rbac] creating`);
-  const rbacRef = await atprotoCreateRecord(agent, RBAC_NSID, rbacRecord);
-  console.error(`[com.fedproxy.rbac] created`);
-
-  const rbac = doctx.rbacRepoRoot;
-  if (!(await isDir(`${rbac}/.git`))) {
-    await Deno.mkdir(rbac, { recursive: true });
-    const home = Deno.env.get("HOME") ?? "/root";
-    const credHelperDir = `${home}/.local/scripts`;
-    const credHelperPath = `${credHelperDir}/git-credential-rbac-digitalocean.sh`;
-    const credHelper = `#!/usr/bin/env bash
-
-TOKEN="${DO_TOKEN}"
-
-while IFS='=' read -r key value; do
-  if [[ -n "$key" && -n "$value" ]]; then
-    if [[ "$key" == "protocol" || "$key" == "host" ]]; then
-      echo "$key=$value"
-    fi
-  fi
-done
-
-echo "username=token"
-echo "password=\${TOKEN}"
-`;
-    await Deno.mkdir(credHelperDir, { recursive: true });
-    await Deno.writeTextFile(credHelperPath, credHelper);
-    await Deno.chmod(credHelperPath, 0o700);
-
-    const helperAbs = await Deno.realPath(credHelperPath);
-    const cmds: string[][] = [
-      ["git", "config", "--global", `credential.${DIGITALOCEAN_BASE_URL}/_rbac/DigitalOcean/.helper`, `!${helperAbs}`],
-      ["git", "init"],
-      ["git", "remote", "add", "origin", `${DIGITALOCEAN_BASE_URL}/_rbac/DigitalOcean/${doctx.teamUuid}`],
-      ["git", "pull", "origin", "main"],
-      ["git", "branch", "--set-upstream-to=origin/main"],
-    ];
-    for (const cmd of cmds) {
-      console.error(`[rbac] ${cmd.join(" ")}`);
-      const r = await runProc(cmd, rbac);
-      if (r.code !== 0) {
-        if (cmd[1] === "pull" && new TextDecoder().decode(r.stderr).includes("couldn't find remote ref main")) continue;
-        if (cmd[1] === "branch" && new TextDecoder().decode(r.stderr).includes("no commit on branch")) continue;
-        console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
-      }
-    }
-  }
-
-  const policyPath = `${rbac}/policies/ex-${slug}.hcl`;
-  const policyEx = `path "/v1/oidc/issue" {
-  capabilities = ["create"]
-  allowed_parameters = {
-    "aud" = "*"
-    "sub" = "actx:${doctx.teamUuid}:plc:${requesterPlc}:role:${vm.role}"
-    "ttl" = 3600
-  }
-}
-`;
-  const rolePath = `${rbac}/droplet-roles/ex-${slug}.hcl`;
-  const roleEx = `role "ex-${slug}" {
-  aud      = "api://DigitalOcean?actx=${doctx.teamUuid}"
-  sub      = "actx:${doctx.teamUuid}:plc:${requesterPlc}:role:${vm.role}"
-  policies = ["ex-${slug}"]
-}
-`;
-  await Deno.mkdir(`${rbac}/policies`, { recursive: true });
-  await Deno.mkdir(`${rbac}/droplet-roles`, { recursive: true });
-  await Deno.writeTextFile(policyPath, policyEx);
-  await Deno.writeTextFile(rolePath, roleEx);
-
-  const commitCmds: string[][] = [
-    ["git", "add", "-A"],
-    ["git", "commit", "-m", "feat: rbac for compute-contract"],
-    ["git", "push", "-u", "origin", "main"],
-  ];
-  for (const cmd of commitCmds) {
-    console.error(`[rbac] running ${cmd.join(" ")}`);
-    const r = await runProc(cmd, rbac);
-    if (r.code !== 0) {
-      if (cmd[1] === "commit" && new TextDecoder().decode(r.stdout).includes("nothing to commit")) continue;
-      console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
-    }
-    console.error(`[rbac] ran ${cmd.join(" ")} exited code (${r.code})`);
-  }
-
-  const schemaCmds: string[][] = [
-    ["git", "fetch", "--all"],
-    ["bash", "-xec", "git show origin/schema:rbac.json | yq -P"],
-  ];
-  for (const cmd of schemaCmds) {
-    const r = await runProc(cmd, rbac);
-    if (r.code !== 0) {
-      console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
-    }
-  }
-
-  return rbacRef;
-}
-
-// Deletes a com.fedproxy.rbac record previously minted for a droplet, e.g.
-// when the droplet is torn down via a vm.delete event.
-async function deleteRbacRecord(rbacRef: StrongRef, reason: string): Promise<void> {
-  const { repo, collection, rkey } = parseAtUri(rbacRef.uri);
-  log("info", "deleting rbac record", { uri: rbacRef.uri, cid: rbacRef.cid, repo, collection, rkey, agentDid: agent.assertDid, reason });
-  try {
-    const res = await agent.com.atproto.repo.deleteRecord({ repo, collection, rkey });
-    log("info", "rbac record deleted", { uri: rbacRef.uri, reason, status: res.success, headers: res.headers });
-  } catch (err) {
-    log("error", "failed to delete rbac record", {
-      uri: rbacRef.uri,
-      repo,
-      collection,
-      rkey,
-      reason,
-      err: String(err),
-      stack: err instanceof Error ? err.stack : undefined,
-    });
-  }
-}
-
-// Creates a separate com.fedproxy.rbac record for scope=account.auth.
-// Protects /v2/account and /v2/droplets* using ATProto service auth tokens
-// (com.atproto.server.getServiceAuth — iss=agentDid, validated via DID doc keys).
-async function configureAccountAuthRbac(): Promise<void> {
-  const roleName = `account-auth-${agentDid.split(":").slice(-1)[0]}`;
-
-  const rbacRecord = {
-    $type: RBAC_NSID,
-    protects: {
-      [roleName]: {
-        service: `${DIGITALOCEAN_BASE_URL}`,
-        scope: "account.auth",
-      },
-    },
-    roles: {
-      // ATProto service auth: iss and sub are both the bidder's DID.
-      // getServiceAuth tokens have iss=agentDid, validated via DID document keys.
-      [roleName]: {
-        role_name: roleName,
-        definition: {
-          iss: agentDid,
-          sub: agentDid,
-          policies: [roleName],
-        },
-      },
-    },
-    policies: {
-      [roleName]: {
-        meta: { policy: roleName },
-        schemas: {
-          "/v2/account": {
-            type: "object",
-            properties: { capability: { enum: ["read"] } },
-          },
-          "/v2/droplets": {
-            type: "object",
-            properties: { capability: { enum: ["read", "create"] } },
-          },
-          "/v2/droplets/*": {
-            type: "object",
-            properties: { capability: { enum: ["read", "update", "delete"] } },
-          },
-        },
-      },
-    },
-    createdAt: new Date().toISOString(),
-  };
-
-  const listRes = await agent.com.atproto.repo.listRecords({
-    repo: agentDid,
-    collection: RBAC_NSID,
-    limit: 100,
-  });
-  const { createdAt: _createdAt, ...rbacRecordData } = rbacRecord;
-  const wanted = canonicalJson(rbacRecordData);
-  const existing = listRes.data.records.find((r) => {
-    const { createdAt: _existingCreatedAt, ...value } = r.value as Record<string, unknown>;
-    return canonicalJson(value) === wanted;
-  });
-  if (existing) {
-    console.error(`[com.fedproxy.rbac] account.auth record already exists (${existing.uri})`);
-    return;
-  }
-
-  console.error(`[com.fedproxy.rbac] creating account.auth record`);
-  await atprotoCreateRecord(agent, RBAC_NSID, rbacRecord);
-  console.error(`[com.fedproxy.rbac] account.auth record created`);
-}
-
 // Ensure the bidder's own offering record exists for com.publicdomainrelay.temp.compute.vm.
 // If none found, create one pointing to BASE_URL.
 async function ensureOfferingRecord(): Promise<void> {
@@ -589,79 +264,22 @@ async function ensureOfferingRecord(): Promise<void> {
     log("warn", "BASE_URL not set, skipping offering record creation");
     return;
   }
-  const ref = await atprotoCreateRecord(agent, OFFERING_NSID, {
-    $type: OFFERING_NSID,
-    endpointUrl: `${bidderServiceDid()}#${MARKET_SERVICE_ID}`,
-    appliesTo: [VM_NSID],
-    createdAt: new Date().toISOString(),
+  const res = await agent.com.atproto.repo.createRecord({
+    repo: agent.assertDid,
+    collection: OFFERING_NSID,
+    record: {
+      $type: OFFERING_NSID,
+      endpointUrl: `${bidderServiceDid()}#${MARKET_SERVICE_ID}`,
+      appliesTo: [VM_NSID],
+      createdAt: new Date().toISOString(),
+    },
   });
-  log("info", "offering record created", { uri: ref.uri });
-}
-
-function injectAcceptBundle(userData: string, bundle: Record<string, unknown>): string {
-  // deno-lint-ignore no-explicit-any
-  let obj: Record<string, any> = {};
-  try {
-    const parsed = userData ? yamlParse(userData.replace(/^#cloud-config\s*/i, "")) : null;
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      obj = parsed as Record<string, unknown>;
-    }
-  } catch { /* fall through with empty obj */ }
-  const writeFiles = (obj.write_files ??= []) as unknown[];
-  writeFiles.push({
-    path: ACCEPT_PATH_VM,
-    owner: "root:root",
-    permissions: "0600",
-    content: JSON.stringify(bundle, null, 2),
-  });
-  const runcmd = (obj.runcmd ??= []) as unknown[];
-  const parent = ACCEPT_PATH_VM.split("/").slice(0, -1).join("/");
-  runcmd.unshift(["sh", "-c", `install -d -m 0700 -o root -g root ${parent}`]);
-  return "#cloud-config\n" + yamlStringify(obj, { lineWidth: 0 });
-}
-
-async function createDroplet(vm: VM, requesterDid: string): Promise<{ json: unknown; rbacRef: StrongRef }> {
-  const requesterPlc = requesterDid.split(":").slice(-1)[0];
-  const rfpRkey = (vm._uri ?? "").split("/")[4] ?? "unknown";
-  const name = `${requesterPlc}-${rfpRkey}-${vm._cid ?? ""}`;
-  const body = {
-    name,
-    region: "sfo3", // TODO pick based on vm.location
-    size: "s-1vcpu-512mb-10gb",
-    // Must match distro
-    image: "ubuntu",
-    user_data: vm.user_data,
-    with_droplet_agent: true,
-    tags: [`oidc-sub:plc:${requesterPlc}`, `oidc-sub:role:${vm.role}`],
+  const ref = {
+    $type: "com.atproto.repo.strongRef",
+    uri: res.data.uri,
+    cid: res.data.cid,
   };
-  console.error("[do] droplet request:", JSON.stringify(body));
-  const doctx = await makeDoctx();
-  const rbacRef = await configureDropletRbac(doctx, vm, requesterDid);
-  const token = await getServiceAuthToken();
-  const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/droplets`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-    body: JSON.stringify(body),
-  });
-  const json = await res.json();
-  console.error("[do] /v2/droplets:", JSON.stringify(json));
-  if (res.status >= 400) throw new Error(`DO /v2/droplets ${res.status}: ${JSON.stringify(json)}`);
-  return { json, rbacRef };
-}
-
-async function deleteDroplet(dropletId: number | string, reason: string): Promise<void> {
-  log("info", "deleting droplet", { dropletId, reason });
-  const token = await getServiceAuthToken();
-  const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/droplets/${dropletId}`, {
-    method: "DELETE",
-    headers: { "Authorization": `Bearer ${token}` },
-  });
-  if (res.status >= 400 && res.status !== 404) {
-    const body = await res.text();
-    log("error", "DO delete droplet failed", { dropletId, status: res.status, body });
-    return;
-  }
-  log("info", "droplet deleted", { dropletId, reason });
+  log("info", "offering record created", { ref });
 }
 
 // ---------------------------------------------------------------------------
@@ -681,6 +299,28 @@ const marketDeps: MarketServerDeps = {
   log,
 };
 
+// DigitalOcean provisioning + RBAC backend. Wrapped behind getters since
+// `agent`/`agentDid` are only assigned once loginAgent() resolves.
+const {
+  makeDoctx,
+  createDroplet,
+  deleteDroplet,
+  deleteRbacRecord,
+  configureAccountAuthRbac,
+  injectAcceptBundle,
+} = createComputeProviderDigitalOcean({
+  getAgent: () => agent,
+  getAgentDid: () => agentDid,
+  log,
+  rbacNsid: RBAC_NSID,
+  acceptPathVm: ACCEPT_PATH_VM,
+  digitaloceanBaseUrl: DIGITALOCEAN_BASE_URL,
+  doToken: DO_TOKEN,
+  rbacRepoRoot: RBAC_REPO_ROOT,
+  parseAtUri,
+  canonicalJson,
+});
+
 // README rendering — best effort, falls back to plain text.
 let readmeHtml = "<html><body><h1>compute-contract-provider-relay-digitalocean</h1></body></html>";
 async function loadReadme(): Promise<void> {
@@ -696,61 +336,23 @@ async function loadReadme(): Promise<void> {
 
 app.get("/", (c) => c.html(readmeHtml));
 
-// CDP facilitator with header auth (matches python create_headers).
-// CDP requires a JWT per request; for parity with python (which uses
-// cdp.auth.utils.jwt.generate_jwt). Minimal port: re-create JWT per call via
-// the helper exposed by @coinbase/x402 when available; otherwise consumers
-// can set X402_MAKE_FREE=1.
-function makeFacilitator() {
-  // Prefer CDP facilitator if API keys are set; mirrors python (which always
-  // points at api.cdp.coinbase.com with JWT headers).
-  const url = "https://api.cdp.coinbase.com/platform/v2/x402";
-  // The CDP auth provider is supplied via a field the published FacilitatorConfig
-  // type doesn't declare; cast so this stays runnable while @x402 types catch up.
-  return new HTTPFacilitatorClient({
-    url,
-    // CreateHeadersAuthProvider equivalent. The python uses generate_jwt per
-    // verify/settle/supported path; here we expose a callback that builds a
-    // bearer JWT for the given request. Implementation lives in @coinbase/x402
-    // if present; otherwise users can run with X402_MAKE_FREE=1 for local dev.
-    authProvider: cdpAuthProvider(CDP_API_KEY_ID, CDP_API_KEY_SECRET),
-    // deno-lint-ignore no-explicit-any
-  } as any);
-}
 
-function cdpAuthProvider(_keyId: string, _keySecret: string) {
-  // The @coinbase/x402 npm package exports `facilitator` with auth baked in.
-  // We re-import lazily to keep this file runnable with X402_MAKE_FREE=1
-  // even when the package isn't installed.
-  // deno-lint-ignore no-explicit-any
-  return async (_req: any) => ({}); // headers added by @coinbase/x402 when wired
-}
+// Configure x402 for payments (or X402_MAKE_FREE=1)
+setupX402(X402_MAKE_FREE, {
+  app,
+  getAgent: () => agent,
+  log,
+  baseUrl: BASE_URL,
+  payTo: PAY_TO,
+  cdpApiKeyId: CDP_API_KEY_ID,
+  cdpApiKeySecret: CDP_API_KEY_SECRET,
+  acceptsX402Nsid: ACCEPTS_X402_NSID,
+  receiptsX402Nsid: RECEIPTS_X402_NSID,
+  cidRe: CID_RE,
+  resolveAs,
+  httpError: HTTPError,
+});
 
-// The x402 receipt endpoint is the payment leg of the contract, distinct from
-// the submitAccept settlement leg. It gates GET /x402/receipt/* behind an x402
-// payment; on success the handler mints a receipts.x402 proof-of-payment record
-// (see below). Set X402_MAKE_FREE=1 to bypass payment for local dev.
-if (!X402_MAKE_FREE) {
-  const facilitatorClient = makeFacilitator();
-  const server = new x402ResourceServer(facilitatorClient).register(
-    "eip155:8453",
-    new ExactEvmScheme(),
-  );
-  app.use(
-    paymentMiddleware(
-      {
-        "GET /x402/receipt/*": {
-          accepts: [
-            { scheme: "exact", price: "$1.00", network: "eip155:8453", payTo: PAY_TO },
-          ],
-          description: "Pay for compute contract",
-          mimeType: "application/json",
-        },
-      },
-      server,
-    ),
-  );
-}
 
 // did:web document exposing the `pdr_temp_market` and `pdr_temp_compute_event` service
 // entries. The bidder only RECEIVES service-auth tokens (no signing key needed).
@@ -774,49 +376,6 @@ app.onError((err, c) => {
   }
   console.error("[err]", (err as Error).stack ?? err);
   return c.json({ error: "internal", detail: (err as Error).message }, 500);
-});
-
-// ---------------------------------------------------------------------------
-// GET /x402/receipt/<accepts.x402-at-uri>/<cid>
-//
-// Payment leg of the contract (x402 payment-gated by the middleware above).
-// The requester mints a com.publicdomainrelay.temp.market.accepts.x402 record
-// accepting a bid's payment terms, then GETs this endpoint with that record's
-// AT-URI + CID. Once payment clears we mint a receipts.x402 proof-of-payment
-// record and hand back its strongRef; the requester uses it as the payload of
-// the higher-level market.accept, which submitAccept later verifies before
-// provisioning. This endpoint does NOT provision compute — that is submitAccept.
-// ---------------------------------------------------------------------------
-
-app.get("/x402/receipt/*", async (c) => {
-  let path = c.req.path.replace(/^\/+/, "");
-  if (path.startsWith("x402/receipt/")) path = path.slice("x402/receipt/".length);
-  if (!path.includes("/")) throw new HTTPError(400, "missing cid");
-  const lastSlash = path.lastIndexOf("/");
-  const acceptsCid = path.slice(lastSlash + 1);
-  const acceptsUri = path.slice(0, lastSlash);
-  if (!CID_RE.test(acceptsCid)) throw new HTTPError(400, "invalid cid");
-
-  log("info", "x402 receipt requested", { acceptsUri, acceptsCid });
-
-  const acceptsX402 = await resolveAs<AcceptsX402 & { $type?: string }>(acceptsUri, acceptsCid);
-  if (acceptsX402.$type && acceptsX402.$type !== ACCEPTS_X402_NSID) {
-    throw new HTTPError(400, `expected ${ACCEPTS_X402_NSID}, got ${acceptsX402.$type}`);
-  }
-
-  // Payment has cleared (middleware) — mint a proof-of-payment receipt that
-  // points back at the accepts.x402 the requester paid against.
-  const res = await agent.com.atproto.repo.createRecord({
-    repo: agent.assertDid,
-    collection: RECEIPTS_X402_NSID,
-    record: {
-      $type: RECEIPTS_X402_NSID,
-      accept: { $type: "com.atproto.repo.strongRef", uri: acceptsUri, cid: acceptsCid },
-      createdAt: new Date().toISOString(),
-    },
-  });
-  log("info", "receipts.x402 minted", { uri: res.data.uri, cid: res.data.cid, acceptsUri });
-  return c.json({ uri: res.data.uri, cid: res.data.cid });
 });
 
 // ---------------------------------------------------------------------------
@@ -1034,15 +593,9 @@ async function createAndSubmitBid(
   };
 }
 
-// Build the x402 payment URL the bid advertises in its bids.x402 payload.
-// Prefer the configured BASE_URL; fall back to the incoming request origin.
-function x402UrlTemplate(reqUrl: string): string {
-  const base = BASE_URL || new URL(reqUrl).origin;
-  return `${base.replace(/\/+$/, "")}/x402/receipt`;
-}
-
 // ---------------------------------------------------------------------------
 // POST /hook/rfp  (firehose-style webhook envelope)
+// https://airglow.run/dashboard/automations/3mm66tgw5fs22
 // ---------------------------------------------------------------------------
 
 type WebhookPayload = {
@@ -1073,7 +626,7 @@ app.post("/hook/rfp", async (c) => {
   const rfpRecord = await resolveAs<RFP>(rfpAtUri, rfpCid);
 
   const { configUri, configCid, payloadUri, payloadCid, bidUri, bidCid } =
-    await createAndSubmitBid(rfpAtUri, rfpCid, rfpRecord, x402UrlTemplate(c.req.url));
+    await createAndSubmitBid(rfpAtUri, rfpCid, rfpRecord, x402UrlTemplate(BASE_URL, c.req.url));
 
   return c.json({
     success: true,
@@ -1110,7 +663,7 @@ const marketSubmitRfp = createSubmitRfpHandler({
     const { repo: rfpOwnerDid } = parseAtUri(rfpUri);
 
     const { bidUri, bidCid } =
-      await createAndSubmitBid(rfpUri, rfpCid, rfp, x402UrlTemplate(req.url));
+      await createAndSubmitBid(rfpUri, rfpCid, rfp, x402UrlTemplate(BASE_URL, req.url));
 
     log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
 
@@ -1132,11 +685,6 @@ app.post("/xrpc/com.publicdomainrelay.temp.market.submitRfp", (c) => marketSubmi
 // and tear down the matching droplet.
 // ---------------------------------------------------------------------------
 
-// Auth + event resolution + dispatch are handled by ../lib/market's
-// createSubmitEventHandler: it verifies the service-auth token, requires the
-// issuer to author the event record, resolves the event, and routes it to
-// callbacks[serviceId][payloadNsid]. Our only callback handles the
-// compute.events.vm.delete payload, keyed under the compute-event service id.
 const marketSubmitEvent = createSubmitEventHandler({
   deps: marketDeps,
   // Reached via the requester's accept/receipt submitEvent ref
@@ -1146,58 +694,43 @@ const marketSubmitEvent = createSubmitEventHandler({
   // below surface in the HTTP response, matching the previous behavior.
   callbacks: {
     [COMPUTE_EVENT_SERVICE_ID]: {
-      [VM_DELETE_EVENT_NSID]: async ({ event, issuerDid, resolve, log }) => {
-        const receiptKey = `${event.receipt.uri}#${event.receipt.cid}`;
-        log("info", "submitEvent: resolved receiptKey", {
-          receiptKey,
-          knownDropletReceiptKeys: [...receiptDroplets.keys()],
-          knownRbacReceiptKeys: [...receiptRbacRecords.keys()],
-        });
-        const dropletId = receiptDroplets.get(receiptKey);
-        if (dropletId === undefined) {
-          log("warn", "submitEvent: no droplet tracked for receipt", { receiptKey, receipt: event.receipt });
-          return { status: 400, body: { error: "InvalidRequest", message: "unknown receipt" } };
-        }
-
-        // We were dispatched here precisely because the payload NSID is
-        // VM_DELETE_EVENT_NSID; resolve the payload for its `reason` field.
-        const payload = await resolve.resolve<Record<string, unknown>>(event.payload);
-
-        // Only the DID that issued the market.accept settling this contract may tear
-        // down the droplet. The token issuer is already verified to author the event
-        // record (by the library); here we additionally require it to be that
-        // accept's author, so a third party who authors their own vm.delete event
-        // cannot delete a droplet they didn't pay for.
-        const acceptAuthor = receiptAcceptAuthors.get(receiptKey);
-        if (acceptAuthor === undefined) {
-          log("warn", "submitEvent: no accept author tracked for receipt, refusing delete", { receiptKey });
-          return { status: 403, body: { error: "Forbidden", message: "no accept author recorded for receipt" } };
-        }
-        if (issuerDid !== acceptAuthor) {
-          log("warn", "submitEvent rejected: token issuer is not the market.accept author", { iss: issuerDid, acceptAuthor, receiptKey });
-          return { status: 403, body: { error: "Forbidden", message: "only the market.accept issuer may delete the droplet" } };
-        }
-
-        const deleteEvent = payload as unknown as VMDeleteEvent;
-        const reason = deleteEvent.reason ?? "vm.delete event received";
-        await deleteDroplet(dropletId, reason);
-        receiptDroplets.delete(receiptKey);
-        receiptAcceptAuthors.delete(receiptKey);
-
-        const rbacRef = receiptRbacRecords.get(receiptKey);
-        if (rbacRef) {
-          log("info", "submitEvent: rbac record found for receipt, deleting", { receiptKey, rbacUri: rbacRef.uri, rbacCid: rbacRef.cid });
-          await deleteRbacRecord(rbacRef, reason);
-          receiptRbacRecords.delete(receiptKey);
-        } else {
-          log("warn", "submitEvent: no rbac record tracked for receipt, skipping cleanup", {
+      [VM_DELETE_EVENT_NSID]: createComputeEventDeleteHandler({
+        assertRunningCompute: ({ event, log }) => {
+          const receiptKey = `${event.receipt.uri}#${event.receipt.cid}`;
+          log("info", "submitEvent: resolved receiptKey", {
             receiptKey,
-            receiptRbacRecordsSize: receiptRbacRecords.size,
+            knownDropletReceiptKeys: [...receiptDroplets.keys()],
             knownRbacReceiptKeys: [...receiptRbacRecords.keys()],
           });
-        }
-        return { body: { ok: true } };
-      },
+          const dropletId = receiptDroplets.get(receiptKey);
+          if (dropletId === undefined) {
+            log("warn", "submitEvent: no droplet tracked for receipt", { receiptKey, receipt: event.receipt });
+            return { status: 400, body: { error: "InvalidRequest", message: "unknown receipt" } };
+          }
+        },
+        deleteRunningCompute: async ({ event, log, deleteEvent }) => {
+          const receiptKey = `${event.receipt.uri}#${event.receipt.cid}`;
+          const reason = deleteEvent.reason ?? "vm.delete event received";
+          const dropletId = receiptDroplets.get(receiptKey)!;
+          await deleteDroplet(dropletId, reason);
+          receiptDroplets.delete(receiptKey);
+          receiptAcceptAuthors.delete(receiptKey);
+
+          const rbacRef = receiptRbacRecords.get(receiptKey);
+          if (rbacRef) {
+            log("info", "submitEvent: rbac record found for receipt, deleting", { receiptKey, rbacUri: rbacRef.uri, rbacCid: rbacRef.cid });
+            await deleteRbacRecord(rbacRef, reason);
+            receiptRbacRecords.delete(receiptKey);
+          } else {
+            log("warn", "submitEvent: no rbac record tracked for receipt, skipping cleanup", {
+              receiptKey,
+              receiptRbacRecordsSize: receiptRbacRecords.size,
+              knownRbacReceiptKeys: [...receiptRbacRecords.keys()],
+            });
+          }
+          return { body: { ok: true } };
+        },
+      }),
     },
   },
 });
