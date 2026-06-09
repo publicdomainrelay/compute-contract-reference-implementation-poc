@@ -168,12 +168,30 @@ async function ensureOfferingRecord(): Promise<void> {
     const appliesTo = value.appliesTo as string[] | undefined;
     return Array.isArray(appliesTo) && appliesTo.includes(VM_NSID);
   });
-  if (existing) {
-    log("info", "offering record exists", { uri: existing.uri });
-    return;
-  }
   if (!BASE_URL) {
     log("warn", "BASE_URL not set, skipping offering record creation");
+    return;
+  }
+  const expectedEndpoint = `${ownServiceDidWeb(BASE_URL)}#${MARKET_SERVICE_ID}`;
+  if (existing) {
+    const existingEndpoint = (existing.value as Record<string, unknown>).endpointUrl as string | undefined;
+    if (existingEndpoint === expectedEndpoint) {
+      log("info", "offering record exists", { uri: existing.uri });
+      return;
+    }
+    // endpointUrl is stale (e.g. old service ID); update in place.
+    const rkey = existing.uri.split("/").pop()!;
+    await agent.com.atproto.repo.putRecord({
+      repo: agent.assertDid,
+      collection: OFFERING_NSID,
+      rkey,
+      record: {
+        ...(existing.value as Record<string, unknown>),
+        $type: OFFERING_NSID,
+        endpointUrl: expectedEndpoint,
+      },
+    });
+    log("info", "offering record updated", { uri: existing.uri, endpointUrl: expectedEndpoint });
     return;
   }
   const res = await agent.com.atproto.repo.createRecord({
@@ -181,7 +199,7 @@ async function ensureOfferingRecord(): Promise<void> {
     collection: OFFERING_NSID,
     record: {
       $type: OFFERING_NSID,
-      endpointUrl: `${ownServiceDidWeb(BASE_URL)}#${MARKET_SERVICE_ID}`,
+      endpointUrl: expectedEndpoint,
       appliesTo: [VM_NSID],
       createdAt: new Date().toISOString(),
     },
