@@ -52,6 +52,7 @@ import {
   type Bid,
 } from "../lib/market/mod.ts";
 import { BIDS_X402_NSID, settleX402Payment } from "../lib/market-x402/mod.ts";
+import { BIDS_FREE_NSID } from "../lib/market-free/mod.ts";
 import {
   COMPUTE_EVENTS_VM_DELETE_NSID,
   COMPUTE_VM_NSID,
@@ -561,14 +562,11 @@ async function resolveBidPayloads(bids: CollectedBid[], log: RFPLogger): Promise
 // ---------------------------------------------------------------------------
 
 function scoreLowestCost(bids: CollectedBid[]): CollectedBid | undefined {
-  const x402Bids = bids.filter((b) => b.payload?.$type === BIDS_X402_NSID);
-  if (x402Bids.length === 0) return bids[0];
-
-  return x402Bids.reduce((best, b) => {
-    const bCost = Number(b.payload?.cost ?? Infinity);
-    const bestCost = Number(best.payload?.cost ?? Infinity);
+  return bids.reduce((best, b) => {
+    const bCost = b.payload?.$type === BIDS_FREE_NSID ? 0 : Number(b.payload?.cost ?? Infinity);
+    const bestCost = best.payload?.$type === BIDS_FREE_NSID ? 0 : Number(best.payload?.cost ?? Infinity);
     return bCost < bestCost ? b : best;
-  }, x402Bids[0]);
+  }, bids[0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -769,37 +767,37 @@ export async function marketRFPSubmitWorkflow(
     cid: winner.cid,
   };
 
-  // Payment leg: settle the bid's x402 payment terms before accepting. We mint
-  // an accepts.x402 accepting the bid's payment terms, GET the bidder's x402
-  // payment endpoint (bids.x402.url) with that record's AT-URI + CID, and the
-  // bidder responds (after payment clears) with a receipts.x402 proof-of-payment
-  // strongRef. That proof becomes the payload of the market.accept below, which
-  // the bidder verifies in submitAccept before provisioning.
-  // Payment settlement is the x402 leg of the protocol; ../lib/market-x402 mints
-  // the accepts.x402, GETs the bidder's payment endpoint, and returns the
-  // receipts.x402 proof-of-payment strongRef we use as the market.accept payload.
+  // Payment leg: settle the bid's payment terms before accepting.
+  // - x402 bids: mint accepts.x402, GET the payment endpoint, get back a
+  //   receipts.x402 proof-of-payment strongRef used as market.accept payload.
+  // - free bids: no payment, no receipt endpoint — payload is omitted.
   const bidPayload = winner.payload;
-  const x402Url = String(bidPayload?.url ?? "");
-  if (!x402Url) {
-    throw new Error(`winning bid ${winner.uri} has no x402 payment url; cannot settle`);
+  let paymentReceiptRef: StrongRef | undefined;
+  if (bidPayload?.$type === BIDS_X402_NSID) {
+    const x402Url = String(bidPayload?.url ?? "");
+    if (!x402Url) {
+      throw new Error(`winning bid ${winner.uri} has no x402 payment url; cannot settle`);
+    }
+    paymentReceiptRef = await settleX402Payment({
+      agent,
+      bid: bidRef,
+      bidPayload: winner.record.payload,
+      url: x402Url,
+      egress: { blockPrivate: !!Deno.env.get("MARKET_BLOCK_PRIVATE_EGRESS") },
+      log: (_level, msg, fields) => log(msg, fields),
+    });
+  } else if (bidPayload?.$type !== BIDS_FREE_NSID) {
+    throw new Error(`winning bid ${winner.uri} has unknown payload type ${bidPayload?.$type}; cannot settle`);
   }
-  const paymentReceiptRef: StrongRef = await settleX402Payment({
-    agent,
-    bid: bidRef,
-    bidPayload: winner.record.payload,
-    url: x402Url,
-    egress: { blockPrivate: !!Deno.env.get("MARKET_BLOCK_PRIVATE_EGRESS") },
-    log: (_level, msg, fields) => log(msg, fields),
-  });
 
-  // Accept the winning bid. payload carries the receipts.x402 proof-of-payment;
-  // submitEvent tells the bidder where it can report events about the resource
-  // it provisions directly, bypassing the firehose — mirrors rfp.submitBid.
+  // Accept the winning bid. payload carries the proof-of-payment (x402) or is
+  // omitted (free). submitEvent tells the bidder where it can report events
+  // about the resource it provisions directly, bypassing the firehose.
   const acceptRecord: Record<string, unknown> = {
     $type: ACCEPT_NSID,
     rfp: rfpRef,
     bid: bidRef,
-    payload: paymentReceiptRef,
+    ...(paymentReceiptRef ? { payload: paymentReceiptRef } : {}),
     createdAt: new Date().toISOString(),
   };
   if (spindleHostname) {
