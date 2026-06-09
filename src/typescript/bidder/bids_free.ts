@@ -1,6 +1,5 @@
-import type { Hono } from "hono";
-import { createRecord, type StrongRef } from "../lib/market/mod.ts";
-import { BIDS_FREE_NSID } from "../lib/market-free/mod.ts";
+import { createRecord, type StrongRef } from "@publicdomainrelay/market";
+import { BIDS_FREE_NSID } from "@publicdomainrelay/market-free";
 import { type Settlement, type SettlementCtx } from "./settlement.ts";
 
 /** Free settlement — no payment, no receipt endpoint, just mint the bid record. */
@@ -23,8 +22,6 @@ export function createFreeSettlement(ctx: SettlementCtx): Settlement {
       // Free bids have no receipt to verify.
     },
 
-    mount: (_app: Hono) => {
-      // No receipt endpoint needed for free bids.
-    },
+    bidsFactoryOptions: () => ({}),
   };
 }

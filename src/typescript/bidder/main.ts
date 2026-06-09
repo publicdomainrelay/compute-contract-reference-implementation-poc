@@ -17,11 +17,8 @@
 // $ RBAC_REPO_ROOT="${HOME}/src/rbac/homelab/wid-atp" SETTLEMENT=free DIGITALOCEAN_BASE_URL=https://homelab.johnandersen777.bsky.social.fedproxy.com deno run --allow-all --watch main.ts
 
 import { Hono } from "hono";
-import { HTTPError, registerErrorMiddleware } from "../lib/deno-hono-helpers/mod.ts";
+import { HTTPError, registerErrorMiddleware } from "@publicdomainrelay/deno-hono-helpers";
 import {
-  createSubmitAcceptHandler,
-  createSubmitEventHandler,
-  createSubmitRfpHandler,
   type MarketServerDeps,
   type Bid,
   type LogLevel,
@@ -34,17 +31,15 @@ import {
   DEFAULT_MARKET_SERVICE_ID,
   OFFERING_NSID,
   RECEIPT_NSID,
-  SUBMIT_ACCEPT_NSID,
-  SUBMIT_EVENT_NSID,
-  SUBMIT_RFP_NSID,
-} from "../lib/market/mod.ts";
-import { createComputeEventDeleteHandler } from "../lib/compute/mod.ts";
+} from "@publicdomainrelay/market";
+import { createMarketFactory } from "@publicdomainrelay/hono-factory-market";
+import { createMarketBidsFactory } from "@publicdomainrelay/hono-factory-market-bids";
+import { createComputeFactory } from "@publicdomainrelay/hono-factory-compute";
 import {
   type ComputeConfigWifSimple,
   type ComputeVM,
-  COMPUTE_EVENTS_VM_DELETE_NSID,
   COMPUTE_VM_NSID,
-} from "../lib/lexicons/mod.ts";
+} from "@publicdomainrelay/lexicons";
 import {
   agent,
   agentDid,
@@ -54,8 +49,8 @@ import {
   ownServiceDidWeb,
   parseAtUri,
   resolveAs,
-} from "../lib/atproto-helpers/mod.ts";
-import { createComputeProviderDigitalOcean } from "../lib/compute-provider-digitalocean/mod.ts";
+} from "@publicdomainrelay/atproto-helpers";
+import { createComputeProviderDigitalOcean } from "@publicdomainrelay/compute-provider-digitalocean";
 import { reqEnv, optUrl } from "./env.ts";
 import { createFreeSettlement } from "./bids_free.ts";
 import { createX402Settlement } from "./bids_x402.ts";
@@ -67,7 +62,6 @@ import { type SettlementCtx, settlementModeFromEnv } from "./settlement.ts";
 // ---------------------------------------------------------------------------
 
 const VM_NSID = COMPUTE_VM_NSID;
-const VM_DELETE_EVENT_NSID = COMPUTE_EVENTS_VM_DELETE_NSID;
 const MARKET_SERVICE_ID = DEFAULT_MARKET_SERVICE_ID;
 const COMPUTE_EVENT_SERVICE_ID = DEFAULT_COMPUTE_EVENT_SERVICE_ID;
 
@@ -232,19 +226,25 @@ const {
 });
 
 // ---------------------------------------------------------------------------
-// POST /xrpc/com.publicdomainrelay.temp.market.submitAccept  { acceptUri, acceptCid }
-//
-// Settles the contract: verifies the accept payload (the receipt our settlement
-// layer issued), resolves accept->bid->rfp->vm, provisions the droplet, mints a
-// market.receipt, and returns a strongRef to it plus the submitEvent service ref.
-// Auth (service-auth verification + "token issuer must author the accept
-// record") and accept resolution are handled by ../lib/market.
+// Hono factories — market (submitRfp + submitAccept), market-bids (receipt
+// endpoints), compute (submitEvent / vm.delete). Each produces a sub-app
+// that makeApp mounts via app.route('/').
 // ---------------------------------------------------------------------------
 
-const marketSubmitAccept = createSubmitAcceptHandler({
-  deps: marketDeps,
-  serviceIds: [MARKET_SERVICE_ID],
-  onAccept: async ({ acceptUri, acceptCid, accept }) => {
+const marketFactory = createMarketFactory(marketDeps, {
+  rfp: {
+    [MARKET_SERVICE_ID]: {
+      [VM_NSID]: async ({ rfpUri, rfpCid, rfp, req }) => {
+        const { repo: rfpOwnerDid } = parseAtUri(rfpUri);
+        const { bidUri, bidCid } = await createAndSubmitBid(rfpUri, rfpCid, rfp, settlement.receiptUrl(req.url));
+        log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
+        return { body: { ok: true, bidUri, bidCid } };
+      },
+    },
+  },
+  accept: {
+    serviceIds: [MARKET_SERVICE_ID],
+    onAccept: async ({ acceptUri, acceptCid, accept }) => {
     log("info", "settling accept", { accept: accept._uri });
     const bid = await resolveAs<Bid>(accept.bid.uri, accept.bid.cid);
 
@@ -334,11 +334,12 @@ const marketSubmitAccept = createSubmitAcceptHandler({
     }
 
     return { body: { id, uri: res.data.uri, cid: res.data.cid, submitEvent: submitEventUrl } };
+    },
   },
 });
 
 // ---------------------------------------------------------------------------
-// Bid creation, driven by /xrpc/…submitRfp.
+// Bid creation, driven by the submitRfp rfp callback above.
 // ---------------------------------------------------------------------------
 
 async function createAndSubmitBid(
@@ -389,53 +390,39 @@ async function createAndSubmitBid(
   return { bidUri: bidRecord.data.uri, bidCid: bidRecord.data.cid };
 }
 
-const marketSubmitRfp = createSubmitRfpHandler({
+// Compute factory — submitEvent pre-wired for vm.delete dispatch.
+// Synchronous (not background) so "unknown receipt"/auth errors surface in the response.
+const computeFactory = createComputeFactory({
   deps: marketDeps,
-  callbacks: {
-    [MARKET_SERVICE_ID]: {
-      [VM_NSID]: async ({ rfpUri, rfpCid, rfp, req }) => {
-        const { repo: rfpOwnerDid } = parseAtUri(rfpUri);
-        const { bidUri, bidCid } = await createAndSubmitBid(rfpUri, rfpCid, rfp, settlement.receiptUrl(req.url));
-        log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
-        return { body: { ok: true, bidUri, bidCid } };
-      },
+  serviceId: COMPUTE_EVENT_SERVICE_ID,
+  vmDelete: {
+    assertRunningCompute: ({ event, log }) => {
+      const receiptKey = `${event.receipt.uri}#${event.receipt.cid}`;
+      log("info", "submitEvent: resolved receiptKey", {
+        receiptKey,
+        knownReceiptKeys: [...activeContracts.keys()],
+      });
+      if (!activeContracts.has(receiptKey)) {
+        log("warn", "submitEvent: no active contract for receipt", { receiptKey, receipt: event.receipt });
+        return { status: 400, body: { error: "InvalidRequest", message: "unknown receipt" } };
+      }
+    },
+    deleteRunningCompute: async ({ event, log, deleteEvent }) => {
+      const receiptKey = `${event.receipt.uri}#${event.receipt.cid}`;
+      const reason = deleteEvent.reason ?? "vm.delete event received";
+      const contract = activeContracts.get(receiptKey)!;
+      await deleteDroplet(contract.dropletId, reason);
+      log("info", "submitEvent: deleting rbac record for receipt", { receiptKey, rbacUri: contract.rbacRef.uri });
+      await deleteRbacRecord(contract.rbacRef, reason);
+      activeContracts.delete(receiptKey);
+      return { body: { ok: true } };
     },
   },
 });
 
-const marketSubmitEvent = createSubmitEventHandler({
-  deps: marketDeps,
-  // Reached via the requester's accept/receipt submitEvent ref
-  // (did:web:HOST#pdr_temp_compute_event). Synchronous (not background) so the
-  // "unknown receipt"/authorization errors surface in the HTTP response.
-  callbacks: {
-    [COMPUTE_EVENT_SERVICE_ID]: {
-      [VM_DELETE_EVENT_NSID]: createComputeEventDeleteHandler({
-        assertRunningCompute: ({ event, log }) => {
-          const receiptKey = `${event.receipt.uri}#${event.receipt.cid}`;
-          log("info", "submitEvent: resolved receiptKey", {
-            receiptKey,
-            knownReceiptKeys: [...activeContracts.keys()],
-          });
-          if (!activeContracts.has(receiptKey)) {
-            log("warn", "submitEvent: no active contract for receipt", { receiptKey, receipt: event.receipt });
-            return { status: 400, body: { error: "InvalidRequest", message: "unknown receipt" } };
-          }
-        },
-        deleteRunningCompute: async ({ event, log, deleteEvent }) => {
-          const receiptKey = `${event.receipt.uri}#${event.receipt.cid}`;
-          const reason = deleteEvent.reason ?? "vm.delete event received";
-          const contract = activeContracts.get(receiptKey)!;
-          await deleteDroplet(contract.dropletId, reason);
-          log("info", "submitEvent: deleting rbac record for receipt", { receiptKey, rbacUri: contract.rbacRef.uri });
-          await deleteRbacRecord(contract.rbacRef, reason);
-          activeContracts.delete(receiptKey);
-          return { body: { ok: true } };
-        },
-      }),
-    },
-  },
-});
+// Market-bids factory — receipt endpoints (free grant or x402 payment).
+// Mode is chosen once at startup by settlement; the rest of the app is agnostic.
+const bidsFactory = createMarketBidsFactory(settlement.bidsFactoryOptions());
 
 // ---------------------------------------------------------------------------
 // hono app
@@ -463,11 +450,10 @@ const makeApp = () => {
     });
   });
 
-  // Market flow + the settlement receipt endpoint (x402 paid, or free open).
-  app.post(`/xrpc/${SUBMIT_RFP_NSID}`, (c) => marketSubmitRfp(c.req.raw));
-  settlement.mount(app);
-  app.post(`/xrpc/${SUBMIT_ACCEPT_NSID}`, (c) => marketSubmitAccept(c.req.raw));
-  app.post(`/xrpc/${SUBMIT_EVENT_NSID}`, (c) => marketSubmitEvent(c.req.raw));
+  // Market XRPC procedures, bid receipt endpoints, and compute event dispatch.
+  app.route("/", marketFactory.createApp());
+  app.route("/", bidsFactory.createApp());
+  app.route("/", computeFactory.createApp());
 
   return app;
 };

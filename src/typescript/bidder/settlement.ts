@@ -11,8 +11,8 @@
 // on the mode again.
 
 import type { Agent } from "@atproto/api";
-import type { Hono } from "hono";
-import type { Logger, RecordResolver, StrongRef } from "../lib/market/mod.ts";
+import type { Logger, RecordResolver, StrongRef } from "@publicdomainrelay/market";
+import type { MarketBidsFactoryOptions } from "@publicdomainrelay/hono-factory-market-bids";
 
 /** Cross-cutting deps every settlement implementation is built from. */
 export interface SettlementCtx {
@@ -39,8 +39,8 @@ export interface Settlement {
   receiptUrl(reqUrl: string): string;
   /** Mint the bid payload record (bids.x402 / bids.free) advertising `receiptUrl`. */
   createBidPayload(receiptUrl: string, nowIso: string): Promise<StrongRef>;
-  /** Mount the receipt GET endpoint (and any payment gating) onto the app. */
-  mount(app: Hono): void;
+  /** Options to pass to createMarketBidsFactory() to mount receipt endpoints. */
+  bidsFactoryOptions(): MarketBidsFactoryOptions;
   /**
    * Verify a market.accept's payload is a receipt this bidder issued, before
    * provisioning. Throws (with an HTTP `status`) on any failure.

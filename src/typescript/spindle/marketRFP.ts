@@ -50,13 +50,13 @@ import {
   RECEIPT_NSID,
   RFP_NSID,
   type Bid,
-} from "../lib/market/mod.ts";
-import { BIDS_X402_NSID, settleX402Payment } from "../lib/market-x402/mod.ts";
-import { BIDS_FREE_NSID } from "../lib/market-free/mod.ts";
+} from "@publicdomainrelay/market";
+import { BIDS_X402_NSID, settleX402Payment } from "@publicdomainrelay/market-x402";
+import { BIDS_FREE_NSID } from "@publicdomainrelay/market-free";
 import {
   COMPUTE_EVENTS_VM_DELETE_NSID,
   COMPUTE_VM_NSID,
-} from "../lib/lexicons/mod.ts";
+} from "@publicdomainrelay/lexicons";
 
 // ---------------------------------------------------------------------------
 // NSID aliases

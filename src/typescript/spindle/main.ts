@@ -40,7 +40,7 @@ import {
   createSubmitEventHandler,
   type MarketServerDeps,
   verifyServiceAuth,
-} from "../lib/market/mod.ts";
+} from "@publicdomainrelay/market";
 
 // ---------------------------------------------------------------------------
 // Structured logger — JSON to stderr

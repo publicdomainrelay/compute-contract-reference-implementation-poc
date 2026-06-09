@@ -7,6 +7,8 @@
     "./lib/lexicons",
     "./lib/market",
     "./lib/market-free",
-    "./lib/market-x402"
+    "./lib/market-x402",
+    "./spindle",
+    "./bidder"
   ]
 }

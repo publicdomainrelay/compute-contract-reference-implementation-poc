@@ -13,17 +13,16 @@
 // market.accept payload. This endpoint does NOT provision compute — that is
 // submitAccept (see main.ts).
 
-import type { Hono } from "hono";
 import { paymentMiddleware, x402ResourceServer } from "@x402/hono";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
-import { createRecord, type StrongRef } from "../lib/market/mod.ts";
+import { createRecord, type StrongRef } from "@publicdomainrelay/market";
 import {
   BIDS_X402_NSID,
   mintReceiptForAccepts,
   parseReceiptPath,
   verifyX402Payment,
-} from "../lib/market-x402/mod.ts";
+} from "@publicdomainrelay/market-x402";
 import { reqEnv } from "./env.ts";
 import { receiptUrlFor, type Settlement, type SettlementCtx } from "./settlement.ts";
 
@@ -78,30 +77,28 @@ export function createX402Settlement(ctx: SettlementCtx): Settlement {
       log("info", "payment verified", { receiptsX402: payment?.uri });
     },
 
-    mount: (app: Hono) => {
+    bidsFactoryOptions: () => {
       const server = new x402ResourceServer(makeFacilitator(cdpApiKeyId, cdpApiKeySecret))
         .register("eip155:8453", new ExactEvmScheme());
-      app.use(
-        paymentMiddleware(
-          {
-            [`GET /${PATH}/*`]: {
-              accepts: [{ scheme: "exact", price: "$1.00", network: "eip155:8453", payTo }],
-              description: "Pay for compute contract",
-              mimeType: "application/json",
-            },
+      const mw = paymentMiddleware(
+        {
+          [`GET /${PATH}/*`]: {
+            accepts: [{ scheme: "exact", price: "$1.00", network: "eip155:8453", payTo }],
+            description: "Pay for compute contract",
+            mimeType: "application/json",
           },
-          server,
-        ),
+        },
+        server,
       );
-
-      app.get(`/${PATH}/*`, async (c) => {
-        const { acceptsUri, acceptsCid } = parseReceiptPath(c.req.path, `${PATH}/`);
-        log("info", "x402 receipt requested", { acceptsUri, acceptsCid });
-        // Payment has cleared (middleware); mint the proof-of-payment receipt.
-        const ref = await mintReceiptForAccepts({ agent: getAgent(), resolve, acceptsUri, acceptsCid });
-        log("info", "receipts.x402 minted", { uri: ref.uri, cid: ref.cid, acceptsUri });
-        return c.json({ uri: ref.uri, cid: ref.cid });
-      });
+      return {
+        x402: {
+          getAgent,
+          resolve,
+          log,
+          path: PATH,
+          paymentMiddleware: mw,
+        },
+      };
     },
   };
 }
