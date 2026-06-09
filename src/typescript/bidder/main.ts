@@ -12,20 +12,27 @@
 
 
 import { Hono } from "npm:hono@^4.12.23";
-import type { ContentfulStatusCode } from "npm:hono@^4.12.23/utils/http-status";
-import { Agent, CredentialSession } from "@atproto/api";
-import { IdResolver } from "@atproto/identity";
-import { getPdsEndpoint } from "@atproto/common-web";
 import { stringify as yamlStringify, parse as yamlParse } from "npm:yaml@^2.7.0";
+import { HTTPError, registerErrorMiddleware } from "../lib/deno-hono-helpers/mod.ts";
 import {
-  createMarketClient,
   createSubmitAcceptHandler,
   createSubmitEventHandler,
   createSubmitRfpHandler,
-  type MarketClient,
   type MarketServerDeps,
 } from "../lib/market/mod.ts";
 import { createComputeEventDeleteHandler } from "../lib/compute/mod.ts";
+import {
+  agent,
+  agentDid,
+  atUriAuthority,
+  idResolver,
+  loginAgent,
+  marketClient,
+  ownServiceDidWeb,
+  parseAtUri,
+  resolveAs,
+} from "../lib/atproto-helpers/misc.ts";
+
 import { createComputeProviderDigitalOcean } from "./compute_provider_digitalocean.ts";
 import { setupX402, x402UrlTemplate } from "./bids_x402.ts";
 
@@ -151,96 +158,6 @@ const X402_MAKE_FREE = Deno.env.has("X402_MAKE_FREE");
 const DIGITALOCEAN_BASE_URL = (Deno.env.get("DIGITALOCEAN_BASE_URL") ?? "https://droplet-oidc.its1337.com").replace(/\/+$/, "");
 
 // ---------------------------------------------------------------------------
-// atproto client + identity resolver
-// ---------------------------------------------------------------------------
-
-const idResolver = new IdResolver();
-let agent: Agent;
-let agentDid = "";
-let session: CredentialSession;
-// Client wrapper for the outbound market submit* calls (built on the
-// authenticated session in loginAgent). See ../lib/market.
-let marketClient: MarketClient;
-
-function bidderServiceDid(): string {
-  return `did:web:${new URL(BASE_URL).host}`;
-}
-
-// The authority (repo DID) portion of an at:// URI. Inter-service auth for the
-// market endpoints (token issuer must author the referenced record, audience
-// checks, etc.) now lives in ../lib/market; this stays for the local
-// payload-author checks below.
-function atUriAuthority(uri: string): string {
-  return uri.replace("at://", "").split("/")[0];
-}
-
-async function loginAgent(): Promise<void> {
-  let did = ATPROTO_HANDLE;
-  if (!did.startsWith("did:")) {
-    const resolved = await idResolver.handle.resolve(ATPROTO_HANDLE);
-    if (!resolved) throw new Error(`could not resolve handle ${ATPROTO_HANDLE}`);
-    did = resolved;
-  }
-  const doc = await idResolver.did.resolve(did);
-  if (!doc) throw new Error(`could not resolve did ${did}`);
-  const pds = getPdsEndpoint(doc);
-  if (!pds) throw new Error(`no pds for ${did}`);
-  session = new CredentialSession(new URL(pds));
-  await session.login({ identifier: ATPROTO_HANDLE, password: ATPROTO_PASSWORD });
-  agent = new Agent(session);
-  agentDid = session.did ?? did;
-  // agent cannot register custom NSIDs, so the market client wraps a dedicated
-  // XrpcClient on the same authenticated session for the proxied submit* calls.
-  marketClient = createMarketClient(session);
-  console.error(`[atproto] logged in as ${agentDid}`);
-}
-
-function parseAtUri(uri: string): { repo: string; collection: string; rkey: string } {
-  const parts = uri.slice("at://".length).split("/");
-  return { repo: parts[0], collection: parts[1], rkey: parts[2] };
-}
-
-async function pdsForDid(did: string): Promise<string> {
-  const doc = await idResolver.did.resolve(did);
-  if (!doc) throw new Error(`could not resolve ${did}`);
-  const pds = getPdsEndpoint(doc);
-  if (!pds) throw new Error(`no pds for ${did}`);
-  return pds;
-}
-
-async function getRecord(atUri: string, cid: string): Promise<{ uri: string; cid: string; value: Record<string, unknown> }> {
-  const { repo, collection, rkey } = parseAtUri(atUri);
-  const pds = await pdsForDid(repo);
-  const read = new Agent(new URL(pds));
-  const res = await read.com.atproto.repo.getRecord({ repo, collection, rkey, cid });
-  return { uri: res.data.uri, cid: res.data.cid ?? cid, value: res.data.value as Record<string, unknown> };
-}
-
-async function resolveAs<T>(atUri: string, cid: string): Promise<T & { _uri: string; _cid: string }> {
-  const r = await getRecord(atUri, cid);
-  const value = r.value as Record<string, unknown>;
-  const version = (value.version as string | undefined) ?? "0.0.0";
-  if (version !== "0.0.0") {
-    throw new HTTPError(400, `unknown record version ${version}`);
-  }
-  return { ...(value as unknown as T), _uri: atUri, _cid: r.cid };
-}
-
-// ---------------------------------------------------------------------------
-// errors
-// ---------------------------------------------------------------------------
-
-class HTTPError extends Error {
-  status: number;
-  detail: string;
-  constructor(status: number, detail: string) {
-    super(detail);
-    this.status = status;
-    this.detail = detail;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // ATProto
 // ---------------------------------------------------------------------------
 
@@ -270,7 +187,7 @@ async function ensureOfferingRecord(): Promise<void> {
     collection: OFFERING_NSID,
     record: {
       $type: OFFERING_NSID,
-      endpointUrl: `${bidderServiceDid()}#${MARKET_SERVICE_ID}`,
+      endpointUrl: `${ownServiceDidWeb(BASE_URL)}#${MARKET_SERVICE_ID}`,
       appliesTo: [VM_NSID],
       createdAt: new Date().toISOString(),
     },
@@ -399,7 +316,7 @@ const marketSubmitAccept = createSubmitAcceptHandler({
   // down — either because the workflow finished or the policy engine never
   // came up. submitEventUrl is handed back below so the caller knows where to
   // send those events, keyed by a strongRef to this receipt.
-  const submitEventUrl = `${bidderServiceDid()}#${COMPUTE_EVENT_SERVICE_ID}`;
+  const submitEventUrl = `${ownServiceDidWeb(BASE_URL)}#${COMPUTE_EVENT_SERVICE_ID}`;
 
   const res = await agent.com.atproto.repo.createRecord({
     repo: agent.assertDid,
@@ -496,7 +413,7 @@ async function createAndSubmitBid(
     payload: { $type: "com.atproto.repo.strongRef", uri: payloadRecord.data.uri, cid: payloadRecord.data.cid },
     // Service DID ref for the settlement leg (submitAccept via atproto-proxy),
     // distinct from the payload's x402 payment url (the payment leg).
-    submitAccept: `${bidderServiceDid()}#${MARKET_SERVICE_ID}`,
+    submitAccept: `${ownServiceDidWeb(BASE_URL)}#${MARKET_SERVICE_ID}`,
     createdAt: nowIso,
   };
 
@@ -615,14 +532,7 @@ const marketSubmitEvent = createSubmitEventHandler({
 const makeApp = () => {
   const app = new Hono();
 
-  // JSON error envelope
-  app.onError((err, c) => {
-    if (err instanceof HTTPError) {
-      return c.json({ error: "http_error", code: err.status, detail: err.detail }, err.status as ContentfulStatusCode);
-    }
-    console.error("[err]", (err as Error).stack ?? err);
-    return c.json({ error: "internal", detail: (err as Error).message }, 500);
-  });
+  registerErrorMiddleware(app);
 
   const readmeHtml = "<html><body><h1>compute-contract-provider-relay-digitalocean</h1></body></html>";
   app.get("/", (c) => c.html(readmeHtml));
@@ -671,7 +581,7 @@ const makeApp = () => {
 
 const main = async () => {
   void VM_NSID; // referenced for parity / future use
-  await loginAgent();
+  await loginAgent(ATPROTO_HANDLE, ATPROTO_PASSWORD);
   await configureAccountAuthRbac();
   await ensureOfferingRecord();
   const app = makeApp();
