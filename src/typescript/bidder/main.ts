@@ -452,28 +452,19 @@ async function createAndSubmitBid(
 
 const marketSubmitRfp = createSubmitRfpHandler({
   deps: marketDeps,
-  serviceIds: [MARKET_SERVICE_ID],
-  onRfp: async ({ rfpUri, rfpCid, rfp, payloadNsid, req }) => {
-    // Check that our offering covers the RFP payload type — best-effort.
-    const listRes = await agent.com.atproto.repo.listRecords({ repo: agentDid, collection: OFFERING_NSID, limit: 100 });
-    const applicable = listRes.data.records.some((r) => {
-      const v = r.value as Record<string, unknown>;
-      const appliesTo = v.appliesTo as string[] | undefined;
-      return Array.isArray(appliesTo) && (appliesTo.includes(payloadNsid) || appliesTo.includes(VM_NSID));
-    });
-    if (!applicable) {
-      log("info", "submitRfp not applicable", { rfpUri, payloadNsid });
-      return { status: 400, body: { error: "NotApplicable", message: `no offering for ${payloadNsid}` } };
-    }
+  callbacks: {
+    [MARKET_SERVICE_ID]: {
+      [VM_NSID]: async ({ rfpUri, rfpCid, rfp, req }) => {
+        const { repo: rfpOwnerDid } = parseAtUri(rfpUri);
 
-    const { repo: rfpOwnerDid } = parseAtUri(rfpUri);
+        const { bidUri, bidCid } =
+          await createAndSubmitBid(rfpUri, rfpCid, rfp, x402UrlTemplate(BASE_URL, req.url));
 
-    const { bidUri, bidCid } =
-      await createAndSubmitBid(rfpUri, rfpCid, rfp, x402UrlTemplate(BASE_URL, req.url));
+        log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
 
-    log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
-
-    return { body: { ok: true, bidUri, bidCid } };
+        return { body: { ok: true, bidUri, bidCid } };
+      },
+    },
   },
 });
 
@@ -482,7 +473,6 @@ const marketSubmitEvent = createSubmitEventHandler({
   deps: marketDeps,
   // Reached via the requester's accept/receipt submitEvent ref
   // (did:web:HOST#pdr_temp_compute_event).
-  serviceIds: [COMPUTE_EVENT_SERVICE_ID],
   // Synchronous (not background) so the "unknown receipt"/authorization errors
   // below surface in the HTTP response, matching the previous behavior.
   callbacks: {

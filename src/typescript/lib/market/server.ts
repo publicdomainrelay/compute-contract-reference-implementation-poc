@@ -134,20 +134,25 @@ export interface SubmitRfpContext {
 
 export type SubmitRfpCallback = (ctx: SubmitRfpContext) => Promise<HandlerResult> | HandlerResult;
 
+/** callbacks[serviceId][payloadNsid] -> handler for that RFP type. */
+export type RfpCallbacks = Record<string, Record<string, SubmitRfpCallback>>;
+
 export interface SubmitRfpHandlerConfig {
   deps: MarketServerDeps;
-  serviceIds: string[];
-  onRfp: SubmitRfpCallback;
+  /** Routing table: outer key = service id, inner key = payload NSID. */
+  callbacks: RfpCallbacks;
 }
 
 /**
  * Handler for com.publicdomainrelay.temp.market.submitRfp. Resolves the RFP and
- * invokes `onRfp`; a typical callback creates a bid and returns
- * `{ body: { ok: true, bidUri, bidCid } }`.
+ * routes it to `callbacks[serviceId][payloadNsid]`. Unknown pairs are ignored
+ * with `200 { ok: true }`.
  */
 export function createSubmitRfpHandler(cfg: SubmitRfpHandlerConfig): Handler {
-  const { deps, serviceIds, onRfp } = cfg;
+  const { deps, callbacks } = cfg;
   const log = deps.log ?? noopLogger;
+  const serviceIds = Object.keys(callbacks);
+
   return async (req) => {
     const body = await readJson<{ rfpUri?: string; rfpCid?: string }>(req);
     if (!body) return xrpcError("InvalidRequest", "invalid JSON", 400);
@@ -162,7 +167,14 @@ export function createSubmitRfpHandler(cfg: SubmitRfpHandlerConfig): Handler {
     const rfp = await deps.resolve.resolve<RFP & { $type?: string }>({ uri: rfpUri, cid: rfpCid });
     const payloadNsid = rfp.payload ? nsidFromUri(rfp.payload.uri) : "";
 
-    return finish(await onRfp({
+    const bucketId = auth.serviceId ?? (serviceIds.length === 1 ? serviceIds[0] : undefined);
+    const cb = bucketId ? callbacks[bucketId]?.[payloadNsid] : undefined;
+    if (!cb) {
+      log("info", "submitRfp: ignoring unknown rfp", { serviceId: bucketId, payloadNsid });
+      return json({ ok: true });
+    }
+
+    return finish(await cb({
       rfpUri,
       rfpCid,
       rfp,
@@ -311,11 +323,6 @@ export type EventCallbacks = Record<string, Record<string, EventCallback>>;
 
 export interface SubmitEventHandlerConfig {
   deps: MarketServerDeps;
-  /**
-   * Service-id fragments this endpoint answers for. Defaults to the keys of
-   * `callbacks` when omitted/empty.
-   */
-  serviceIds?: string[];
   /** Routing table: outer key = service id, inner key = payload NSID. */
   callbacks: EventCallbacks;
   /**
@@ -335,7 +342,7 @@ export interface SubmitEventHandlerConfig {
 export function createSubmitEventHandler(cfg: SubmitEventHandlerConfig): Handler {
   const { deps, callbacks } = cfg;
   const log = deps.log ?? noopLogger;
-  const serviceIds = cfg.serviceIds && cfg.serviceIds.length ? cfg.serviceIds : Object.keys(callbacks);
+  const serviceIds = Object.keys(callbacks);
 
   return async (req) => {
     const body = await readJson<{ uri?: string; cid?: string; record?: { receipt?: unknown; payload?: unknown } }>(req);

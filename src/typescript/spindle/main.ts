@@ -1881,7 +1881,6 @@ app.post("/xrpc/com.publicdomainrelay.temp.market.submitBid", (c) => marketSubmi
 // (the handler still verifies the token and that its issuer authored the event).
 const marketSubmitEvent = createSubmitEventHandler({
   deps: marketDeps,
-  serviceIds: [COMPUTE_EVENT_SERVICE_ID],
   callbacks: { [COMPUTE_EVENT_SERVICE_ID]: {} },
 });
 app.post("/xrpc/com.publicdomainrelay.temp.market.submitEvent", (c) => marketSubmitEvent(c.req.raw));
