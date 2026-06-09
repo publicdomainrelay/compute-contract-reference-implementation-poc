@@ -61,13 +61,8 @@
               "type": "array",
               "description": "The workflow stems that were submitted, with their log/status stream URLs.",
               "items": {
-                "type": "object",
-                "required": ["workflow"],
-                "properties": {
-                  "workflow": { "type": "string" },
-                  "logsUrl": { "type": "string", "format": "uri" },
-                  "statusUrl": { "type": "string", "format": "uri" }
-                }
+                "type": "ref",
+                "ref": "#workflowResult"
               }
             }
           }
@@ -78,6 +73,26 @@
         { "name": "Unauthorized", "description": "Missing or invalid inter-service auth token." },
         { "name": "Forbidden", "description": "Token issuer does not match actor, or repo is not authorized for this spindle." }
       ]
+    },
+    "workflowResult": {
+      "type": "object",
+      "required": ["workflow"],
+      "properties": {
+        "workflow": {
+          "type": "string",
+          "description": "Workflow stem that was submitted."
+        },
+        "logsUrl": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL to the log stream for this workflow run."
+        },
+        "statusUrl": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL to the status stream for this workflow run."
+        }
+      }
     }
   }
 }

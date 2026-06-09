@@ -1,4 +1,3 @@
-LEXICONS_DIR := lexicons
 TS_LIBS_DIR  := src/typescript/lib
 
 .PHONY: publish publish-lexicons publish-npm bump lex check-auth check-auth-goat check-auth-npm
@@ -18,18 +17,7 @@ check-auth-npm:
 # Sync every lexicon JSON that exists inside a lib package from the root lexicons/ dir.
 # The package's existing files define what it owns; root is the source of truth for content.
 lex:
-	@echo "Syncing lexicons from $(LEXICONS_DIR)/ into lib packages..."
-	@find $(TS_LIBS_DIR) -path '*/lexicons/*.json' -not -path '*/node_modules/*' | \
-		while read dst; do \
-			rel=$$(echo "$$dst" | sed 's|.*/lexicons/||'); \
-			src=$(LEXICONS_DIR)/$$rel; \
-			if [ -f "$$src" ]; then \
-				cp "$$src" "$$dst"; \
-				echo "  $$src -> $$dst"; \
-			else \
-				echo "  WARNING: $$src not found ($$dst out of sync with root)"; \
-			fi; \
-		done
+	@cd src/typescript/lib/lexicons/ && deno x -A -y npm:npm run build
 
 bump:
 	@deno run --allow-read --allow-write scripts/makefile/bump/main.ts $(TS_LIBS_DIR)
@@ -38,7 +26,7 @@ publish-lexicons:
 	@echo "Publishing lexicons..."
 	@goat lex publish --update
 
-publish-npm:
+publish-npm: lex
 	@echo "Publishing npm packages..."
 	@find $(TS_LIBS_DIR) -maxdepth 2 -name 'package.json' | \
 		sort | while read pkg; do \

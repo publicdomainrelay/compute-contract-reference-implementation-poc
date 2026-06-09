@@ -1,0 +1,12 @@
+{
+  "name": "@publicdomainrelay/lexicons",
+  "version": "0.0.0",
+  "description": "TypeScript types, NSID constants, and embedded lexicon docs for com.publicdomainrelay.* — derived from the JSON lexicon files in ./lexicons/.",
+  "type": "module",
+  "scripts": {
+    "build": "cd $(git rev-parse --show-toplevel) && goat lex pull com.atproto.repo.strongRef && deno x -A -y npm:@atproto/lex build --override --import-ext \".ts\" --lexicons ./lexicons --out src/typescript/lib/lexicons"
+  },
+  "exports": {
+    ".": "./mod.ts"
+  }
+}
