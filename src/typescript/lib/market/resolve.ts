@@ -32,6 +32,30 @@ export function nsidFromUri(uri: string): string {
 /** A reference to a single record: the minimal shape a resolver needs. */
 export type RecordRef = { uri: string; cid: string };
 
+/** A stable key identifying one record *version*: `${uri}#${cid}`. */
+export function refKey(ref: RecordRef): string {
+  return `${ref.uri}#${ref.cid}`;
+}
+
+/** True when two refs point at the same record version (same uri and cid). */
+export function refsEqual(a: RecordRef, b: RecordRef): boolean {
+  return a.uri === b.uri && a.cid === b.cid;
+}
+
+/** Drop the `_uri`/`_cid` resolution annotations, recovering the bare record value. */
+export function stripResolved<T>(resolved: Resolved<T>): T {
+  const { _uri: _u, _cid: _c, ...rest } = resolved as Resolved<T> & Record<string, unknown>;
+  return rest as unknown as T;
+}
+
+/**
+ * Turn a resolved record into a `{ uri, cid, value }` triple — its strongRef
+ * coordinates alongside the bare record value (resolution annotations stripped).
+ */
+export function resolvedRef<T>(resolved: Resolved<T>): { uri: string; cid: string; value: T } {
+  return { uri: resolved._uri, cid: resolved._cid, value: stripResolved(resolved) };
+}
+
 /**
  * Resolves a strongRef (uri+cid) to the record value. Injected into handlers so
  * the transport and any caching/validation policy stay the caller's concern.

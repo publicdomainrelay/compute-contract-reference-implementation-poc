@@ -5,11 +5,15 @@
     "./lib/compute-provider-digitalocean",
     "./lib/deno-hono-helpers",
     "./lib/lexicons",
+    "./lib/hono-factory-compute",
+    "./lib/hono-factory-market",
+    "./lib/hono-factory-market-bids",
     "./lib/market",
     "./lib/market-free",
     "./lib/market-x402",
     "./lib/market-settlement",
     "./spindle",
-    "./bidder"
+    "./bidder",
+    "./qemu"
   ]
 }

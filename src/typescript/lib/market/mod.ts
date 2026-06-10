@@ -14,6 +14,7 @@ export * from "./types.ts";
 export * from "@publicdomainrelay/lexicons";
 export * from "./resolve.ts";
 export * from "./records.ts";
+export * from "./contract.ts";
 export * from "./auth.ts";
 export * from "./egress.ts";
 export * from "./server.ts";

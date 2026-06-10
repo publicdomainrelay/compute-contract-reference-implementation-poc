@@ -17,27 +17,27 @@
 // $ RBAC_REPO_ROOT="${HOME}/src/rbac/homelab/wid-atp" SETTLEMENT=free DIGITALOCEAN_BASE_URL=https://homelab.johnandersen777.bsky.social.fedproxy.com deno run --allow-all --watch main.ts
 
 import { Hono } from "hono";
-import { HTTPError, registerErrorMiddleware } from "@publicdomainrelay/deno-hono-helpers";
+import { registerErrorMiddleware } from "@publicdomainrelay/deno-hono-helpers";
 import {
   type MarketServerDeps,
-  type Bid,
   type LogLevel,
   type RecordResolver,
-  type RFP,
+  type Resolved,
   type StrongRef,
   ACCEPT_NSID,
-  BID_NSID,
   DEFAULT_COMPUTE_EVENT_SERVICE_ID,
   DEFAULT_MARKET_SERVICE_ID,
-  RECEIPT_NSID,
+  createReceiptRecord,
   ensureOfferingRecord,
   createBidFactory,
+  refKey,
+  resolveContractGraph,
+  resolvedRef,
 } from "@publicdomainrelay/market";
 import { createMarketFactory } from "@publicdomainrelay/hono-factory-market";
 import { createMarketBidsFactory } from "@publicdomainrelay/hono-factory-market-bids";
 import { createComputeFactory } from "@publicdomainrelay/hono-factory-compute";
 import {
-  type ComputeConfigWifSimple,
   type ComputeVM,
   COMPUTE_VM_NSID,
 } from "@publicdomainrelay/lexicons";
@@ -85,9 +85,8 @@ function log(level: LogLevel, msg: string, fields: Record<string, unknown> = {})
   Deno.stderr.writeSync(enc.encode(entry + "\n"));
 }
 
-// local type aliases (resolved forms add _uri/_cid via resolveAs<T>)
+// local type alias (resolved forms add _uri/_cid via resolveAs<T>)
 type VM = ComputeVM;
-type WIFSimple = ComputeConfigWifSimple;
 
 // ---------------------------------------------------------------------------
 // env / config
@@ -203,13 +202,13 @@ const marketFactory = createMarketFactory(marketDeps, {
   },
   accept: {
     serviceIds: [MARKET_SERVICE_ID],
-    onAccept: async ({ acceptUri, acceptCid, accept }) => {
+    onAccept: async ({ acceptUri, acceptCid, accept, resolve }) => {
     log("info", "settling accept", { accept: accept._uri });
-    const bid = await resolveAs<Bid>(accept.bid.uri, accept.bid.cid);
 
-    if (bid.rfp.uri !== accept.rfp.uri || bid.rfp.cid !== accept.rfp.cid) {
-      throw new HTTPError(400, "Accept.rfp does not match Bid.rfp");
-    }
+    // Resolve the full contract record graph (bid, rfp, their payloads/config)
+    // and verify the bid and accept name the same RFP.
+    const { bid, rfp, rfpPayload, bidPayload, bidConfig } = await resolveContractGraph(accept, resolve);
+    const vm = rfpPayload as unknown as Resolved<VM>;
 
     // Verify settlement: accept.payload must be the receipt our settlement layer
     // issued (proof of payment for x402, proof of grant for free). Without it we
@@ -217,32 +216,17 @@ const marketFactory = createMarketFactory(marketDeps, {
     await settlement.verifyAcceptPayload(accept.payload);
     const payloadRef = accept.payload!;
 
-    const rfp = await resolveAs<RFP>(accept.rfp.uri, accept.rfp.cid);
-    const vm = await resolveAs<VM>(rfp.payload.uri, rfp.payload.cid);
-    const bidPayload = await resolveAs<Record<string, unknown>>(bid.payload.uri, bid.payload.cid);
-    let bidConfig: (WIFSimple & { _uri: string; _cid: string }) | null = null;
-    if (bid.config) {
-      bidConfig = await resolveAs<ComputeConfigWifSimple>(bid.config.uri, bid.config.cid);
-    }
-
-    const stripPriv = (o: Record<string, unknown>) => {
-      const { _uri: _u, _cid: _c, ...rest } = o as Record<string, unknown> & { _uri?: string; _cid?: string };
-      return rest;
-    };
-    const refValue = (o: { _uri: string; _cid: string } & Record<string, unknown>) => ({
-      uri: o._uri,
-      cid: o._cid,
-      value: stripPriv(o),
-    });
-
+    // Provenance bundle written into the VM so it can verify what it was
+    // provisioned for. Reuses ACCEPT_NSID as the $type; each entry is the
+    // referenced record's strongRef coordinates plus its value.
     const bundle = {
       $type: ACCEPT_NSID,
-      accept: refValue(accept as unknown as { _uri: string; _cid: string } & Record<string, unknown>),
-      rfp: refValue(rfp as unknown as { _uri: string; _cid: string } & Record<string, unknown>),
-      bid: refValue(bid as unknown as { _uri: string; _cid: string } & Record<string, unknown>),
-      bid_payload: refValue(bidPayload as { _uri: string; _cid: string } & Record<string, unknown>),
-      bid_config: bidConfig ? refValue(bidConfig) : null,
-      vm: refValue(vm as unknown as { _uri: string; _cid: string } & Record<string, unknown>),
+      accept: resolvedRef(accept),
+      rfp: resolvedRef(rfp),
+      bid: resolvedRef(bid),
+      bid_payload: resolvedRef(bidPayload),
+      bid_config: bidConfig ? resolvedRef(bidConfig) : null,
+      vm: resolvedRef(vm),
     };
 
     vm.user_data = injectAcceptBundle(vm.user_data, bundle);
@@ -258,31 +242,25 @@ const marketFactory = createMarketFactory(marketDeps, {
     // caller knows where to send those events, keyed by a strongRef to this receipt.
     const submitEventUrl = `${ownServiceDidWeb(cfg.server.baseUrl)}#${COMPUTE_EVENT_SERVICE_ID}`;
 
-    const res = await agent.com.atproto.repo.createRecord({
-      repo: agent.assertDid,
-      collection: RECEIPT_NSID,
-      record: {
-        $type: RECEIPT_NSID,
-        rfp: { $type: "com.atproto.repo.strongRef", uri: accept.rfp.uri, cid: accept.rfp.cid },
-        bid: { $type: "com.atproto.repo.strongRef", uri: bid._uri, cid: bid._cid },
-        accept: { $type: "com.atproto.repo.strongRef", uri: acceptUri, cid: acceptCid },
-        payload: { $type: "com.atproto.repo.strongRef", uri: payloadRef.uri, cid: payloadRef.cid },
-        submitEvent: submitEventUrl,
-        createdAt: new Date().toISOString(),
-      },
+    const receiptRef = await createReceiptRecord(agent, {
+      rfp: accept.rfp,
+      bid: { uri: bid._uri, cid: bid._cid },
+      accept: { uri: acceptUri, cid: acceptCid },
+      payload: payloadRef,
+      submitEvent: submitEventUrl,
     });
 
-    const id = res.data.uri.split("/").slice(-1)[0];
+    const id = receiptRef.uri.split("/").slice(-1)[0];
 
     if (dropletId !== undefined) {
-      const receiptKey = `${res.data.uri}#${res.data.cid}`;
+      const receiptKey = refKey(receiptRef);
       // requesterDid is the authority of the accept AT-URI — only this DID may
       // later drive a vm.delete that tears down this droplet.
       activeContracts.set(receiptKey, { dropletId, rbacRef, acceptAuthor: requesterDid });
       log("info", "tracking droplet for receipt", {
         receiptKey,
-        receiptUri: res.data.uri,
-        receiptCid: res.data.cid,
+        receiptUri: receiptRef.uri,
+        receiptCid: receiptRef.cid,
         dropletId,
         rbacUri: rbacRef.uri,
         acceptAuthor: requesterDid,
@@ -292,7 +270,7 @@ const marketFactory = createMarketFactory(marketDeps, {
       log("warn", "no droplet id returned, cannot map receipt to droplet for cleanup", { dropletJson });
     }
 
-    return { body: { id, uri: res.data.uri, cid: res.data.cid, submitEvent: submitEventUrl } };
+    return { body: { id, uri: receiptRef.uri, cid: receiptRef.cid, submitEvent: submitEventUrl } };
     },
   },
 });
@@ -304,7 +282,7 @@ const computeFactory = createComputeFactory({
   serviceId: COMPUTE_EVENT_SERVICE_ID,
   vmDelete: {
     assertRunningCompute: ({ event, log }) => {
-      const receiptKey = `${event.receipt.uri}#${event.receipt.cid}`;
+      const receiptKey = refKey(event.receipt);
       log("info", "submitEvent: resolved receiptKey", {
         receiptKey,
         knownReceiptKeys: [...activeContracts.keys()],
@@ -315,7 +293,7 @@ const computeFactory = createComputeFactory({
       }
     },
     deleteRunningCompute: async ({ event, log, deleteEvent }) => {
-      const receiptKey = `${event.receipt.uri}#${event.receipt.cid}`;
+      const receiptKey = refKey(event.receipt);
       const reason = deleteEvent.reason ?? "vm.delete event received";
       const contract = activeContracts.get(receiptKey)!;
       await deleteDroplet(contract.dropletId, reason);

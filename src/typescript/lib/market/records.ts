@@ -9,9 +9,9 @@
 import type { Agent } from "@atproto/api";
 import { getPdsEndpoint } from "@atproto/common-web";
 import type { IdResolver } from "@atproto/identity";
-import { parseAtUri } from "./resolve.ts";
+import { parseAtUri, type RecordRef } from "./resolve.ts";
 import { strongRef, type StrongRef } from "./types.ts";
-import { OFFERING_NSID } from "@publicdomainrelay/lexicons";
+import { OFFERING_NSID, RECEIPT_NSID } from "@publicdomainrelay/lexicons";
 import type { Logger } from "./types.ts";
 
 /**
@@ -30,6 +30,34 @@ export async function createRecord(
     record,
   });
   return strongRef(res.data.uri, res.data.cid);
+}
+
+/** The strongRef'd records a market.receipt binds together. */
+export interface ReceiptRefs {
+  rfp: RecordRef;
+  bid: RecordRef;
+  accept: RecordRef;
+  /** Proof-of-settlement record (the bid's payment/grant receipt). */
+  payload: RecordRef;
+  /** Service DID reference (did:web:HOST#compute_event) where teardown events are sent. */
+  submitEvent: string;
+}
+
+/**
+ * Mint a market.receipt in the agent's own repo, binding the rfp, bid, accept,
+ * and proof-of-settlement payload, and advertising where to send teardown
+ * events. Returns a strongRef to the created receipt.
+ */
+export function createReceiptRecord(agent: Agent, refs: ReceiptRefs): Promise<StrongRef> {
+  return createRecord(agent, RECEIPT_NSID, {
+    $type: RECEIPT_NSID,
+    rfp: strongRef(refs.rfp.uri, refs.rfp.cid),
+    bid: strongRef(refs.bid.uri, refs.bid.cid),
+    accept: strongRef(refs.accept.uri, refs.accept.cid),
+    payload: strongRef(refs.payload.uri, refs.payload.cid),
+    submitEvent: refs.submitEvent,
+    createdAt: new Date().toISOString(),
+  });
 }
 
 /** Delete a record the agent authored, addressed by its strongRef (uri parsed). */

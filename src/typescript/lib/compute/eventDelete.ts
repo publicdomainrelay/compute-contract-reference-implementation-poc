@@ -2,7 +2,7 @@
 // market.event payloads, plugged into createSubmitEventHandler's callback
 // routing table (callbacks[serviceId][payloadNsid]).
 
-import { parseAtUri } from "@publicdomainrelay/market";
+import { parseAtUri, refKey } from "@publicdomainrelay/market";
 import type { EventCallback, EventDispatchContext, HandlerResult } from "@publicdomainrelay/market";
 import type { Receipt, Resolved } from "@publicdomainrelay/market";
 import type { VMDeleteEvent } from "@publicdomainrelay/lexicons";
@@ -37,7 +37,7 @@ export function createComputeEventDeleteHandler(opts: ComputeEventDeleteHandlerO
 
   return async (ctx) => {
     const { event, issuerDid, resolve, log } = ctx;
-    const receiptKey = `${event.receipt.uri}#${event.receipt.cid}`;
+    const receiptKey = refKey(event.receipt);
 
     const notRunningResponse = await assertRunningCompute(ctx);
     if (notRunningResponse) {
