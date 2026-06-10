@@ -57,14 +57,15 @@ export function createBidFactory(deps: BidFactoryDeps) {
     };
 
     const bidRef = await createSignedRecord(getAgent(), BID_NSID, bid, getSigner());
-    log("info", "bidRecord", { bidRecord: bidRef });
+    log("info", "bidRecord", { bidRecord: { uri: bidRef.uri, cid: bidRef.cid } });
 
     if (rfpRecord.submitBid) {
       try {
         await getMarketClient().submitBid(rfpRecord.submitBid, {
           uri: bidRef.uri,
           cid: bidRef.cid,
-          record: bid,
+          // Forward the signed body (with `signatures`), not the unsigned input.
+          record: bidRef.record,
         });
         log("info", "submitBid proxied call", { ref: rfpRecord.submitBid });
       } catch (err) {

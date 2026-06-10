@@ -45,14 +45,18 @@ export async function createSignedRecord(
   collection: string,
   record: Record<string, unknown>,
   signer: RecordSigner,
-): Promise<StrongRef> {
+): Promise<StrongRef & { record: Record<string, unknown> }> {
   const signed = await signRecord({
     record,
     metadata: inlineMetadata(signer),
     repositoryDid: agent.assertDid,
     keypair: signer.keypair,
   });
-  return createRecord(agent, collection, signed);
+  const ref = await createRecord(agent, collection, signed);
+  // Return the signed body (carrying `signatures`) so callers that forward the
+  // record over the wire (e.g. proxied submitBid) transmit the attested copy,
+  // not the unsigned input.
+  return { ...ref, record: signed };
 }
 
 /** The subject a remote attestation proof binds to. */
