@@ -1,0 +1,11 @@
+{
+  "name": "@publicdomainrelay/market-settlement",
+  "version": "0.0.0",
+  "exports": "./mod.ts",
+  "imports": {
+    "@atproto/api": "npm:@atproto/api@^0.20.8",
+    "@x402/core": "npm:@x402/core@^2.14.0",
+    "@x402/evm": "npm:@x402/evm@^2.14.0",
+    "@x402/hono": "npm:@x402/hono@^2.14.0"
+  }
+}

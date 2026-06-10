@@ -9,7 +9,7 @@
 //   POST /xrpc/…market.submitEvent                   (vm.delete teardown)
 //
 // How a contract settles (paying via x402, or granting for free) is chosen at
-// startup behind the Settlement abstraction (./settlement.ts); the provisioning
+// startup behind the Settlement abstraction (@publicdomainrelay/market-settlement); the provisioning
 // logic below never branches on it.
 //
 // Run: deno run --allow-net --allow-env --allow-run --allow-read --allow-write main.ts
@@ -31,6 +31,7 @@ import {
   DEFAULT_MARKET_SERVICE_ID,
   RECEIPT_NSID,
   ensureOfferingRecord,
+  createBidFactory,
 } from "@publicdomainrelay/market";
 import { createMarketFactory } from "@publicdomainrelay/hono-factory-market";
 import { createMarketBidsFactory } from "@publicdomainrelay/hono-factory-market-bids";
@@ -52,9 +53,12 @@ import {
 } from "@publicdomainrelay/atproto-helpers";
 import { createComputeProviderDigitalOcean } from "@publicdomainrelay/compute-provider-digitalocean";
 import { reqEnv, optUrl } from "./env.ts";
-import { createFreeSettlement } from "./bids_free.ts";
-import { createX402Settlement } from "./bids_x402.ts";
-import { type SettlementCtx, settlementModeFromEnv } from "./settlement.ts";
+import {
+  type SettlementCtx,
+  settlementModeFromEnv,
+  createFreeSettlement,
+  createX402Settlement,
+} from "@publicdomainrelay/market-settlement";
 
 // ---------------------------------------------------------------------------
 // NSID aliases — local names for ergonomics; canonical values come from the
@@ -178,12 +182,20 @@ const {
 // that makeApp mounts via app.route('/').
 // ---------------------------------------------------------------------------
 
+const createAndSubmitBid = createBidFactory({
+  getAgent: () => agent,
+  createBidConfig,
+  marketClient,
+  submitAcceptServiceDid: `${ownServiceDidWeb(cfg.server.baseUrl)}#${MARKET_SERVICE_ID}`,
+  log,
+});
+
 const marketFactory = createMarketFactory(marketDeps, {
   rfp: {
     [MARKET_SERVICE_ID]: {
       [VM_NSID]: async ({ rfpUri, rfpCid, rfp, req }) => {
         const { repo: rfpOwnerDid } = parseAtUri(rfpUri);
-        const { bidUri, bidCid } = await createAndSubmitBid(rfpUri, rfpCid, rfp, settlement.receiptUrl(req.url));
+        const { bidUri, bidCid } = await createAndSubmitBid(rfpUri, rfpCid, rfp, settlement, req.url);
         log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
         return { body: { ok: true, bidUri, bidCid } };
       },
@@ -284,58 +296,6 @@ const marketFactory = createMarketFactory(marketDeps, {
     },
   },
 });
-
-// ---------------------------------------------------------------------------
-// Bid creation, driven by the submitRfp rfp callback above.
-// ---------------------------------------------------------------------------
-
-async function createAndSubmitBid(
-  rfpUri: string,
-  rfpCid: string,
-  rfpRecord: RFP,
-  receiptUrl: string,
-): Promise<{ bidUri: string; bidCid: string }> {
-  const nowIso = new Date().toISOString();
-  const configRef = await createBidConfig(nowIso);
-  // The bid payload (bids.x402 / bids.free) is whatever the settlement layer
-  // advertises; it carries the receipt-endpoint url the requester will settle at.
-  const payloadRef = await settlement.createBidPayload(receiptUrl, nowIso);
-
-  const bid = {
-    $type: BID_NSID,
-    rfp: { $type: "com.atproto.repo.strongRef", uri: rfpUri, cid: rfpCid },
-    config: { $type: "com.atproto.repo.strongRef", uri: configRef.uri, cid: configRef.cid },
-    payload: { $type: "com.atproto.repo.strongRef", uri: payloadRef.uri, cid: payloadRef.cid },
-    // Service DID ref for the settlement leg (submitAccept via atproto-proxy),
-    // distinct from the payload's receipt url (the settle leg).
-    submitAccept: `${ownServiceDidWeb(cfg.server.baseUrl)}#${MARKET_SERVICE_ID}`,
-    createdAt: nowIso,
-  };
-
-  const bidRecord = await agent.com.atproto.repo.createRecord({
-    repo: agent.assertDid,
-    collection: BID_NSID,
-    record: bid,
-  });
-  log("info", "bidRecord", { bidRecord });
-
-  if (rfpRecord.submitBid) {
-    // rfpRecord.submitBid is a service DID ref (did:web:HOST#pdr_temp_market).
-    // Route the call through our PDS via atproto-proxy instead of raw fetch.
-    try {
-      await marketClient.submitBid(rfpRecord.submitBid, {
-        uri: bidRecord.data.uri,
-        cid: bidRecord.data.cid,
-        record: bid,
-      });
-      log("info", "submitBid proxied call", { ref: rfpRecord.submitBid });
-    } catch (err) {
-      log("warn", "submitBid proxied call failed", { ref: rfpRecord.submitBid, err: String(err) });
-    }
-  }
-
-  return { bidUri: bidRecord.data.uri, bidCid: bidRecord.data.cid };
-}
 
 // Compute factory — submitEvent pre-wired for vm.delete dispatch.
 // Synchronous (not background) so "unknown receipt"/auth errors surface in the response.

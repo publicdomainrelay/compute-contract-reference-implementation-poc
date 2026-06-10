@@ -1072,6 +1072,14 @@
           "npm:@atproto/xrpc@0.7"
         ]
       },
+      "lib/market-settlement": {
+        "dependencies": [
+          "npm:@atproto/api@~0.20.8",
+          "npm:@x402/core@^2.14.0",
+          "npm:@x402/evm@^2.14.0",
+          "npm:@x402/hono@^2.14.0"
+        ]
+      },
       "lib/market-x402": {
         "dependencies": [
           "npm:@atproto/api@~0.20.8",

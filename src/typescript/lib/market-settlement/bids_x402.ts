@@ -23,24 +23,16 @@ import {
   parseReceiptPath,
   verifyX402Payment,
 } from "@publicdomainrelay/market-x402";
-import { reqEnv } from "./env.ts";
 import { receiptUrlFor, type Settlement, type SettlementCtx } from "./settlement.ts";
 
 const PATH = "x402/receipt";
 
 function cdpAuthProvider(_keyId: string, _keySecret: string) {
-  // The @coinbase/x402 npm package exports `facilitator` with auth baked in.
-  // We re-import lazily to keep the seller runnable even when that package isn't
-  // installed; the bidder only mints receipts after payment clears.
   // deno-lint-ignore no-explicit-any
-  return async (_req: any) => ({}); // headers added by @coinbase/x402 when wired
+  return async (_req: any) => ({});
 }
 
-// CDP facilitator with header auth (matches python create_headers). CDP requires
-// a JWT per request; the auth provider builds a bearer JWT for the given request.
 function makeFacilitator(cdpApiKeyId: string, cdpApiKeySecret: string) {
-  // The CDP auth provider is supplied via a field the published FacilitatorConfig
-  // type doesn't declare; cast so this stays runnable while @x402 types catch up.
   return new HTTPFacilitatorClient({
     url: "https://api.cdp.coinbase.com/platform/v2/x402",
     authProvider: cdpAuthProvider(cdpApiKeyId, cdpApiKeySecret),
@@ -51,9 +43,9 @@ function makeFacilitator(cdpApiKeyId: string, cdpApiKeySecret: string) {
 /** Build the x402 (paying) settlement. Reads its own CDP/payee env. */
 export function createX402Settlement(ctx: SettlementCtx): Settlement {
   const { getAgent, resolve, log, baseUrl } = ctx;
-  const payTo = reqEnv("RECV_ADDR");
-  const cdpApiKeyId = reqEnv("CDP_RECV_API_KEY_ID");
-  const cdpApiKeySecret = reqEnv("CDP_RECV_API_KEY_SECRET");
+  const payTo = Deno.env.get("RECV_ADDR") ?? (() => { throw new Error("RECV_ADDR is required"); })();
+  const cdpApiKeyId = Deno.env.get("CDP_RECV_API_KEY_ID") ?? (() => { throw new Error("CDP_RECV_API_KEY_ID is required"); })();
+  const cdpApiKeySecret = Deno.env.get("CDP_RECV_API_KEY_SECRET") ?? (() => { throw new Error("CDP_RECV_API_KEY_SECRET is required"); })();
 
   return {
     mode: "x402",
