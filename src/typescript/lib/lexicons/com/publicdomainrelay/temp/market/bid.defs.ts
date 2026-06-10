@@ -4,6 +4,7 @@
 
 import { l } from '@atproto/lex'
 import * as RepoStrongRef from '../../../atproto/repo/strongRef.defs.ts'
+import * as MarketAttestation from './attestation.defs.ts'
 
 const $nsid = 'com.publicdomainrelay.temp.market.bid'
 
@@ -32,6 +33,11 @@ type Main = {
    * Service DID reference (did:web:HOST#temp_market) of the bidder's market service. Once the requester has settled payment (via the x402 flow named in the bids.x402 payload) and minted a com.publicdomainrelay.temp.market.accept, it calls com.publicdomainrelay.temp.market.submitAccept via PDS service-proxying using this value as the atproto-proxy target to provision the resource and obtain a com.publicdomainrelay.temp.market.receipt.
    */
   submitAccept?: string
+
+  /**
+   * badge.blue attestations over this bid. Must include the bidder's inline signature, attached at creation (before any accept strongRefs this record); post-hoc third-party attestations use remote com.publicdomainrelay.temp.market.attestation proof records instead, so the bid's CID stays stable.
+   */
+  signatures: MarketAttestation.Signatures
 }
 
 export type { Main }
@@ -53,6 +59,9 @@ const main = /*#__PURE__*/ l.record<'tid', Main>(
       (() => RepoStrongRef.main) as any,
     ),
     submitAccept: /*#__PURE__*/ l.optional(/*#__PURE__*/ l.string()),
+    signatures: /*#__PURE__*/ l.ref<MarketAttestation.Signatures>(
+      (() => MarketAttestation.signatures) as any,
+    ),
   }),
 )
 

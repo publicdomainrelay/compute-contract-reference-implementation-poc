@@ -13,7 +13,8 @@
           "currency",
           "frequency",
           "prepay",
-          "url"
+          "url",
+          "signatures"
         ],
         "properties": {
           "cost": {
@@ -35,6 +36,11 @@
           "url": {
             "type": "string",
             "description": "x402 payment endpoint URL. To settle payment the requester first mints a com.publicdomainrelay.temp.market.accepts.x402 record, then issues an x402-gated GET to `{url}/{accepts.x402 AT-URI}/{accepts.x402 CID}`; on payment the bidder mints and returns a com.publicdomainrelay.temp.market.receipts.x402 proof-of-payment record. That receipt is then used as the payload of the higher-level com.publicdomainrelay.temp.market.accept."
+          },
+          "signatures": {
+            "type": "ref",
+            "ref": "com.publicdomainrelay.temp.market.attestation#signatures",
+            "description": "badge.blue attestations over these payment terms. Must include the bidder's inline signature, attached at creation, so the advertised price and payment endpoint are non-repudiable."
           }
         }
       }

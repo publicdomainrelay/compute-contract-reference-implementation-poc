@@ -9,13 +9,25 @@
       "record": {
         "type": "object",
         "required": [
-          "accept"
+          "accept",
+          "cid",
+          "signatures"
         ],
         "properties": {
           "accept": {
             "type": "ref",
             "ref": "com.atproto.repo.strongRef",
             "description": "Strong reference to the com.publicdomainrelay.temp.market.accepts.x402 record that this payment settles."
+          },
+          "cid": {
+            "type": "string",
+            "format": "cid",
+            "description": "badge.blue attestation CID over the referenced accepts.x402 record, making this receipt a remote attestation proof: computed from the accepts.x402 record (signatures stripped), this receipt's metadata (cid/signatures stripped, repository = requester's repo DID added) as $sig, via DAG-CBOR + SHA-256 + CIDv1. Re-binding the proof-of-payment to a copy of the accepts.x402 in another repository fails verification — badge.blue's replay-attack prevention applied to payment receipts."
+          },
+          "signatures": {
+            "type": "ref",
+            "ref": "com.publicdomainrelay.temp.market.attestation#signatures",
+            "description": "badge.blue attestations over this receipt. Must include the bidder's inline signature, attached at creation, so the proof-of-payment is non-repudiable."
           }
         }
       }

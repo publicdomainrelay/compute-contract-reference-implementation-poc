@@ -3,6 +3,7 @@
  */
 
 import { l } from '@atproto/lex'
+import * as MarketAttestation from '../attestation.defs.ts'
 
 const $nsid = 'com.publicdomainrelay.temp.market.bids.x402'
 
@@ -36,6 +37,11 @@ type Main = {
    * x402 payment endpoint URL. To settle payment the requester first mints a com.publicdomainrelay.temp.market.accepts.x402 record, then issues an x402-gated GET to `{url}/{accepts.x402 AT-URI}/{accepts.x402 CID}`; on payment the bidder mints and returns a com.publicdomainrelay.temp.market.receipts.x402 proof-of-payment record. That receipt is then used as the payload of the higher-level com.publicdomainrelay.temp.market.accept.
    */
   url: string
+
+  /**
+   * badge.blue attestations over these payment terms. Must include the bidder's inline signature, attached at creation, so the advertised price and payment endpoint are non-repudiable.
+   */
+  signatures: MarketAttestation.Signatures
 }
 
 export type { Main }
@@ -50,6 +56,9 @@ const main = /*#__PURE__*/ l.record<'tid', Main>(
     frequency: /*#__PURE__*/ l.string(),
     prepay: /*#__PURE__*/ l.boolean(),
     url: /*#__PURE__*/ l.string(),
+    signatures: /*#__PURE__*/ l.ref<MarketAttestation.Signatures>(
+      (() => MarketAttestation.signatures) as any,
+    ),
   }),
 )
 

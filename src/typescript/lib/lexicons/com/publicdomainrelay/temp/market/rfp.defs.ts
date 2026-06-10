@@ -4,6 +4,7 @@
 
 import { l } from '@atproto/lex'
 import * as RepoStrongRef from '../../../atproto/repo/strongRef.defs.ts'
+import * as MarketAttestation from './attestation.defs.ts'
 
 const $nsid = 'com.publicdomainrelay.temp.market.rfp'
 
@@ -22,6 +23,11 @@ type Main = {
    * Service DID reference (did:web:HOST#temp_market) of the RFP issuer's market service. Optional; bypasses the need for bids to be seen in the firehose. The bidder calls com.publicdomainrelay.temp.market.submitBid via PDS service-proxying using this value as the atproto-proxy target.
    */
   submitBid?: string
+
+  /**
+   * badge.blue attestations over this RFP. Must include the issuer's inline signature, attached at creation (before any bid strongRefs this record); post-hoc third-party attestations use remote com.publicdomainrelay.temp.market.attestation proof records instead, so the RFP's CID stays stable.
+   */
+  signatures: MarketAttestation.Signatures
 }
 
 export type { Main }
@@ -35,6 +41,9 @@ const main = /*#__PURE__*/ l.record<'tid', Main>(
       (() => RepoStrongRef.main) as any,
     ),
     submitBid: /*#__PURE__*/ l.optional(/*#__PURE__*/ l.string()),
+    signatures: /*#__PURE__*/ l.ref<MarketAttestation.Signatures>(
+      (() => MarketAttestation.signatures) as any,
+    ),
   }),
 )
 

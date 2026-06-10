@@ -4,6 +4,7 @@
 
 import { l } from '@atproto/lex'
 import * as RepoStrongRef from '../../../../atproto/repo/strongRef.defs.ts'
+import * as MarketAttestation from '../attestation.defs.ts'
 
 const $nsid = 'com.publicdomainrelay.temp.market.receipts.free'
 
@@ -17,6 +18,16 @@ type Main = {
    * Strong reference to the com.publicdomainrelay.temp.market.accepts.free record that this grant settles.
    */
   accept: RepoStrongRef.Main
+
+  /**
+   * badge.blue attestation CID over the referenced accepts.free record, making this receipt a remote attestation proof: computed from the accepts.free record (signatures stripped), this receipt's metadata (cid/signatures stripped, repository = requester's repo DID added) as $sig, via DAG-CBOR + SHA-256 + CIDv1. Re-binding the grant to a copy of the accepts.free in another repository fails verification.
+   */
+  cid: l.CidString
+
+  /**
+   * badge.blue attestations over this receipt. Must include the bidder's inline signature, attached at creation, so the grant is non-repudiable.
+   */
+  signatures: MarketAttestation.Signatures
 }
 
 export type { Main }
@@ -28,6 +39,10 @@ const main = /*#__PURE__*/ l.record<'tid', Main>(
   /*#__PURE__*/ l.object({
     accept: /*#__PURE__*/ l.ref<RepoStrongRef.Main>(
       (() => RepoStrongRef.main) as any,
+    ),
+    cid: /*#__PURE__*/ l.string({ format: 'cid' }),
+    signatures: /*#__PURE__*/ l.ref<MarketAttestation.Signatures>(
+      (() => MarketAttestation.signatures) as any,
     ),
   }),
 )

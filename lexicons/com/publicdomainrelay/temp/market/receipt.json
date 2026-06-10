@@ -11,7 +11,9 @@
         "required": [
           "rfp",
           "bid",
-          "accept"
+          "accept",
+          "cid",
+          "signatures"
         ],
         "properties": {
           "rfp": {
@@ -37,6 +39,16 @@
           "submitEvent": {
             "type": "string",
             "description": "Service DID reference (did:web:HOST#compute_event) of the provider's compute-event service, scoped to this receipt's strongRef. The requester calls com.publicdomainrelay.temp.market.submitEvent via PDS service-proxying using this value as the atproto-proxy target, to report lifecycle events the provider cannot observe itself (e.g. compute.events.vm.delete when a workflow finishes or its policy engine never comes up), since the provider treats provisioned resources as a black box."
+          },
+          "cid": {
+            "type": "string",
+            "format": "cid",
+            "description": "badge.blue attestation CID over the referenced accept record, making this receipt a remote attestation proof: computed from the accept record (signatures stripped), this receipt's metadata (cid/signatures stripped, repository = accept's repo DID added) as $sig, via DAG-CBOR + SHA-256 + CIDv1. Binds the receipt to the accept's exact content in the requester's repository."
+          },
+          "signatures": {
+            "type": "ref",
+            "ref": "com.publicdomainrelay.temp.market.attestation#signatures",
+            "description": "badge.blue attestations over this receipt. Must include the provider's inline signature, attached at creation."
           }
         }
       }

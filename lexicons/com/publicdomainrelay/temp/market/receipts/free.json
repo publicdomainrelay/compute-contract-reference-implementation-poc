@@ -9,13 +9,25 @@
       "record": {
         "type": "object",
         "required": [
-          "accept"
+          "accept",
+          "cid",
+          "signatures"
         ],
         "properties": {
           "accept": {
             "type": "ref",
             "ref": "com.atproto.repo.strongRef",
             "description": "Strong reference to the com.publicdomainrelay.temp.market.accepts.free record that this grant settles."
+          },
+          "cid": {
+            "type": "string",
+            "format": "cid",
+            "description": "badge.blue attestation CID over the referenced accepts.free record, making this receipt a remote attestation proof: computed from the accepts.free record (signatures stripped), this receipt's metadata (cid/signatures stripped, repository = requester's repo DID added) as $sig, via DAG-CBOR + SHA-256 + CIDv1. Re-binding the grant to a copy of the accepts.free in another repository fails verification."
+          },
+          "signatures": {
+            "type": "ref",
+            "ref": "com.publicdomainrelay.temp.market.attestation#signatures",
+            "description": "badge.blue attestations over this receipt. Must include the bidder's inline signature, attached at creation, so the grant is non-repudiable."
           }
         }
       }

@@ -9,7 +9,8 @@
       "record": {
         "type": "object",
         "required": [
-          "bid"
+          "bid",
+          "signatures"
         ],
         "properties": {
           "bid": {
@@ -21,6 +22,11 @@
             "type": "ref",
             "ref": "com.atproto.repo.strongRef",
             "description": "Strong reference to the bid's payment terms record being accepted (for example a com.publicdomainrelay.temp.market.bids.x402)."
+          },
+          "signatures": {
+            "type": "ref",
+            "ref": "com.publicdomainrelay.temp.market.attestation#signatures",
+            "description": "badge.blue attestations over this acceptance. Must include the requester's inline signature, attached at creation; the bidder's receipts.x402 remote attestation completes the bilateral agreement."
           }
         }
       }

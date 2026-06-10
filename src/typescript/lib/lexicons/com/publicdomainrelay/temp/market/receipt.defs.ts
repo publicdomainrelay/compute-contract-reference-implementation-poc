@@ -4,6 +4,7 @@
 
 import { l } from '@atproto/lex'
 import * as RepoStrongRef from '../../../atproto/repo/strongRef.defs.ts'
+import * as MarketAttestation from './attestation.defs.ts'
 
 const $nsid = 'com.publicdomainrelay.temp.market.receipt'
 
@@ -37,6 +38,16 @@ type Main = {
    * Service DID reference (did:web:HOST#compute_event) of the provider's compute-event service, scoped to this receipt's strongRef. The requester calls com.publicdomainrelay.temp.market.submitEvent via PDS service-proxying using this value as the atproto-proxy target, to report lifecycle events the provider cannot observe itself (e.g. compute.events.vm.delete when a workflow finishes or its policy engine never comes up), since the provider treats provisioned resources as a black box.
    */
   submitEvent?: string
+
+  /**
+   * badge.blue attestation CID over the referenced accept record, making this receipt a remote attestation proof: computed from the accept record (signatures stripped), this receipt's metadata (cid/signatures stripped, repository = accept's repo DID added) as $sig, via DAG-CBOR + SHA-256 + CIDv1. Binds the receipt to the accept's exact content in the requester's repository.
+   */
+  cid: l.CidString
+
+  /**
+   * badge.blue attestations over this receipt. Must include the provider's inline signature, attached at creation.
+   */
+  signatures: MarketAttestation.Signatures
 }
 
 export type { Main }
@@ -61,6 +72,10 @@ const main = /*#__PURE__*/ l.record<'tid', Main>(
       ),
     ),
     submitEvent: /*#__PURE__*/ l.optional(/*#__PURE__*/ l.string()),
+    cid: /*#__PURE__*/ l.string({ format: 'cid' }),
+    signatures: /*#__PURE__*/ l.ref<MarketAttestation.Signatures>(
+      (() => MarketAttestation.signatures) as any,
+    ),
   }),
 )
 

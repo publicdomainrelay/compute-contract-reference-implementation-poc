@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Submit the AT-URI and CID of a bid record directly to the RFP issuer, bypassing the firehose. Used when the RFP includes a submitBid service DID reference. Must be called via PDS service-proxying (atproto-proxy); the receiver verifies the inter-service auth JWT and requires its issuer to be the DID that authored the referenced bid record.",
+      "description": "Submit the AT-URI and CID of a bid record directly to the RFP issuer, bypassing the firehose. Used when the RFP includes a submitBid service DID reference. Must be called via PDS service-proxying (atproto-proxy); the receiver verifies the inter-service auth JWT and requires its issuer to be the DID that authored the referenced bid record. The receiver additionally verifies the bid's badge.blue attestations (com.publicdomainrelay.temp.market.attestation): at least one inline signature must verify against the attestation CID recomputed for the record in its authoring repository — the same durable, replayable check applied to bids discovered via the firehose, where no service-auth JWT exists.",
       "input": {
         "encoding": "application/json",
         "schema": {

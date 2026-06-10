@@ -9,12 +9,18 @@
       "record": {
         "type": "object",
         "required": [
-          "reason"
+          "reason",
+          "signatures"
         ],
         "properties": {
           "reason": {
             "type": "string",
             "description": "Optional human-readable reason the compute is offered for free, e.g. 'open-source CI' or 'promotional'."
+          },
+          "signatures": {
+            "type": "ref",
+            "ref": "com.publicdomainrelay.temp.market.attestation#signatures",
+            "description": "badge.blue attestations over these terms. Must include the bidder's inline signature, attached at creation."
           }
         }
       }

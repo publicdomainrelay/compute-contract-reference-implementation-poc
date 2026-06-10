@@ -3,6 +3,7 @@
  */
 
 import { l } from '@atproto/lex'
+import * as MarketAttestation from '../attestation.defs.ts'
 
 const $nsid = 'com.publicdomainrelay.temp.market.bids.free'
 
@@ -16,6 +17,11 @@ type Main = {
    * Optional human-readable reason the compute is offered for free, e.g. 'open-source CI' or 'promotional'.
    */
   reason: string
+
+  /**
+   * badge.blue attestations over these terms. Must include the bidder's inline signature, attached at creation.
+   */
+  signatures: MarketAttestation.Signatures
 }
 
 export type { Main }
@@ -24,7 +30,12 @@ export type { Main }
 const main = /*#__PURE__*/ l.record<'tid', Main>(
   'tid',
   $nsid,
-  /*#__PURE__*/ l.object({ reason: /*#__PURE__*/ l.string() }),
+  /*#__PURE__*/ l.object({
+    reason: /*#__PURE__*/ l.string(),
+    signatures: /*#__PURE__*/ l.ref<MarketAttestation.Signatures>(
+      (() => MarketAttestation.signatures) as any,
+    ),
+  }),
 )
 
 export { main }

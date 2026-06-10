@@ -1,0 +1,85 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.attestation",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "badge.blue remote attestation proof record (https://badge.blue). Stored in the attestor's repository and referenced from the subject record's signatures array via com.atproto.repo.strongRef. The `cid` is the badge.blue attestation CID: the subject record (signatures stripped) with this record's metadata (cid/signature/signatures stripped, `repository` = subject's repo DID added) inserted as $sig, serialized to DAG-CBOR, SHA-256 hashed, wrapped as CIDv1 (dag-cbor codec). Verifiers recompute that CID and require it to match; copying the subject record to another repository changes the CID and invalidates the proof.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["subject", "cid", "createdAt"],
+        "properties": {
+          "subject": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the record being attested, so verifiers can fetch it and recompute the attestation CID."
+          },
+          "cid": {
+            "type": "string",
+            "format": "cid",
+            "description": "badge.blue attestation CID computed over the subject record, this record's metadata, and the subject's repository DID."
+          },
+          "issuer": {
+            "type": "string",
+            "format": "did",
+            "description": "DID of the attesting party (e.g. the did:web of the service that minted this proof)."
+          },
+          "purpose": {
+            "type": "string",
+            "description": "What this attestation asserts, e.g. 'verification', 'approval', 'endorsement'."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "signatures": {
+            "type": "ref",
+            "ref": "com.publicdomainrelay.temp.market.attestation#signatures",
+            "description": "badge.blue attestations over this proof record itself (the attestor's inline signature)."
+          }
+        }
+      }
+    },
+    "inline": {
+      "type": "object",
+      "description": "badge.blue inline attestation: an ECDSA signature over the attestation CID, embedded in the record's signatures array. The CID is computed from the record (signatures stripped), this entry's metadata (cid/signature stripped, `repository` = authoring repo DID added) inserted as $sig, DAG-CBOR + SHA-256 + CIDv1. Signatures are low-S normalized; supported curves are P-256 and K-256 (did:key).",
+      "required": ["key", "cid", "signature"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "did:key public-key reference used to verify the signature."
+        },
+        "issuer": {
+          "type": "string",
+          "format": "did",
+          "description": "DID of the signing party (e.g. the did:web of the service holding the key). Verifiers may bind `key` to this DID's document when the authoring account's DID document does not list it."
+        },
+        "issuedAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "cid": {
+          "type": "string",
+          "format": "cid",
+          "description": "The computed badge.blue attestation CID (base32 CIDv1) this entry signs."
+        },
+        "signature": {
+          "type": "bytes",
+          "description": "Low-S normalized ECDSA signature over the CID bytes."
+        }
+      }
+    },
+    "signatures": {
+      "type": "array",
+      "description": "badge.blue signatures array: inline attestations and/or strongRefs to remote attestation proof records (com.publicdomainrelay.temp.market.attestation). Always stripped from the record before attestation-CID computation, so attaching attestations never changes the signing payload.",
+      "items": {
+        "type": "union",
+        "refs": [
+          "com.publicdomainrelay.temp.market.attestation#inline",
+          "com.atproto.repo.strongRef"
+        ]
+      }
+    }
+  }
+}

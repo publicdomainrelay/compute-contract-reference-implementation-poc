@@ -4,6 +4,7 @@
 
 import { l } from '@atproto/lex'
 import * as RepoStrongRef from '../../../atproto/repo/strongRef.defs.ts'
+import * as MarketAttestation from './attestation.defs.ts'
 
 const $nsid = 'com.publicdomainrelay.temp.market.accept'
 
@@ -32,6 +33,11 @@ type Main = {
    * Service DID reference (did:web:HOST#compute_event) of the RFP issuer's compute-event service. Optional; bypasses the need for events to be seen in the firehose. The counterparty calls com.publicdomainrelay.temp.market.submitEvent via PDS service-proxying using this value as the atproto-proxy target.
    */
   submitEvent?: string
+
+  /**
+   * badge.blue attestations over this accept. Must include the requester's inline signature, attached at creation. The bidder's side of the bilateral agreement is its proof-of-settlement record (the accept's payload) and the market.receipt it mints on submitAccept, both of which are badge.blue remote attestations bound to this record.
+   */
+  signatures: MarketAttestation.Signatures
 }
 
 export type { Main }
@@ -53,6 +59,9 @@ const main = /*#__PURE__*/ l.record<'tid', Main>(
       ),
     ),
     submitEvent: /*#__PURE__*/ l.optional(/*#__PURE__*/ l.string()),
+    signatures: /*#__PURE__*/ l.ref<MarketAttestation.Signatures>(
+      (() => MarketAttestation.signatures) as any,
+    ),
   }),
 )
 

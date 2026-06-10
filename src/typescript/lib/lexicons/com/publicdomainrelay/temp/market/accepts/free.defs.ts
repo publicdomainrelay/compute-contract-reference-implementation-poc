@@ -4,6 +4,7 @@
 
 import { l } from '@atproto/lex'
 import * as RepoStrongRef from '../../../../atproto/repo/strongRef.defs.ts'
+import * as MarketAttestation from '../attestation.defs.ts'
 
 const $nsid = 'com.publicdomainrelay.temp.market.accepts.free'
 
@@ -22,6 +23,11 @@ type Main = {
    * Strong reference to the bid's terms record being accepted (for example a com.publicdomainrelay.temp.market.bids.free).
    */
   payload?: RepoStrongRef.Main
+
+  /**
+   * badge.blue attestations over this acceptance. Must include the requester's inline signature, attached at creation; the bidder's receipts.free remote attestation completes the bilateral agreement.
+   */
+  signatures: MarketAttestation.Signatures
 }
 
 export type { Main }
@@ -38,6 +44,9 @@ const main = /*#__PURE__*/ l.record<'tid', Main>(
       /*#__PURE__*/ l.ref<RepoStrongRef.Main>(
         (() => RepoStrongRef.main) as any,
       ),
+    ),
+    signatures: /*#__PURE__*/ l.ref<MarketAttestation.Signatures>(
+      (() => MarketAttestation.signatures) as any,
     ),
   }),
 )
