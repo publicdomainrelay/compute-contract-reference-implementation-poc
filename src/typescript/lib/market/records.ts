@@ -11,6 +11,8 @@ import { getPdsEndpoint } from "@atproto/common-web";
 import type { IdResolver } from "@atproto/identity";
 import { parseAtUri } from "./resolve.ts";
 import { strongRef, type StrongRef } from "./types.ts";
+import { OFFERING_NSID } from "@publicdomainrelay/lexicons";
+import type { Logger } from "./types.ts";
 
 /**
  * Create a record in the agent's own repo and return a strongRef to it. The
@@ -77,4 +79,60 @@ export async function resolvePds(idResolver: IdResolver, did: string): Promise<s
   const pds = getPdsEndpoint(doc);
   if (!pds) throw new Error(`no pds endpoint for ${did}`);
   return pds;
+}
+
+/**
+ * Ensure the agent has exactly one offering record for the given `appliesTo`
+ * NSIDs pointing at `expectedEndpoint`. Creates it if absent; updates in place
+ * if the endpoint is stale. No-ops if already correct.
+ */
+export async function ensureOfferingRecord(
+  agent: Agent,
+  appliesTo: string[],
+  expectedEndpoint: string,
+  log: Logger,
+): Promise<void> {
+  const listRes = await agent.com.atproto.repo.listRecords({
+    repo: agent.assertDid,
+    collection: OFFERING_NSID,
+    limit: 100,
+  });
+  const existing = listRes.data.records.find((r) => {
+    const value = r.value as Record<string, unknown>;
+    const at = value.appliesTo as string[] | undefined;
+    return Array.isArray(at) && appliesTo.every((nsid) => at.includes(nsid));
+  });
+  if (existing) {
+    const existingEndpoint = (existing.value as Record<string, unknown>).endpointUrl as string | undefined;
+    if (existingEndpoint === expectedEndpoint) {
+      log("info", "offering record exists", { uri: existing.uri });
+      return;
+    }
+    const rkey = existing.uri.split("/").pop()!;
+    await agent.com.atproto.repo.putRecord({
+      repo: agent.assertDid,
+      collection: OFFERING_NSID,
+      rkey,
+      record: {
+        ...(existing.value as Record<string, unknown>),
+        $type: OFFERING_NSID,
+        endpointUrl: expectedEndpoint,
+      },
+    });
+    log("info", "offering record updated", { uri: existing.uri, endpointUrl: expectedEndpoint });
+    return;
+  }
+  const res = await agent.com.atproto.repo.createRecord({
+    repo: agent.assertDid,
+    collection: OFFERING_NSID,
+    record: {
+      $type: OFFERING_NSID,
+      endpointUrl: expectedEndpoint,
+      appliesTo,
+      createdAt: new Date().toISOString(),
+    },
+  });
+  log("info", "offering record created", {
+    ref: { $type: "com.atproto.repo.strongRef", uri: res.data.uri, cid: res.data.cid },
+  });
 }

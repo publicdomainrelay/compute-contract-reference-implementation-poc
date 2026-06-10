@@ -29,8 +29,8 @@ import {
   BID_NSID,
   DEFAULT_COMPUTE_EVENT_SERVICE_ID,
   DEFAULT_MARKET_SERVICE_ID,
-  OFFERING_NSID,
   RECEIPT_NSID,
+  ensureOfferingRecord,
 } from "@publicdomainrelay/market";
 import { createMarketFactory } from "@publicdomainrelay/hono-factory-market";
 import { createMarketBidsFactory } from "@publicdomainrelay/hono-factory-market-bids";
@@ -117,59 +117,6 @@ const cfg = {
 // ATProto
 // ---------------------------------------------------------------------------
 
-// Ensure the bidder's own offering record exists for com.publicdomainrelay.temp.compute.vm.
-// If none found, create one pointing to BASE_URL.
-async function ensureOfferingRecord(): Promise<void> {
-  const listRes = await agent.com.atproto.repo.listRecords({
-    repo: agentDid,
-    collection: OFFERING_NSID,
-    limit: 100,
-  });
-  const existing = listRes.data.records.find((r) => {
-    const value = r.value as Record<string, unknown>;
-    const appliesTo = value.appliesTo as string[] | undefined;
-    return Array.isArray(appliesTo) && appliesTo.includes(VM_NSID);
-  });
-  if (!cfg.server.baseUrl) {
-    log("warn", "BASE_URL not set, skipping offering record creation");
-    return;
-  }
-  const expectedEndpoint = `${ownServiceDidWeb(cfg.server.baseUrl)}#${MARKET_SERVICE_ID}`;
-  if (existing) {
-    const existingEndpoint = (existing.value as Record<string, unknown>).endpointUrl as string | undefined;
-    if (existingEndpoint === expectedEndpoint) {
-      log("info", "offering record exists", { uri: existing.uri });
-      return;
-    }
-    // endpointUrl is stale (e.g. old service ID); update in place.
-    const rkey = existing.uri.split("/").pop()!;
-    await agent.com.atproto.repo.putRecord({
-      repo: agent.assertDid,
-      collection: OFFERING_NSID,
-      rkey,
-      record: {
-        ...(existing.value as Record<string, unknown>),
-        $type: OFFERING_NSID,
-        endpointUrl: expectedEndpoint,
-      },
-    });
-    log("info", "offering record updated", { uri: existing.uri, endpointUrl: expectedEndpoint });
-    return;
-  }
-  const res = await agent.com.atproto.repo.createRecord({
-    repo: agent.assertDid,
-    collection: OFFERING_NSID,
-    record: {
-      $type: OFFERING_NSID,
-      endpointUrl: expectedEndpoint,
-      appliesTo: [VM_NSID],
-      createdAt: new Date().toISOString(),
-    },
-  });
-  log("info", "offering record created", {
-    ref: { $type: "com.atproto.repo.strongRef", uri: res.data.uri, cid: res.data.cid },
-  });
-}
 
 // ---------------------------------------------------------------------------
 // shared deps
@@ -465,7 +412,12 @@ const makeApp = () => {
 const main = async () => {
   await loginAgent(cfg.atproto.handle, cfg.atproto.password);
   await configureAccountAuthRbac();
-  await ensureOfferingRecord();
+  if (cfg.server.baseUrl) {
+    const expectedEndpoint = `${ownServiceDidWeb(cfg.server.baseUrl)}#${MARKET_SERVICE_ID}`;
+    await ensureOfferingRecord(agent, [VM_NSID], expectedEndpoint, log);
+  } else {
+    log("warn", "BASE_URL not set, skipping offering record creation");
+  }
   const app = makeApp();
   const { port } = cfg.server;
   Deno.serve({ port, hostname: "0.0.0.0", onListen: ({ port, hostname }) => {
