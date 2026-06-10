@@ -16,17 +16,20 @@
     "npm:@atproto/api@*": "0.20.8",
     "npm:@atproto/api@~0.20.8": "0.20.8",
     "npm:@atproto/common-web@0.5": "0.5.0",
+    "npm:@atproto/crypto@0.5": "0.5.0",
     "npm:@atproto/identity@*": "0.5.0",
     "npm:@atproto/identity@0.5": "0.5.0",
     "npm:@atproto/lex@*": "0.1.3",
     "npm:@atproto/xrpc-server@~0.11.1": "0.11.1",
     "npm:@atproto/xrpc@0.7": "0.7.7",
+    "npm:@ipld/dag-cbor@^9.2.0": "9.2.7",
     "npm:@x402/core@^2.14.0": "2.14.0",
     "npm:@x402/evm@^2.14.0": "2.14.0",
     "npm:@x402/hono@^2.14.0": "2.14.0_hono@4.12.23",
     "npm:hono@^4.12.23": "4.12.23",
     "npm:jose@5": "5.10.0",
     "npm:js-yaml@^4.2.0": "4.2.0",
+    "npm:multiformats@^13.4.0": "13.4.2",
     "npm:yaml@^2.7.0": "2.9.0"
   },
   "jsr": {
@@ -194,7 +197,7 @@
       "integrity": "sha512-SGL7BHPYN0OmvtnVixieYWyh2ghxI7iHADTLfz52Xp5zR+BZY3QggIKJ32KfyYN9Ss2tduaqsY5aclEki2Aq0A==",
       "dependencies": [
         "@atproto/lex-data@0.1.1",
-        "cborg",
+        "cborg@4.5.8",
         "tslib"
       ]
     },
@@ -381,6 +384,13 @@
       "dependencies": [
         "@atproto/lexicon@0.7.1",
         "zod"
+      ]
+    },
+    "@ipld/dag-cbor@9.2.7": {
+      "integrity": "sha512-ZmfXmElRWATr+hoUTSAOr6HUcjVhOcNHDqgczc76qte2DHHFEK0ZhNzUcdTDQhF/VSIvf2ioaRTRLWwLc83sNw==",
+      "dependencies": [
+        "cborg@5.1.1",
+        "multiformats@13.4.2"
       ]
     },
     "@noble/ciphers@1.3.0": {
@@ -584,6 +594,10 @@
     },
     "cborg@4.5.8": {
       "integrity": "sha512-6/viltD51JklRhq4L7jC3zgy6gryuG5xfZ3kzpE+PravtyeQLeQmCYLREhQH7pWENg5pY4Yu/XCd6a7dKScVlw==",
+      "bin": true
+    },
+    "cborg@5.1.1": {
+      "integrity": "sha512-BDbSRIp6XrQXkTc7g+DN0RB9RrDPTUfals2ecWUlt3juPLjbAvy/V72mJcXY0Ehu0Dq/3WpNCOCT68HUTbW+lw==",
       "bin": true
     },
     "cliui@9.0.1": {
@@ -1291,6 +1305,13 @@
           "npm:@atproto/identity@0.5",
           "npm:@atproto/xrpc-server@~0.11.1",
           "npm:@atproto/xrpc@0.7"
+        ]
+      },
+      "lib/attestation": {
+        "dependencies": [
+          "npm:@atproto/crypto@0.5",
+          "npm:@ipld/dag-cbor@^9.2.0",
+          "npm:multiformats@^13.4.0"
         ]
       },
       "lib/compute": {

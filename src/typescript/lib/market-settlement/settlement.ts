@@ -11,7 +11,7 @@
 // on the mode again.
 
 import type { Agent } from "@atproto/api";
-import type { Logger, RecordResolver, StrongRef } from "@publicdomainrelay/market";
+import type { Logger, RecordResolver, RecordSigner, StrongRef } from "@publicdomainrelay/market";
 import type { MarketBidsFactoryOptions } from "@publicdomainrelay/hono-factory-market-bids";
 
 /** Cross-cutting deps every settlement implementation is built from. */
@@ -20,6 +20,8 @@ export interface SettlementCtx {
   getAgent: () => Agent;
   /** Shared record resolver (the same one injected into the market handlers). */
   resolve: RecordResolver;
+  /** Bidder's badge.blue signer — bid payloads and receipts carry its signature. */
+  getSigner: () => RecordSigner;
   log: Logger;
   /** Bidder's public base URL (its did:web origin); may be empty in dev. */
   baseUrl: string;

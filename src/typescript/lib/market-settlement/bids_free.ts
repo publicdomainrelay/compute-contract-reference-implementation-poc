@@ -1,10 +1,10 @@
-import { createRecord, type StrongRef } from "@publicdomainrelay/market";
+import { createSignedRecord, type StrongRef } from "@publicdomainrelay/market";
 import { BIDS_FREE_NSID } from "@publicdomainrelay/market-free";
 import { type Settlement, type SettlementCtx } from "./settlement.ts";
 
 /** Free settlement — no payment, no receipt endpoint, just mint the bid record. */
 export function createFreeSettlement(ctx: SettlementCtx): Settlement {
-  const { getAgent } = ctx;
+  const { getAgent, getSigner } = ctx;
 
   return {
     mode: "free",
@@ -13,10 +13,10 @@ export function createFreeSettlement(ctx: SettlementCtx): Settlement {
     receiptUrl: (_reqUrl) => "",
 
     createBidPayload: (_receiptUrl, _nowIso): Promise<StrongRef> =>
-      createRecord(getAgent(), BIDS_FREE_NSID, {
+      createSignedRecord(getAgent(), BIDS_FREE_NSID, {
         $type: BIDS_FREE_NSID,
         reason: "provided at no cost",
-      }),
+      }, getSigner()),
 
     verifyAcceptPayload: async (_payment) => {
       // Free bids have no receipt to verify.

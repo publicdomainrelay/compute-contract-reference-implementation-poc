@@ -8,13 +8,15 @@
 // becomes the payload of the higher-level market.accept.
 
 import type { Agent } from "@atproto/api";
-import { createRecord, type Logger, noopLogger, strongRef, type StrongRef } from "@publicdomainrelay/market";
+import { createSignedRecord, type Logger, noopLogger, type RecordSigner, strongRef, type StrongRef } from "@publicdomainrelay/market";
 import { ACCEPTS_X402_NSID } from "@publicdomainrelay/lexicons";
 import { assertSafeEgressUrl, type EgressOptions } from "./egress.ts";
 
 export interface SettleX402Options {
   /** Authenticated agent for the buyer's repo (mints the accepts.x402). */
   agent: Agent;
+  /** The buyer's badge.blue signer — the accepts.x402 carries its signature. */
+  signer: RecordSigner;
   /** strongRef to the winning market.bid being paid against. */
   bid: StrongRef;
   /** strongRef to the bid's payload (the bids.x402 record). */
@@ -40,19 +42,19 @@ export interface SettleX402Options {
  * fails, or the endpoint does not return a `{ uri, cid }` strongRef.
  */
 export async function settleX402Payment(opts: SettleX402Options): Promise<StrongRef> {
-  const { agent, bid, bidPayload, url } = opts;
+  const { agent, signer, bid, bidPayload, url } = opts;
   const log = opts.log ?? noopLogger;
   const doFetch = opts.fetch ?? fetch;
   const timeoutMs = opts.timeoutMs ?? 30000;
 
   assertSafeEgressUrl(url, opts.egress);
 
-  const acceptsX402 = await createRecord(agent, ACCEPTS_X402_NSID, {
+  const acceptsX402 = await createSignedRecord(agent, ACCEPTS_X402_NSID, {
     $type: ACCEPTS_X402_NSID,
     bid,
     payload: bidPayload,
     createdAt: new Date().toISOString(),
-  });
+  }, signer);
 
   const receiptUrl = `${url.replace(/\/+$/, "")}/${acceptsX402.uri}/${acceptsX402.cid}`;
   log("info", "settling x402 payment", { url: receiptUrl, acceptsX402: acceptsX402.uri });

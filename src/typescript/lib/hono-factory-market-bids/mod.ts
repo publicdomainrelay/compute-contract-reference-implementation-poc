@@ -16,7 +16,7 @@
 import { createFactory } from "hono/factory";
 import type { MiddlewareHandler } from "hono";
 import type { Agent } from "@atproto/api";
-import type { Logger, RecordResolver } from "@publicdomainrelay/market";
+import type { Logger, RecordResolver, RecordSigner } from "@publicdomainrelay/market";
 import {
   mintGrantForAccepts,
   parseGrantPath,
@@ -36,6 +36,8 @@ export type MarketBidsEnv = {
 export interface FreeGrantConfig {
   getAgent: () => Agent;
   resolve: RecordResolver;
+  /** Bidder's badge.blue signer — the minted receipts.free carries its signature. */
+  getSigner: () => RecordSigner;
   log?: Logger;
   /** Route prefix for the grant endpoint. Default: `"free/receipt"`. */
   path?: string;
@@ -44,6 +46,8 @@ export interface FreeGrantConfig {
 export interface X402ReceiptConfig {
   getAgent: () => Agent;
   resolve: RecordResolver;
+  /** Bidder's badge.blue signer — the minted receipts.x402 carries its signature. */
+  getSigner: () => RecordSigner;
   log?: Logger;
   /** Route prefix for the receipt endpoint. Default: `"x402/receipt"`. */
   path?: string;
@@ -73,11 +77,11 @@ export function createMarketBidsFactory(opts: MarketBidsFactoryOptions) {
   return createFactory<MarketBidsEnv>({
     initApp: (app) => {
       if (opts.free) {
-        const { getAgent, resolve, log = noopLog, path = "free/receipt" } = opts.free;
+        const { getAgent, resolve, getSigner, log = noopLog, path = "free/receipt" } = opts.free;
         app.get(`/${path}/*`, async (c) => {
           const { acceptsUri, acceptsCid } = parseGrantPath(c.req.path, `${path}/`);
           log("info", "free grant receipt requested", { acceptsUri, acceptsCid });
-          const ref = await mintGrantForAccepts({ agent: getAgent(), resolve, acceptsUri, acceptsCid });
+          const ref = await mintGrantForAccepts({ agent: getAgent(), resolve, acceptsUri, acceptsCid, signer: getSigner() });
           log("info", "receipts.free minted", { uri: ref.uri, cid: ref.cid });
           return c.json({ uri: ref.uri, cid: ref.cid });
         });
@@ -87,6 +91,7 @@ export function createMarketBidsFactory(opts: MarketBidsFactoryOptions) {
         const {
           getAgent,
           resolve,
+          getSigner,
           log = noopLog,
           path = "x402/receipt",
           paymentMiddleware,
@@ -97,7 +102,7 @@ export function createMarketBidsFactory(opts: MarketBidsFactoryOptions) {
         app.get(`/${path}/*`, async (c) => {
           const { acceptsUri, acceptsCid } = parseReceiptPath(c.req.path, `${path}/`);
           log("info", "x402 receipt requested", { acceptsUri, acceptsCid });
-          const ref = await mintReceiptForAccepts({ agent: getAgent(), resolve, acceptsUri, acceptsCid });
+          const ref = await mintReceiptForAccepts({ agent: getAgent(), resolve, acceptsUri, acceptsCid, signer: getSigner() });
           log("info", "receipts.x402 minted", { uri: ref.uri, cid: ref.cid });
           return c.json({ uri: ref.uri, cid: ref.cid });
         });

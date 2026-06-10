@@ -16,7 +16,7 @@
 import { paymentMiddleware, x402ResourceServer } from "@x402/hono";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
-import { createRecord, type StrongRef } from "@publicdomainrelay/market";
+import { createSignedRecord, type StrongRef } from "@publicdomainrelay/market";
 import {
   BIDS_X402_NSID,
   mintReceiptForAccepts,
@@ -42,7 +42,7 @@ function makeFacilitator(cdpApiKeyId: string, cdpApiKeySecret: string) {
 
 /** Build the x402 (paying) settlement. Reads its own CDP/payee env. */
 export function createX402Settlement(ctx: SettlementCtx): Settlement {
-  const { getAgent, resolve, log, baseUrl } = ctx;
+  const { getAgent, getSigner, resolve, log, baseUrl } = ctx;
   const payTo = Deno.env.get("RECV_ADDR") ?? (() => { throw new Error("RECV_ADDR is required"); })();
   const cdpApiKeyId = Deno.env.get("CDP_RECV_API_KEY_ID") ?? (() => { throw new Error("CDP_RECV_API_KEY_ID is required"); })();
   const cdpApiKeySecret = Deno.env.get("CDP_RECV_API_KEY_SECRET") ?? (() => { throw new Error("CDP_RECV_API_KEY_SECRET is required"); })();
@@ -54,7 +54,7 @@ export function createX402Settlement(ctx: SettlementCtx): Settlement {
     receiptUrl: (reqUrl) => receiptUrlFor(baseUrl, reqUrl, PATH),
 
     createBidPayload: (receiptUrl, nowIso): Promise<StrongRef> =>
-      createRecord(getAgent(), BIDS_X402_NSID, {
+      createSignedRecord(getAgent(), BIDS_X402_NSID, {
         $type: BIDS_X402_NSID,
         cost: 1,
         currency: "USDC",
@@ -62,7 +62,7 @@ export function createX402Settlement(ctx: SettlementCtx): Settlement {
         prepay: true,
         url: receiptUrl,
         createdAt: nowIso,
-      }),
+      }, getSigner()),
 
     verifyAcceptPayload: async (payment) => {
       await verifyX402Payment({ payment, resolve, bidderDid: getAgent().assertDid });
@@ -86,6 +86,7 @@ export function createX402Settlement(ctx: SettlementCtx): Settlement {
         x402: {
           getAgent,
           resolve,
+          getSigner,
           log,
           path: PATH,
           paymentMiddleware: mw,

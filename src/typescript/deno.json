@@ -1,6 +1,7 @@
 {
   "workspace": [
     "./lib/atproto-helpers",
+    "./lib/attestation",
     "./lib/compute",
     "./lib/compute-provider-digitalocean",
     "./lib/deno-hono-helpers",

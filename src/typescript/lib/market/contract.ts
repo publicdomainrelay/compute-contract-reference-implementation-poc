@@ -9,7 +9,9 @@
 // and the accept name the same RFP.
 
 import type { RecordResolver } from "./resolve.ts";
-import { refsEqual } from "./resolve.ts";
+import { atUriAuthority, refsEqual, stripResolved } from "./resolve.ts";
+import { verifyRecordSignatures } from "./signing.ts";
+import type { KeysForDid } from "@publicdomainrelay/attestation";
 import type { Accept, Bid, Resolved, RFP } from "./types.ts";
 
 /**
@@ -44,16 +46,37 @@ export interface ContractGraph {
  * accept (`bid.rfp === accept.rfp`), then resolves the RFP, the RFP's payload,
  * the bid's payload, and the bid's optional config. Throws
  * {@link ContractGraphError} (HTTP 400) on a bid/accept RFP mismatch.
+ *
+ * Unless `opts.verifySignatures` is false, also verifies the bid and rfp each
+ * carry a valid inline badge.blue attestation by their author (the bid by the
+ * bidder, the rfp by the requester), throwing {@link ContractGraphError} (400)
+ * on a missing or invalid signature.
  */
 export async function resolveContractGraph(
   accept: Accept,
   resolve: RecordResolver,
+  opts: { verifySignatures?: boolean; keysForDid?: KeysForDid } = {},
 ): Promise<ContractGraph> {
+  const verify = opts.verifySignatures !== false;
   const bid = await resolve.resolve<Bid>({ uri: accept.bid.uri, cid: accept.bid.cid });
   if (!refsEqual(bid.rfp, accept.rfp)) {
     throw new ContractGraphError("Accept.rfp does not match Bid.rfp");
   }
   const rfp = await resolve.resolve<RFP>({ uri: accept.rfp.uri, cid: accept.rfp.cid });
+  if (verify) {
+    const bidOk = await verifyRecordSignatures({
+      record: stripResolved(bid) as Record<string, unknown>,
+      repositoryDid: atUriAuthority(bid._uri),
+      keysForDid: opts.keysForDid,
+    });
+    if (!bidOk) throw new ContractGraphError("Bid is missing a valid badge.blue signature");
+    const rfpOk = await verifyRecordSignatures({
+      record: stripResolved(rfp) as Record<string, unknown>,
+      repositoryDid: atUriAuthority(rfp._uri),
+      keysForDid: opts.keysForDid,
+    });
+    if (!rfpOk) throw new ContractGraphError("RFP is missing a valid badge.blue signature");
+  }
   const rfpPayload = await resolve.resolve<Record<string, unknown>>({ uri: rfp.payload.uri, cid: rfp.payload.cid });
   const bidPayload = await resolve.resolve<Record<string, unknown>>({ uri: bid.payload.uri, cid: bid.payload.cid });
   const bidConfig = bid.config

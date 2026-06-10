@@ -36,11 +36,15 @@ import { IdResolver } from "npm:@atproto/identity";
 import {
   createMarketClient,
   createRecord as atprotoCreateRecord,
+  createSignedRecord,
   deleteRecord as atprotoDeleteRecord,
   listRecordsAll,
+  loadOrGenerateKeypair,
   type MarketClient,
+  type RecordSigner,
   resolvePds,
   type StrongRef,
+  verifyRecordSignatures,
   ACCEPT_NSID,
   BID_NSID,
   DEFAULT_COMPUTE_EVENT_SERVICE_ID,
@@ -693,6 +697,15 @@ export async function marketRFPSubmitWorkflow(
   const agentDidPlcKey = agentDid.split(":")[2];
   log("atproto authenticated", { did: agentDid, handle: config.handle });
 
+  // badge.blue attestation identity: every market record this spindle authors
+  // (rfp, accept, event, accepts.x402) carries an inline signature by this key.
+  const attestationKeypair = await loadOrGenerateKeypair(Deno.env.get("ATTESTATION_PRIVATE_KEY_HEX"));
+  const signer: RecordSigner = {
+    keypair: attestationKeypair,
+    issuer: spindleHostname ? `did:web:${spindleHostname}` : agentDid,
+  };
+  log("attestation keypair loaded", { key: attestationKeypair.did(), issuer: signer.issuer });
+
   // MarketClient over our own PDS session; each method service-proxies via the
   // `atproto-proxy` header carrying the target's service DID ref. See ../lib/market.
   const marketClient = createMarketClient(session);
@@ -725,7 +738,7 @@ export async function marketRFPSubmitWorkflow(
   if (spindleHostname) {
     rfpRecord.submitBid = `did:web:${spindleHostname}#${MARKET_SERVICE_ID}`;
   }
-  const rfpRef = await atprotoCreateRecord(agent, RFP_NSID, rfpRecord);
+  const rfpRef = await createSignedRecord(agent, RFP_NSID, rfpRecord, signer);
   log("market.rfp created", { uri: rfpRef.uri });
 
   // Discover vouched bidders and notify them about the RFP before opening the window.
@@ -752,6 +765,16 @@ export async function marketRFPSubmitWorkflow(
   if (!winner) throw new Error("No scoreable bid found");
   log("bid winner selected", { bidUri: winner.uri, did: winner.did, cost: winner.payload?.cost });
   log("winner", { winner: winner });
+
+  // The bid is a badge.blue-signed record by the bidder; reject it if its inline
+  // signature is missing or does not verify before we settle and accept.
+  const winnerSigOk = await verifyRecordSignatures({
+    record: winner.record as unknown as Record<string, unknown>,
+    repositoryDid: winner.did,
+  });
+  if (!winnerSigOk) {
+    throw new Error(`winning bid ${winner.uri} has no valid badge.blue signature; refusing to accept`);
+  }
 
   // The RBAC grant below is templated from the winner's config (issuer_uri, actx).
   // A bid without a resolved config cannot be authorized — fail instead of
@@ -780,6 +803,7 @@ export async function marketRFPSubmitWorkflow(
     }
     paymentReceiptRef = await settleX402Payment({
       agent,
+      signer,
       bid: bidRef,
       bidPayload: winner.record.payload,
       url: x402Url,
@@ -803,7 +827,7 @@ export async function marketRFPSubmitWorkflow(
   if (spindleHostname) {
     acceptRecord.submitEvent = `did:web:${spindleHostname}#${COMPUTE_EVENT_SERVICE_ID}`;
   }
-  const acceptRef = await atprotoCreateRecord(agent, ACCEPT_NSID, acceptRecord);
+  const acceptRef = await createSignedRecord(agent, ACCEPT_NSID, acceptRecord, signer);
   log("market.accept created", { uri: acceptRef.uri });
 
   // Create com.fedproxy.rbac BEFORE submitting receipt
@@ -940,7 +964,7 @@ export async function marketRFPSubmitWorkflow(
         payload: deletePayloadRef,
         createdAt: nowIso,
       };
-      const eventRef = await atprotoCreateRecord(agent, EVENT_NSID, eventRecord);
+      const eventRef = await createSignedRecord(agent, EVENT_NSID, eventRecord, signer);
       // providerSubmitEventUrl holds a did:web:HOST#pdr_temp_compute_event service ref;
       // route the submitEvent call through our PDS via service proxying.
       const res = await marketClient.submitEvent(providerSubmitEventUrl, {

@@ -13,6 +13,7 @@ import { parseAtUri, type RecordRef } from "./resolve.ts";
 import { strongRef, type StrongRef } from "./types.ts";
 import { OFFERING_NSID, RECEIPT_NSID } from "@publicdomainrelay/lexicons";
 import type { Logger } from "./types.ts";
+import { createRemoteProofRecord, type RecordSigner } from "./signing.ts";
 
 /**
  * Create a record in the agent's own repo and return a strongRef to it. The
@@ -43,21 +44,42 @@ export interface ReceiptRefs {
   submitEvent: string;
 }
 
+/** The accept this receipt attests, as it lives in the requester's repo. */
+export interface ReceiptSubject {
+  /** The resolved accept record value (its `signatures` array is ignored). */
+  acceptRecord: Record<string, unknown>;
+  /** DID of the repository the accept lives in (the requester). */
+  acceptRepositoryDid: string;
+}
+
 /**
  * Mint a market.receipt in the agent's own repo, binding the rfp, bid, accept,
  * and proof-of-settlement payload, and advertising where to send teardown
- * events. Returns a strongRef to the created receipt.
+ * events. The receipt is a badge.blue remote attestation proof over the accept
+ * (its `cid`) and carries the provider's inline signature. Returns a strongRef
+ * to the created receipt.
  */
-export function createReceiptRecord(agent: Agent, refs: ReceiptRefs): Promise<StrongRef> {
-  return createRecord(agent, RECEIPT_NSID, {
-    $type: RECEIPT_NSID,
-    rfp: strongRef(refs.rfp.uri, refs.rfp.cid),
-    bid: strongRef(refs.bid.uri, refs.bid.cid),
-    accept: strongRef(refs.accept.uri, refs.accept.cid),
-    payload: strongRef(refs.payload.uri, refs.payload.cid),
-    submitEvent: refs.submitEvent,
-    createdAt: new Date().toISOString(),
-  });
+export function createReceiptRecord(
+  agent: Agent,
+  refs: ReceiptRefs,
+  subject: ReceiptSubject,
+  signer: RecordSigner,
+): Promise<StrongRef> {
+  return createRemoteProofRecord(
+    agent,
+    RECEIPT_NSID,
+    {
+      $type: RECEIPT_NSID,
+      rfp: strongRef(refs.rfp.uri, refs.rfp.cid),
+      bid: strongRef(refs.bid.uri, refs.bid.cid),
+      accept: strongRef(refs.accept.uri, refs.accept.cid),
+      payload: strongRef(refs.payload.uri, refs.payload.cid),
+      submitEvent: refs.submitEvent,
+      createdAt: new Date().toISOString(),
+    },
+    { subjectRecord: subject.acceptRecord, subjectRepositoryDid: subject.acceptRepositoryDid },
+    signer,
+  );
 }
 
 /** Delete a record the agent authored, addressed by its strongRef (uri parsed). */

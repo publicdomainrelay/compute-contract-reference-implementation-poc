@@ -12,12 +12,15 @@
 import type { Agent } from "@atproto/api";
 import {
   atUriAuthority,
-  createRecord,
+  createRemoteProofRecord,
   nsidFromUri,
   type RecordResolver,
+  type RecordSigner,
   type Resolved,
   strongRef,
+  stripResolved,
   type StrongRef,
+  verifyRemoteProof,
 } from "@publicdomainrelay/market";
 import { ACCEPTS_FREE_NSID, RECEIPTS_FREE_NSID } from "@publicdomainrelay/lexicons";
 import type { Main as AcceptsFree } from "../lexicons/com/publicdomainrelay/temp/market/accepts/free.defs.ts";
@@ -55,17 +58,28 @@ export async function mintGrantForAccepts(opts: {
   resolve: RecordResolver;
   acceptsUri: string;
   acceptsCid: string;
+  /** The bidder's badge.blue signer. */
+  signer: RecordSigner;
 }): Promise<StrongRef> {
-  const { agent, resolve, acceptsUri, acceptsCid } = opts;
+  const { agent, resolve, acceptsUri, acceptsCid, signer } = opts;
   const acceptsFree = await resolve.resolve<AcceptsFree>({ uri: acceptsUri, cid: acceptsCid });
   if (acceptsFree.$type && acceptsFree.$type !== ACCEPTS_FREE_NSID) {
     throw new FreeGrantError(400, `expected ${ACCEPTS_FREE_NSID}, got ${acceptsFree.$type}`);
   }
-  return await createRecord(agent, RECEIPTS_FREE_NSID, {
-    $type: RECEIPTS_FREE_NSID,
-    accept: strongRef(acceptsUri, acceptsCid),
-    createdAt: new Date().toISOString(),
-  });
+  return await createRemoteProofRecord(
+    agent,
+    RECEIPTS_FREE_NSID,
+    {
+      $type: RECEIPTS_FREE_NSID,
+      accept: strongRef(acceptsUri, acceptsCid),
+      createdAt: new Date().toISOString(),
+    },
+    {
+      subjectRecord: stripResolved(acceptsFree) as Record<string, unknown>,
+      subjectRepositoryDid: atUriAuthority(acceptsUri),
+    },
+    signer,
+  );
 }
 
 /**
@@ -93,6 +107,19 @@ export async function verifyFreeGrant(opts: {
   }
   if (atUriAuthority(payment.uri) !== bidderDid) {
     throw new FreeGrantError(400, "Accept.payload proof-of-grant must be authored by this bidder");
+  }
+  // The receipt is a badge.blue remote attestation over the accepts.free it
+  // references; recompute its `cid` and require it to bind to that record.
+  if (receipt.accept?.uri && receipt.accept?.cid) {
+    const acceptsFree = await resolve.resolve<AcceptsFree>({ uri: receipt.accept.uri, cid: receipt.accept.cid });
+    const bound = await verifyRemoteProof({
+      subjectRecord: stripResolved(acceptsFree) as Record<string, unknown>,
+      subjectRepositoryDid: atUriAuthority(receipt.accept.uri),
+      proofRecord: stripResolved(receipt) as Record<string, unknown>,
+    });
+    if (!bound) {
+      throw new FreeGrantError(400, "Accept.payload proof-of-grant CID does not bind to its accepts.free");
+    }
   }
   return receipt;
 }

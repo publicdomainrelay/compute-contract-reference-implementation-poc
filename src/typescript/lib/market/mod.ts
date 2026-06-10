@@ -12,8 +12,10 @@
 
 export * from "./types.ts";
 export * from "@publicdomainrelay/lexicons";
+export * from "@publicdomainrelay/attestation";
 export * from "./resolve.ts";
 export * from "./records.ts";
+export * from "./signing.ts";
 export * from "./contract.ts";
 export * from "./auth.ts";
 export * from "./egress.ts";

@@ -7,7 +7,7 @@
 import type { Agent } from "@atproto/api";
 import { BID_NSID } from "@publicdomainrelay/lexicons";
 import type { RFP, Logger, StrongRef } from "./types.ts";
-import { createRecord } from "./records.ts";
+import { createSignedRecord, type RecordSigner } from "./signing.ts";
 import { MarketClient } from "./client.ts";
 
 export interface BidFactoryDeps {
@@ -17,6 +17,8 @@ export interface BidFactoryDeps {
   getMarketClient: () => MarketClient;
   /** Bidder's `did:web` service DID string (e.g. `did:web:host#pdr_temp_market`). */
   submitAcceptServiceDid: string;
+  /** The bidder's badge.blue signer — the bid carries its inline signature. */
+  getSigner: () => RecordSigner;
   log: Logger;
 }
 
@@ -32,7 +34,7 @@ export interface BidSettlementDeps {
  * optionally proxies a `submitBid` call back to the RFP issuer.
  */
 export function createBidFactory(deps: BidFactoryDeps) {
-  const { getAgent, createBidConfig, getMarketClient, submitAcceptServiceDid, log } = deps;
+  const { getAgent, createBidConfig, getMarketClient, submitAcceptServiceDid, getSigner, log } = deps;
 
   return async function createAndSubmitBid(
     rfpUri: string,
@@ -54,7 +56,7 @@ export function createBidFactory(deps: BidFactoryDeps) {
       createdAt: nowIso,
     };
 
-    const bidRef = await createRecord(getAgent(), BID_NSID, bid);
+    const bidRef = await createSignedRecord(getAgent(), BID_NSID, bid, getSigner());
     log("info", "bidRecord", { bidRecord: bidRef });
 
     if (rfpRecord.submitBid) {

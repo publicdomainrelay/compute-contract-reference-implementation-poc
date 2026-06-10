@@ -20,7 +20,9 @@ import {
   SUBMIT_RFP_LXM,
 } from "@publicdomainrelay/lexicons";
 import { verifyMarketServiceAuth } from "./auth.ts";
-import { atUriAuthority, nsidFromUri, type RecordResolver } from "./resolve.ts";
+import { atUriAuthority, nsidFromUri, stripResolved, type RecordResolver } from "./resolve.ts";
+import { verifyRecordSignatures } from "./signing.ts";
+import { createDidKeyResolver, type KeysForDid } from "@publicdomainrelay/attestation";
 import { noopLogger } from "./types.ts";
 import type { IdResolver } from "@atproto/identity";
 import type { Accept, Bid, Logger, MarketEvent, Resolved, RFP } from "./types.ts";
@@ -39,6 +41,18 @@ export interface MarketServerDeps {
   idResolver: IdResolver;
   /** Strong-ref resolver used to fetch referenced records. */
   resolve: RecordResolver;
+  /**
+   * Verify each inbound record carries a valid inline badge.blue attestation by
+   * its author before dispatching. Defaults to true; set false to disable.
+   */
+  verifySignatures?: boolean;
+  /**
+   * Additionally require the signing did:key to be vouched for by the issuer (or
+   * author) DID document — needs the producer to publish its attestation key
+   * (see attestationVerificationMethod). Defaults to false (signature validity
+   * only, which already proves the record is untampered).
+   */
+  bindKeys?: boolean;
   /** Optional structured logger. Defaults to a no-op. */
   log?: Logger;
 }
@@ -115,6 +129,40 @@ async function authorize(
   return { issuerDid: auth.issuerDid, serviceId: auth.serviceId };
 }
 
+/**
+ * Build the key resolver used for `bindKeys` verification (or undefined when not
+ * binding). Constructed once per handler factory so DID-doc lookups are cached.
+ */
+function keysForDidFrom(deps: MarketServerDeps): KeysForDid | undefined {
+  return deps.bindKeys ? createDidKeyResolver(deps.idResolver) : undefined;
+}
+
+/**
+ * Verify a record carries a valid inline badge.blue attestation by its author.
+ * Returns a ready-to-send 400 Response on failure, or null when ok / disabled.
+ * `record` must be the bare record value (call stripResolved on resolved ones).
+ */
+async function verifyAuthored(
+  deps: MarketServerDeps,
+  record: Record<string, unknown>,
+  recordUri: string,
+  keysForDid: KeysForDid | undefined,
+  log: Logger,
+  label: string,
+): Promise<Response | null> {
+  if (deps.verifySignatures === false) return null;
+  const ok = await verifyRecordSignatures({
+    record,
+    repositoryDid: atUriAuthority(recordUri),
+    keysForDid,
+  });
+  if (!ok) {
+    log("warn", `${label} rejected: missing or invalid badge.blue signature`, { uri: recordUri });
+    return xrpcError("InvalidRequest", "record is missing a valid badge.blue signature", 400);
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // submitRfp
 // ---------------------------------------------------------------------------
@@ -152,6 +200,7 @@ export function createSubmitRfpHandler(cfg: SubmitRfpHandlerConfig): Handler {
   const { deps, callbacks } = cfg;
   const log = deps.log ?? noopLogger;
   const serviceIds = Object.keys(callbacks);
+  const keysForDid = keysForDidFrom(deps);
 
   return async (req) => {
     const body = await readJson<{ rfpUri?: string; rfpCid?: string }>(req);
@@ -165,6 +214,8 @@ export function createSubmitRfpHandler(cfg: SubmitRfpHandlerConfig): Handler {
     log("info", "submitRfp received", { rfpUri, rfpCid });
 
     const rfp = await deps.resolve.resolve<RFP & { $type?: string }>({ uri: rfpUri, cid: rfpCid });
+    const sigErr = await verifyAuthored(deps, stripResolved(rfp) as Record<string, unknown>, rfpUri, keysForDid, log, "submitRfp");
+    if (sigErr) return sigErr;
     const payloadNsid = rfp.payload ? nsidFromUri(rfp.payload.uri) : "";
 
     const bucketId = auth.serviceId ?? (serviceIds.length === 1 ? serviceIds[0] : undefined);
@@ -218,6 +269,7 @@ export interface SubmitBidHandlerConfig {
 export function createSubmitBidHandler(cfg: SubmitBidHandlerConfig): Handler {
   const { deps, serviceIds, onBid } = cfg;
   const log = deps.log ?? noopLogger;
+  const keysForDid = keysForDidFrom(deps);
   return async (req) => {
     const body = await readJson<{ uri?: string; cid?: string; record?: Bid & { $type?: string } }>(req);
     if (!body) return xrpcError("InvalidRequest", "invalid JSON", 400);
@@ -228,6 +280,9 @@ export function createSubmitBidHandler(cfg: SubmitBidHandlerConfig): Handler {
     if (auth instanceof Response) return auth;
 
     log("info", "submitBid received", { uri, cid });
+
+    const sigErr = await verifyAuthored(deps, record as unknown as Record<string, unknown>, uri, keysForDid, log, "submitBid");
+    if (sigErr) return sigErr;
 
     return finish(await onBid({
       uri,
@@ -272,6 +327,7 @@ export interface SubmitAcceptHandlerConfig {
 export function createSubmitAcceptHandler(cfg: SubmitAcceptHandlerConfig): Handler {
   const { deps, serviceIds, onAccept } = cfg;
   const log = deps.log ?? noopLogger;
+  const keysForDid = keysForDidFrom(deps);
   return async (req) => {
     const body = await readJson<{ acceptUri?: string; acceptCid?: string }>(req);
     if (!body) return xrpcError("InvalidRequest", "invalid JSON", 400);
@@ -284,6 +340,8 @@ export function createSubmitAcceptHandler(cfg: SubmitAcceptHandlerConfig): Handl
     log("info", "submitAccept received", { acceptUri, acceptCid });
 
     const accept = await deps.resolve.resolve<Accept & { $type?: string }>({ uri: acceptUri, cid: acceptCid });
+    const sigErr = await verifyAuthored(deps, stripResolved(accept) as Record<string, unknown>, acceptUri, keysForDid, log, "submitAccept");
+    if (sigErr) return sigErr;
 
     return finish(await onAccept({
       acceptUri,
@@ -343,6 +401,7 @@ export function createSubmitEventHandler(cfg: SubmitEventHandlerConfig): Handler
   const { deps, callbacks } = cfg;
   const log = deps.log ?? noopLogger;
   const serviceIds = Object.keys(callbacks);
+  const keysForDid = keysForDidFrom(deps);
 
   return async (req) => {
     const body = await readJson<{ uri?: string; cid?: string; record?: { receipt?: unknown; payload?: unknown } }>(req);
@@ -361,6 +420,8 @@ export function createSubmitEventHandler(cfg: SubmitEventHandlerConfig): Handler
     if (event.$type && event.$type !== EVENT_NSID) {
       return xrpcError("InvalidRequest", `expected ${EVENT_NSID}`, 400);
     }
+    const sigErr = await verifyAuthored(deps, stripResolved(event) as Record<string, unknown>, uri, keysForDid, log, "submitEvent");
+    if (sigErr) return sigErr;
     const payloadNsid = nsidFromUri(event.payload.uri);
 
     // Pick the callbacks bucket: prefer the service id the token's aud matched;

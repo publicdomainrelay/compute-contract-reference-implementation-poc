@@ -27,12 +27,16 @@ import {
   ACCEPT_NSID,
   DEFAULT_COMPUTE_EVENT_SERVICE_ID,
   DEFAULT_MARKET_SERVICE_ID,
+  type RecordSigner,
+  attestationVerificationMethod,
   createReceiptRecord,
   ensureOfferingRecord,
   createBidFactory,
+  loadOrGenerateKeypair,
   refKey,
   resolveContractGraph,
   resolvedRef,
+  stripResolved,
 } from "@publicdomainrelay/market";
 import { createMarketFactory } from "@publicdomainrelay/hono-factory-market";
 import { createMarketBidsFactory } from "@publicdomainrelay/hono-factory-market-bids";
@@ -144,9 +148,17 @@ const marketDeps: MarketServerDeps = {
 // Settlement layer (x402 = paid, free = no-cost). Chosen once at startup; the
 // rest of the bidder is settlement-agnostic. getAgent is a getter because
 // `agent` is only assigned once loginAgent() resolves.
+// The bidder's badge.blue attestation identity. The keypair is loaded in main()
+// from ATTESTATION_PRIVATE_KEY_HEX (or generated, which won't survive restarts);
+// getSigner is a getter so the module-level factories can capture it before it
+// is assigned, mirroring how `agent` is wired.
+let attestationSigner: RecordSigner;
+const getSigner = (): RecordSigner => attestationSigner;
+
 const settlementCtx: SettlementCtx = {
   getAgent: () => agent,
   resolve: recordResolver,
+  getSigner,
   log,
   baseUrl: cfg.server.baseUrl,
 };
@@ -186,6 +198,7 @@ const createAndSubmitBid = createBidFactory({
   createBidConfig,
   getMarketClient: () => marketClient,
   submitAcceptServiceDid: `${ownServiceDidWeb(cfg.server.baseUrl)}#${MARKET_SERVICE_ID}`,
+  getSigner,
   log,
 });
 
@@ -242,13 +255,18 @@ const marketFactory = createMarketFactory(marketDeps, {
     // caller knows where to send those events, keyed by a strongRef to this receipt.
     const submitEventUrl = `${ownServiceDidWeb(cfg.server.baseUrl)}#${COMPUTE_EVENT_SERVICE_ID}`;
 
-    const receiptRef = await createReceiptRecord(agent, {
-      rfp: accept.rfp,
-      bid: { uri: bid._uri, cid: bid._cid },
-      accept: { uri: acceptUri, cid: acceptCid },
-      payload: payloadRef,
-      submitEvent: submitEventUrl,
-    });
+    const receiptRef = await createReceiptRecord(
+      agent,
+      {
+        rfp: accept.rfp,
+        bid: { uri: bid._uri, cid: bid._cid },
+        accept: { uri: acceptUri, cid: acceptCid },
+        payload: payloadRef,
+        submitEvent: submitEventUrl,
+      },
+      { acceptRecord: stripResolved(accept) as Record<string, unknown>, acceptRepositoryDid: requesterDid },
+      getSigner(),
+    );
 
     const id = receiptRef.uri.split("/").slice(-1)[0];
 
@@ -325,9 +343,13 @@ const makeApp = () => {
   app.get("/.well-known/did.json", (c) => {
     if (!cfg.server.baseUrl) return c.json({ error: "NotFound", message: "BASE_URL not configured" }, 404);
     const host = new URL(cfg.server.baseUrl).host;
+    const did = `did:web:${host}`;
     return c.json({
-      "@context": ["https://www.w3.org/ns/did/v1"],
-      id: `did:web:${host}`,
+      "@context": ["https://www.w3.org/ns/did/v1", "https://w3id.org/security/multikey/v1"],
+      id: did,
+      // Publishes the bidder's badge.blue attestation key so verifiers can bind
+      // the inline signatures on its bids/receipts to this did:web (the `issuer`).
+      verificationMethod: [attestationVerificationMethod(did, attestationSigner.keypair.did())],
       service: [
         { id: `#${MARKET_SERVICE_ID}`, type: "PDRTempMarket", serviceEndpoint: `https://${host}` },
         { id: `#${COMPUTE_EVENT_SERVICE_ID}`, type: "PDRTempComputeEvent", serviceEndpoint: `https://${host}` },
@@ -349,6 +371,12 @@ const makeApp = () => {
 
 const main = async () => {
   await loginAgent(cfg.atproto.handle, cfg.atproto.password);
+  const keypair = await loadOrGenerateKeypair(Deno.env.get("ATTESTATION_PRIVATE_KEY_HEX"));
+  attestationSigner = {
+    keypair,
+    issuer: cfg.server.baseUrl ? ownServiceDidWeb(cfg.server.baseUrl) : agentDid,
+  };
+  log("info", "attestation keypair loaded", { key: keypair.did(), issuer: attestationSigner.issuer });
   await configureAccountAuthRbac();
   if (cfg.server.baseUrl) {
     const expectedEndpoint = `${ownServiceDidWeb(cfg.server.baseUrl)}#${MARKET_SERVICE_ID}`;
