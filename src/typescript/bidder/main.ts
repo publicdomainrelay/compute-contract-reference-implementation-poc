@@ -184,7 +184,7 @@ const {
 const createAndSubmitBid = createBidFactory({
   getAgent: () => agent,
   createBidConfig,
-  marketClient,
+  getMarketClient: () => marketClient,
   submitAcceptServiceDid: `${ownServiceDidWeb(cfg.server.baseUrl)}#${MARKET_SERVICE_ID}`,
   log,
 });

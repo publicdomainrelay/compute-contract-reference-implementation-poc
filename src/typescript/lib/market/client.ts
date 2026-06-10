@@ -16,6 +16,20 @@ import {
 } from "@publicdomainrelay/lexicons";
 import type { StrongRef } from "./types.ts";
 
+// Minimal LexiconDoc stubs for the four market submit procedures.
+// XrpcClient.call() requires a registered lexicon to determine HTTP method
+// and build the request URL; without these it throws "Lexicon not found".
+const MARKET_PROCEDURE_LEXICONS = [
+  SUBMIT_RFP_NSID,
+  SUBMIT_BID_NSID,
+  SUBMIT_ACCEPT_NSID,
+  SUBMIT_EVENT_NSID,
+].map((id) => ({
+  lexicon: 1 as const,
+  id,
+  defs: { main: { type: "procedure" as const } },
+}));
+
 /**
  * What @atproto/xrpc accepts as its first constructor argument: a service URL,
  * a CredentialSession, an Agent, or any fetch handler. Kept loose so callers
@@ -61,7 +75,7 @@ export class MarketClient {
   readonly xrpc: XrpcClient;
 
   constructor(service: XrpcService) {
-    this.xrpc = new XrpcClient(service);
+    this.xrpc = new XrpcClient(service, MARKET_PROCEDURE_LEXICONS);
   }
 
   /**

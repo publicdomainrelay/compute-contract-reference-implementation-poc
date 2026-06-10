@@ -14,7 +14,7 @@ export interface BidFactoryDeps {
   getAgent: () => Agent;
   /** Mint the provider-specific bid config record and return its ref. */
   createBidConfig: (nowIso: string) => Promise<StrongRef>;
-  marketClient: MarketClient;
+  getMarketClient: () => MarketClient;
   /** Bidder's `did:web` service DID string (e.g. `did:web:host#pdr_temp_market`). */
   submitAcceptServiceDid: string;
   log: Logger;
@@ -32,7 +32,7 @@ export interface BidSettlementDeps {
  * optionally proxies a `submitBid` call back to the RFP issuer.
  */
 export function createBidFactory(deps: BidFactoryDeps) {
-  const { getAgent, createBidConfig, marketClient, submitAcceptServiceDid, log } = deps;
+  const { getAgent, createBidConfig, getMarketClient, submitAcceptServiceDid, log } = deps;
 
   return async function createAndSubmitBid(
     rfpUri: string,
@@ -59,7 +59,7 @@ export function createBidFactory(deps: BidFactoryDeps) {
 
     if (rfpRecord.submitBid) {
       try {
-        await marketClient.submitBid(rfpRecord.submitBid, {
+        await getMarketClient().submitBid(rfpRecord.submitBid, {
           uri: bidRef.uri,
           cid: bidRef.cid,
           record: bid,
