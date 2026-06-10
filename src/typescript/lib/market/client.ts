@@ -15,6 +15,7 @@ import {
   SUBMIT_RFP_NSID,
 } from "@publicdomainrelay/lexicons";
 import type { StrongRef } from "./types.ts";
+import type { SignedRecord } from "./signing.ts";
 
 // Minimal LexiconDoc stubs for the four market submit procedures.
 // XrpcClient.call() requires a registered lexicon to determine HTTP method
@@ -88,14 +89,13 @@ export class MarketClient {
   }
 
   /**
-   * Submit a bid record back to the RFP issuer (RFP's `submitBid` ref).
+   * Submit a bid record back to the RFP issuer (RFP's `submitBid` ref). Takes a
+   * {@link SignedRecord} — the signed envelope from `createSignedRecord` — so an
+   * unsigned body cannot be sent; that is a compile error, not a runtime reject.
    * @param target service DID ref to proxy to.
    */
-  async submitBid(
-    target: string,
-    input: { uri: string; cid: string; record: Record<string, unknown> },
-  ): Promise<SubmitBidResult> {
-    const res = await this.xrpc.call(SUBMIT_BID_NSID, {}, input, { headers: proxyHeaders(target) });
+  async submitBid(target: string, bid: SignedRecord): Promise<SubmitBidResult> {
+    const res = await this.xrpc.call(SUBMIT_BID_NSID, {}, bid, { headers: proxyHeaders(target) });
     return res.data as SubmitBidResult;
   }
 
@@ -114,11 +114,8 @@ export class MarketClient {
    * accept/receipt's `submitEvent` ref).
    * @param target service DID ref to proxy to, e.g. `did:web:HOST#pdr_temp_compute_event`.
    */
-  async submitEvent(
-    target: string,
-    input: { uri: string; cid: string; record: Record<string, unknown> },
-  ): Promise<SubmitEventResult> {
-    const res = await this.xrpc.call(SUBMIT_EVENT_NSID, {}, input, { headers: proxyHeaders(target) });
+  async submitEvent(target: string, event: SignedRecord): Promise<SubmitEventResult> {
+    const res = await this.xrpc.call(SUBMIT_EVENT_NSID, {}, event, { headers: proxyHeaders(target) });
     return res.data as SubmitEventResult;
   }
 }

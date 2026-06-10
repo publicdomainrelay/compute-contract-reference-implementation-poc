@@ -7,7 +7,7 @@
 import type { Agent } from "@atproto/api";
 import { BID_NSID } from "@publicdomainrelay/lexicons";
 import type { RFP, Logger, StrongRef } from "./types.ts";
-import { createSignedRecord, type RecordSigner } from "./signing.ts";
+import { createAndForwardSignedRecord, type RecordSigner } from "./signing.ts";
 import { MarketClient } from "./client.ts";
 
 export interface BidFactoryDeps {
@@ -56,22 +56,27 @@ export function createBidFactory(deps: BidFactoryDeps) {
       createdAt: nowIso,
     };
 
-    const bidRef = await createSignedRecord(getAgent(), BID_NSID, bid, getSigner());
+    // Sign → create → (best-effort) forward in one call. The forward callback
+    // receives the signed envelope, so the unsigned `bid` literal above can
+    // never reach the wire — submitBid only accepts a SignedRecord.
+    const submitBidRef = rfpRecord.submitBid;
+    const bidRef = await createAndForwardSignedRecord(
+      getAgent(),
+      BID_NSID,
+      bid,
+      getSigner(),
+      submitBidRef
+        ? async (signed) => {
+          try {
+            await getMarketClient().submitBid(submitBidRef, signed);
+            log("info", "submitBid proxied call", { ref: submitBidRef });
+          } catch (err) {
+            log("warn", "submitBid proxied call failed", { ref: submitBidRef, err: String(err) });
+          }
+        }
+        : undefined,
+    );
     log("info", "bidRecord", { bidRecord: { uri: bidRef.uri, cid: bidRef.cid } });
-
-    if (rfpRecord.submitBid) {
-      try {
-        await getMarketClient().submitBid(rfpRecord.submitBid, {
-          uri: bidRef.uri,
-          cid: bidRef.cid,
-          // Forward the signed body (with `signatures`), not the unsigned input.
-          record: bidRef.record,
-        });
-        log("info", "submitBid proxied call", { ref: rfpRecord.submitBid });
-      } catch (err) {
-        log("warn", "submitBid proxied call failed", { ref: rfpRecord.submitBid, err: String(err) });
-      }
-    }
 
     return { bidUri: bidRef.uri, bidCid: bidRef.cid };
   };

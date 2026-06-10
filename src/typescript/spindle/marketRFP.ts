@@ -967,11 +967,9 @@ export async function marketRFPSubmitWorkflow(
       const eventRef = await createSignedRecord(agent, EVENT_NSID, eventRecord, signer);
       // providerSubmitEventUrl holds a did:web:HOST#pdr_temp_compute_event service ref;
       // route the submitEvent call through our PDS via service proxying.
-      const res = await marketClient.submitEvent(providerSubmitEventUrl, {
-        uri: eventRef.uri,
-        cid: eventRef.cid,
-        record: eventRecord,
-      });
+      // eventRef is a SignedRecord, so the attested body is forwarded by
+      // construction — submitEvent won't accept anything unsigned.
+      const res = await marketClient.submitEvent(providerSubmitEventUrl, eventRef);
       log("submitEvent vm.delete POST", { url: providerSubmitEventUrl, reason, success: res.ok });
     } catch (err) {
       log("submitEvent vm.delete POST failed", { url: providerSubmitEventUrl, reason, err: String(err) });

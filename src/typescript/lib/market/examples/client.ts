@@ -11,7 +11,7 @@
 //     deno run --allow-net --allow-env client.ts
 
 import { CredentialSession } from "@atproto/api";
-import { createMarketClient } from "../mod.ts";
+import { createMarketClient, type SignedRecord } from "../mod.ts";
 
 const session = new CredentialSession(new URL(Deno.env.get("ATPROTO_PDS") ?? "https://bsky.social"));
 await session.login({
@@ -30,12 +30,16 @@ const rfp = { uri: "at://…/rfp/1", cid: "bafy…" };
 // 1. Requester asks a bidder to bid on an RFP.
 await market.submitRfp(bidderMarketRef, { rfpUri: rfp.uri, rfpCid: rfp.cid });
 
-// 2. Bidder submits a bid back to the RFP issuer (rfp.submitBid ref).
-await market.submitBid("did:web:requester.example#pdr_temp_market", {
+// 2. Bidder submits a bid back to the RFP issuer (rfp.submitBid ref). The bid is
+//    a SignedRecord minted by createSignedRecord(agent, BID_NSID, …, signer) —
+//    submitBid only accepts the signed envelope, so an unsigned body is a
+//    compile error. (Placeholder cast here; see the bidder for the real mint.)
+const signedBid = {
   uri: "at://…/bid/1",
   cid: "bafy…",
-  record: { /* the com.publicdomainrelay.temp.market.bid record */ },
-});
+  record: { /* the signed com.publicdomainrelay.temp.market.bid record */ },
+} as unknown as SignedRecord;
+await market.submitBid("did:web:requester.example#pdr_temp_market", signedBid);
 
 // 3. Requester settles by accepting the winning bid (bid.submitAccept ref). The
 //    accept's `payload` is the receipt from your settlement layer — see the
@@ -46,10 +50,12 @@ const receipt = await market.submitAccept(bidderMarketRef, {
 });
 
 // 4. Later, report a lifecycle event against that receipt (receipt.submitEvent).
-await market.submitEvent(receipt.submitEvent, {
+//    Like the bid, the event is a SignedRecord from createSignedRecord.
+const signedEvent = {
   uri: "at://…/event/1",
   cid: "bafy…",
-  record: { /* the com.publicdomainrelay.temp.market.event record */ },
-});
+  record: { /* the signed com.publicdomainrelay.temp.market.event record */ },
+} as unknown as SignedRecord;
+await market.submitEvent(receipt.submitEvent, signedEvent);
 
 console.error("contract settled; receipt:", receipt.uri);
