@@ -10,8 +10,8 @@
 //   ATPROTO_PDS=https://bsky.social ATPROTO_HANDLE=you.example ATPROTO_PASSWORD=… \
 //     deno run --allow-net --allow-env client.ts
 
-import { CredentialSession } from "@atproto/api";
-import { createMarketClient, type SignedRecord } from "../mod.ts";
+import { Agent, CredentialSession } from "@atproto/api";
+import { createMarketClient, loadOrGenerateKeypair, type RecordSigner } from "../mod.ts";
 
 const session = new CredentialSession(new URL(Deno.env.get("ATPROTO_PDS") ?? "https://bsky.social"));
 await session.login({
@@ -19,27 +19,31 @@ await session.login({
   password: Deno.env.get("ATPROTO_PASSWORD")!,
 });
 
-// Pass any handler @atproto/xrpc accepts: a CredentialSession, an Agent, etc.
-const market = createMarketClient(session);
+// A signer-bound client signs + writes + forwards records for you. Give it the
+// agent whose repo records are written to and your badge.blue signer; then the
+// submit methods take *unsigned* record bodies. (For ref-only calls like
+// submitRfp/submitAccept you can omit { agent, signer }.)
+const agent = new Agent(session);
+const signer: RecordSigner = {
+  keypair: await loadOrGenerateKeypair(Deno.env.get("ATTESTATION_PRIVATE_KEY_HEX")),
+  issuer: "did:web:you.example",
+};
+const market = createMarketClient(session, { agent, signer });
 
-// These refs/records would come from your own repo + the counterparty's
-// offering record; they are placeholders so the example type-checks.
 const bidderMarketRef = "did:web:bidder.example#pdr_temp_market";
 const rfp = { uri: "at://…/rfp/1", cid: "bafy…" };
 
 // 1. Requester asks a bidder to bid on an RFP.
 await market.submitRfp(bidderMarketRef, { rfpUri: rfp.uri, rfpCid: rfp.cid });
 
-// 2. Bidder submits a bid back to the RFP issuer (rfp.submitBid ref). The bid is
-//    a SignedRecord minted by createSignedRecord(agent, BID_NSID, …, signer) —
-//    submitBid only accepts the signed envelope, so an unsigned body is a
-//    compile error. (Placeholder cast here; see the bidder for the real mint.)
-const signedBid = {
-  uri: "at://…/bid/1",
-  cid: "bafy…",
-  record: { /* the signed com.publicdomainrelay.temp.market.bid record */ },
-} as unknown as SignedRecord;
-await market.submitBid("did:web:requester.example#pdr_temp_market", signedBid);
+// 2. Bidder submits a bid back to the RFP issuer (rfp.submitBid ref). Pass the
+//    *unsigned* bid body — the client signs it, writes it to your repo, and
+//    forwards the attested copy. There is no API that accepts an unsigned body.
+const { ref: bidRef, ok } = await market.submitBid("did:web:requester.example#pdr_temp_market", {
+  $type: "com.publicdomainrelay.temp.market.bid",
+  /* …the rest of the bid record's fields… */
+});
+console.error("bid created:", bidRef.uri, "forwarded:", ok);
 
 // 3. Requester settles by accepting the winning bid (bid.submitAccept ref). The
 //    accept's `payload` is the receipt from your settlement layer — see the
@@ -50,12 +54,10 @@ const receipt = await market.submitAccept(bidderMarketRef, {
 });
 
 // 4. Later, report a lifecycle event against that receipt (receipt.submitEvent).
-//    Like the bid, the event is a SignedRecord from createSignedRecord.
-const signedEvent = {
-  uri: "at://…/event/1",
-  cid: "bafy…",
-  record: { /* the signed com.publicdomainrelay.temp.market.event record */ },
-} as unknown as SignedRecord;
-await market.submitEvent(receipt.submitEvent, signedEvent);
+//    Like the bid, you pass the unsigned event body and the client signs it.
+await market.submitEvent(receipt.submitEvent, {
+  $type: "com.publicdomainrelay.temp.market.event",
+  /* …the rest of the event record's fields… */
+});
 
 console.error("contract settled; receipt:", receipt.uri);

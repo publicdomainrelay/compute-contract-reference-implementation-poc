@@ -54,9 +54,7 @@ export type Signed<T extends Record<string, unknown> = Record<string, unknown>> 
  * `{ uri, cid, record }` triple by hand from a separately-held record, which is
  * exactly how the unsigned body used to leak onto the wire.
  */
-export interface SignedRecord<T extends Record<string, unknown> = Record<string, unknown>> {
-  uri: string;
-  cid: string;
+export interface SignedRecord<T extends Record<string, unknown> = Record<string, unknown>> extends StrongRef {
   record: Signed<T>;
 }
 
@@ -90,27 +88,6 @@ export async function createSignedRecord<T extends Record<string, unknown>>(
   // The envelope binds the ref to the very bytes we signed and wrote, so any
   // caller that forwards `record` transmits the attested copy by construction.
   return { uri: ref.uri, cid: ref.cid, record: signed as unknown as Signed<T> };
-}
-
-/**
- * Sign `record`, write it to the agent's repo, and — when `forward` is given —
- * hand the *same* signed envelope to a counterparty, in one call. `forward`
- * receives the {@link SignedRecord} this function just produced, so there is no
- * intermediate unsigned variable for a caller to grab by mistake: the
- * sign → create → submit seam, where the unsigned body used to leak, is closed
- * by construction. `forward` errors propagate; wrap the callback yourself if the
- * proxied submit is best-effort (as the bidder does).
- */
-export async function createAndForwardSignedRecord<T extends Record<string, unknown>>(
-  agent: Agent,
-  collection: string,
-  record: T,
-  signer: RecordSigner,
-  forward?: (signed: SignedRecord<T>) => Promise<unknown>,
-): Promise<SignedRecord<T>> {
-  const signed = await createSignedRecord(agent, collection, record, signer);
-  if (forward) await forward(signed);
-  return signed;
 }
 
 /** The subject a remote attestation proof binds to. */

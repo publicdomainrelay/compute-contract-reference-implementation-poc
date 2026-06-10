@@ -32,6 +32,8 @@ import {
   createReceiptRecord,
   ensureOfferingRecord,
   createBidFactory,
+  createMarketClient,
+  type MarketClient,
   loadOrGenerateKeypair,
   refKey,
   resolveContractGraph,
@@ -50,7 +52,7 @@ import {
   agentDid,
   idResolver,
   loginAgent,
-  marketClient,
+  session,
   ownServiceDidWeb,
   parseAtUri,
   resolveAs,
@@ -155,6 +157,11 @@ const marketDeps: MarketServerDeps = {
 let attestationSigner: RecordSigner;
 const getSigner = (): RecordSigner => attestationSigner;
 
+// A signer-bound MarketClient for the bidder's outbound submitBid. Built in
+// main() once the session + signer exist; the bid factory reads it via a getter
+// (it is undefined until login completes, mirroring how `agent` is wired).
+let bidderMarketClient: MarketClient;
+
 const settlementCtx: SettlementCtx = {
   getAgent: () => agent,
   resolve: recordResolver,
@@ -194,11 +201,9 @@ const {
 // ---------------------------------------------------------------------------
 
 const createAndSubmitBid = createBidFactory({
-  getAgent: () => agent,
   createBidConfig,
-  getMarketClient: () => marketClient,
+  getMarketClient: () => bidderMarketClient,
   submitAcceptServiceDid: `${ownServiceDidWeb(cfg.server.baseUrl)}#${MARKET_SERVICE_ID}`,
-  getSigner,
   log,
 });
 
@@ -377,6 +382,8 @@ const main = async () => {
     issuer: cfg.server.baseUrl ? ownServiceDidWeb(cfg.server.baseUrl) : agentDid,
   };
   log("info", "attestation keypair loaded", { key: keypair.did(), issuer: attestationSigner.issuer });
+  // Signer-bound client for outbound submitBid: signs + writes + forwards the bid.
+  bidderMarketClient = createMarketClient(session, { agent, signer: attestationSigner });
   await configureAccountAuthRbac();
   if (cfg.server.baseUrl) {
     const expectedEndpoint = `${ownServiceDidWeb(cfg.server.baseUrl)}#${MARKET_SERVICE_ID}`;

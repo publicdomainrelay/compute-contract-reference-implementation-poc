@@ -707,8 +707,9 @@ export async function marketRFPSubmitWorkflow(
   log("attestation keypair loaded", { key: attestationKeypair.did(), issuer: signer.issuer });
 
   // MarketClient over our own PDS session; each method service-proxies via the
-  // `atproto-proxy` header carrying the target's service DID ref. See ../lib/market.
-  const marketClient = createMarketClient(session);
+  // `atproto-proxy` header carrying the target's service DID ref. Bound to our
+  // agent + signer so submitEvent signs the event record for us. See ../lib/market.
+  const marketClient = createMarketClient(session, { agent, signer });
 
   // Build user_data with policy-engine bootstrap
   const userData = buildUserData(serviceName);
@@ -964,12 +965,10 @@ export async function marketRFPSubmitWorkflow(
         payload: deletePayloadRef,
         createdAt: nowIso,
       };
-      const eventRef = await createSignedRecord(agent, EVENT_NSID, eventRecord, signer);
       // providerSubmitEventUrl holds a did:web:HOST#pdr_temp_compute_event service ref;
-      // route the submitEvent call through our PDS via service proxying.
-      // eventRef is a SignedRecord, so the attested body is forwarded by
-      // construction — submitEvent won't accept anything unsigned.
-      const res = await marketClient.submitEvent(providerSubmitEventUrl, eventRef);
+      // route the submitEvent call through our PDS via service proxying. The
+      // signer-bound client signs + creates + forwards the event for us.
+      const res = await marketClient.submitEvent(providerSubmitEventUrl, eventRecord);
       log("submitEvent vm.delete POST", { url: providerSubmitEventUrl, reason, success: res.ok });
     } catch (err) {
       log("submitEvent vm.delete POST failed", { url: providerSubmitEventUrl, reason, err: String(err) });

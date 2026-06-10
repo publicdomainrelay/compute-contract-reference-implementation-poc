@@ -4,21 +4,20 @@
 // the settlement layer, create the market.bid record, then proxy-call submitBid
 // back to the RFP issuer if requested. The bidder wires this once at startup.
 
-import type { Agent } from "@atproto/api";
 import { BID_NSID } from "@publicdomainrelay/lexicons";
 import type { RFP, Logger, StrongRef } from "./types.ts";
-import { createAndForwardSignedRecord, type RecordSigner } from "./signing.ts";
 import { MarketClient } from "./client.ts";
 
 export interface BidFactoryDeps {
-  getAgent: () => Agent;
   /** Mint the provider-specific bid config record and return its ref. */
   createBidConfig: (nowIso: string) => Promise<StrongRef>;
+  /**
+   * A signer-bound MarketClient (built with `{ agent, signer }`): it signs and
+   * writes the bid record itself, so the factory never handles the keypair.
+   */
   getMarketClient: () => MarketClient;
   /** Bidder's `did:web` service DID string (e.g. `did:web:host#pdr_temp_market`). */
   submitAcceptServiceDid: string;
-  /** The bidder's badge.blue signer — the bid carries its inline signature. */
-  getSigner: () => RecordSigner;
   log: Logger;
 }
 
@@ -34,7 +33,7 @@ export interface BidSettlementDeps {
  * optionally proxies a `submitBid` call back to the RFP issuer.
  */
 export function createBidFactory(deps: BidFactoryDeps) {
-  const { getAgent, createBidConfig, getMarketClient, submitAcceptServiceDid, getSigner, log } = deps;
+  const { createBidConfig, getMarketClient, submitAcceptServiceDid, log } = deps;
 
   return async function createAndSubmitBid(
     rfpUri: string,
@@ -56,26 +55,20 @@ export function createBidFactory(deps: BidFactoryDeps) {
       createdAt: nowIso,
     };
 
-    // Sign → create → (best-effort) forward in one call. The forward callback
-    // receives the signed envelope, so the unsigned `bid` literal above can
-    // never reach the wire — submitBid only accepts a SignedRecord.
+    // The signer-bound client signs the bid, writes it to our repo, and (when
+    // the RFP carries a submitBid ref) forwards the attested copy. We hand it the
+    // unsigned body — there is no API here that could send an unsigned record.
+    const market = getMarketClient();
     const submitBidRef = rfpRecord.submitBid;
-    const bidRef = await createAndForwardSignedRecord(
-      getAgent(),
-      BID_NSID,
-      bid,
-      getSigner(),
-      submitBidRef
-        ? async (signed) => {
-          try {
-            await getMarketClient().submitBid(submitBidRef, signed);
-            log("info", "submitBid proxied call", { ref: submitBidRef });
-          } catch (err) {
-            log("warn", "submitBid proxied call failed", { ref: submitBidRef, err: String(err) });
-          }
-        }
-        : undefined,
-    );
+    let bidRef;
+    if (submitBidRef) {
+      const sub = await market.submitBid(submitBidRef, bid);
+      bidRef = sub.ref;
+      if (sub.ok) log("info", "submitBid proxied call", { ref: submitBidRef });
+      else log("warn", "submitBid proxied call failed", { ref: submitBidRef, err: sub.error });
+    } else {
+      bidRef = await market.create(BID_NSID, bid);
+    }
     log("info", "bidRecord", { bidRecord: { uri: bidRef.uri, cid: bidRef.cid } });
 
     return { bidUri: bidRef.uri, bidCid: bidRef.cid };
