@@ -1,0 +1,50 @@
+{
+  "lexicon": 1,
+  "id": "network.attested.signature",
+  "defs": {
+    "main": {
+      "type": "object",
+      "description": "An inline attestation: an ECDSA signature over a canonical attestation CID, embedded directly in a record's `signatures` array. The CID is computed from the record (signatures stripped), this entry's metadata (cid/signature stripped, `repository` = authoring repo DID added) inserted as $sig, DAG-CBOR + SHA-256 + CIDv1 (dag-cbor codec). Signatures are low-S normalized; supported curves are P-256 and K-256 (did:key). This is the shared network.attested.* vocabulary any speaker can verify.",
+      "required": ["key", "cid", "signature"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "did:key public-key reference used to verify the signature."
+        },
+        "cid": {
+          "type": "string",
+          "format": "cid",
+          "description": "The computed canonical attestation CID (base32 CIDv1) this entry signs."
+        },
+        "signature": {
+          "type": "bytes",
+          "description": "Low-S normalized ECDSA signature over the CID bytes."
+        },
+        "issuer": {
+          "type": "string",
+          "format": "did",
+          "description": "DID of the signing party (e.g. the did:web of the service holding the key). Verifiers may bind `key` to this DID's document when the authoring account's DID document does not list it."
+        },
+        "issuedAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "role": {
+          "type": "string",
+          "description": "Optional role this signature attests in a multi-party workflow (e.g. 'proof-of-settlement', 'broker'), letting verifiers require specific attestation completeness."
+        }
+      }
+    },
+    "signatures": {
+      "type": "array",
+      "description": "An attestation signatures array: inline network.attested.signature entries and/or strongRefs to remote network.attested.proof records. Always stripped from the record before attestation-CID computation, so attaching attestations never changes the signing payload.",
+      "items": {
+        "type": "union",
+        "refs": [
+          "network.attested.signature",
+          "com.atproto.repo.strongRef"
+        ]
+      }
+    }
+  }
+}

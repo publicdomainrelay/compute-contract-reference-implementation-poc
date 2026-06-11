@@ -4,7 +4,7 @@
 
 import { l } from '@atproto/lex'
 import * as RepoStrongRef from '../../../atproto/repo/strongRef.defs.ts'
-import * as MarketAttestation from './attestation.defs.ts'
+import * as AttestedSignature from '../../../../network/attested/signature.defs.ts'
 
 const $nsid = 'com.publicdomainrelay.temp.market.bid'
 
@@ -35,9 +35,9 @@ type Main = {
   submitAccept?: string
 
   /**
-   * badge.blue attestations over this bid. Must include the bidder's inline signature, attached at creation (before any accept strongRefs this record); post-hoc third-party attestations use remote com.publicdomainrelay.temp.market.attestation proof records instead, so the bid's CID stays stable.
+   * badge.blue attestations over this bid. Must include the bidder's inline signature, attached at creation (before any accept strongRefs this record); post-hoc third-party attestations use remote network.attested.signature proof records instead, so the bid's CID stays stable.
    */
-  signatures: MarketAttestation.Signatures
+  signatures: AttestedSignature.Signatures
 }
 
 export type { Main }
@@ -59,8 +59,8 @@ const main = /*#__PURE__*/ l.record<'tid', Main>(
       (() => RepoStrongRef.main) as any,
     ),
     submitAccept: /*#__PURE__*/ l.optional(/*#__PURE__*/ l.string()),
-    signatures: /*#__PURE__*/ l.ref<MarketAttestation.Signatures>(
-      (() => MarketAttestation.signatures) as any,
+    signatures: /*#__PURE__*/ l.ref<AttestedSignature.Signatures>(
+      (() => AttestedSignature.signatures) as any,
     ),
   }),
 )

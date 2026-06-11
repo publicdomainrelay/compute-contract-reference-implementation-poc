@@ -40,6 +40,7 @@ import {
   resolvedRef,
   stripResolved,
 } from "@publicdomainrelay/market";
+import { loadOrCreateAttestationKeyHex } from "../utils/attestation_key.ts";
 import { createMarketFactory } from "@publicdomainrelay/hono-factory-market";
 import { createMarketBidsFactory } from "@publicdomainrelay/hono-factory-market-bids";
 import { createComputeFactory } from "@publicdomainrelay/hono-factory-compute";
@@ -144,6 +145,11 @@ const marketDeps: MarketServerDeps = {
   hostname: cfg.server.baseUrl ? new URL(cfg.server.baseUrl).host : "",
   idResolver,
   resolve: recordResolver,
+  // Require inbound rfp/accept/event signatures to bind to their author's DID
+  // document (the bidder publishes its own attestation key in its did:web doc;
+  // the requester publishes in theirs). The signing key is stable + file-backed
+  // (see main()), so binding holds across restarts.
+  bindKeys: true,
   log,
 };
 
@@ -224,7 +230,10 @@ const marketFactory = createMarketFactory(marketDeps, {
     log("info", "settling accept", { accept: accept._uri });
 
     // Resolve the full contract record graph (bid, rfp, their payloads/config)
-    // and verify the bid and accept name the same RFP.
+    // and verify the bid and accept name the same RFP. resolveContractGraph also
+    // verifies the bid's and rfp's inline signatures (canonical CID recomputed in
+    // each author's repo) — the bidder's verification of the requester's RFP
+    // signature, and of the winning bid, before provisioning.
     const { bid, rfp, rfpPayload, bidPayload, bidConfig } = await resolveContractGraph(accept, resolve);
     const vm = rfpPayload as unknown as Resolved<VM>;
 
@@ -376,7 +385,12 @@ const makeApp = () => {
 
 const main = async () => {
   await loginAgent(cfg.atproto.handle, cfg.atproto.password);
-  const keypair = await loadOrGenerateKeypair(Deno.env.get("ATTESTATION_PRIVATE_KEY_HEX"));
+  // Stable, file-backed attestation key (env override wins): persisted as
+  // bidder/attestation.jwk so the same did:key is published in our did:web doc and
+  // reused across restarts — required for the bindKeys cross-verification above.
+  const keyHex = Deno.env.get("ATTESTATION_PRIVATE_KEY_HEX") ??
+    await loadOrCreateAttestationKeyHex(new URL("./attestation.jwk", import.meta.url));
+  const keypair = await loadOrGenerateKeypair(keyHex);
   attestationSigner = {
     keypair,
     issuer: cfg.server.baseUrl ? ownServiceDidWeb(cfg.server.baseUrl) : agentDid,

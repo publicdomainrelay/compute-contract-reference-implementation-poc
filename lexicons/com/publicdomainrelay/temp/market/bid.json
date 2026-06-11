@@ -35,8 +35,8 @@
           },
           "signatures": {
             "type": "ref",
-            "ref": "com.publicdomainrelay.temp.market.attestation#signatures",
-            "description": "badge.blue attestations over this bid. Must include the bidder's inline signature, attached at creation (before any accept strongRefs this record); post-hoc third-party attestations use remote com.publicdomainrelay.temp.market.attestation proof records instead, so the bid's CID stays stable."
+            "ref": "network.attested.signature#signatures",
+            "description": "badge.blue attestations over this bid. Must include the bidder's inline signature, attached at creation (before any accept strongRefs this record); post-hoc third-party attestations use remote network.attested.signature proof records instead, so the bid's CID stays stable."
           }
         }
       }

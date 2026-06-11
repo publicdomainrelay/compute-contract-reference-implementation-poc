@@ -23,10 +23,9 @@ import {
   SUBMIT_EVENT_NSID,
   SUBMIT_RFP_NSID,
 } from "@publicdomainrelay/lexicons";
-import { loadOrGenerateKeypair } from "@publicdomainrelay/attestation";
+import { loadOrGenerateKeypair } from "./attest.ts";
 import { noopLogger, type Logger, type StrongRef } from "./types.ts";
 import { createSignedRecord, type RecordSigner, type SignedRecord } from "./signing.ts";
-import { ensureBadgeBlueKeyRecord } from "./records.ts";
 
 // Minimal LexiconDoc stubs for the four market submit procedures.
 // XrpcClient.call() requires a registered lexicon to determine HTTP method
@@ -119,7 +118,6 @@ export class MarketClient {
   readonly #privateKeyHex?: string;
   readonly #issuer?: string;
   readonly #log: Logger;
-  #keyPublished?: Promise<void>;
 
   constructor(service: XrpcService, opts: MarketClientOptions = {}) {
     this.xrpc = new XrpcClient(service, MARKET_PROCEDURE_LEXICONS);
@@ -128,16 +126,6 @@ export class MarketClient {
     this.#privateKeyHex = opts.privateKeyHex;
     this.#issuer = opts.issuer;
     this.#log = opts.log ?? noopLogger;
-    // When we already have a concrete identity (explicit signer or a key to
-    // derive one), publish its public half now — "on createMarketClient" — so it
-    // exists even for callers that only ever sign records *outside* the client.
-    // Skipped when a key would have to be generated, so construction has no
-    // surprising ephemeral-key side effect. Fire-and-forget + best-effort.
-    if (this.#agent && (this.#signer || this.#privateKeyHex !== undefined)) {
-      this.ensureSigner().catch((err) =>
-        this.#log("warn", "badge.blue key publish (eager) failed", { err: String(err) })
-      );
-    }
   }
 
   /**
@@ -174,25 +162,7 @@ export class MarketClient {
       }
       this.#signer = { keypair, issuer: this.#issuer ?? this.#agent.assertDid };
     }
-    // Publish the public half of the signing key to the agent's repo (keyed by
-    // its did:key), once, so verifiers can discover it. Best-effort: a failure
-    // is logged but never blocks signing. Mirrors ensureOfferingRecord.
-    await this.#ensureKeyPublished(this.#signer);
     return this.#signer;
-  }
-
-  #ensureKeyPublished(signer: RecordSigner): Promise<void> {
-    if (!this.#keyPublished) {
-      this.#keyPublished = ensureBadgeBlueKeyRecord(
-        this.#agent!,
-        signer.keypair.did(),
-        signer.issuer,
-        this.#log,
-      ).catch((err) => {
-        this.#log("warn", "badge.blue key record ensure failed", { err: String(err) });
-      });
-    }
-    return this.#keyPublished;
   }
 
   /**

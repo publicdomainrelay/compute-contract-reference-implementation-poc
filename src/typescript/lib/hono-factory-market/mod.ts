@@ -20,10 +20,13 @@ import type {
   SubmitBidCallback,
 } from "@publicdomainrelay/market";
 import {
+  createDidKeyResolver,
   createSubmitAcceptHandler,
   createSubmitBidHandler,
   createSubmitEventHandler,
   createSubmitRfpHandler,
+  createVerifyHandler,
+  NETWORK_ATTESTED_VERIFY_NSID,
   SUBMIT_ACCEPT_NSID,
   SUBMIT_BID_NSID,
   SUBMIT_EVENT_NSID,
@@ -79,6 +82,18 @@ export function createMarketFactory(
         const h = createSubmitEventHandler({ deps, ...handlers.event });
         app.post(`/xrpc/${SUBMIT_EVENT_NSID}`, (c) => h(c.req.raw));
       }
+
+      // network.attested.verify is a public query (no per-app handler config):
+      // any network.attested.* caller can verify a record's attestations against
+      // its authoring repo. Mounted unconditionally, built from the shared deps.
+      // Binds the signing did:key to the issuer/author DID document by default
+      // (same posture as the submit gates), unless deps.bindKeys is false.
+      const verify = createVerifyHandler({
+        idResolver: deps.idResolver,
+        keysForDid: deps.bindKeys ? createDidKeyResolver() : undefined,
+        log: deps.log,
+      });
+      app.get(`/xrpc/${NETWORK_ATTESTED_VERIFY_NSID}`, (c) => verify(c.req.raw));
     },
   });
 }

@@ -1,0 +1,52 @@
+{
+  "lexicon": 1,
+  "id": "network.attested.verify",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Verify the attestations on a record. Resolves the record at `uri`, recomputes the canonical attestation CID, and checks each entry in its signatures array: inline network.attested.signature entries are verified by ECDSA against `key`; remote strongRefs are resolved to network.attested.proof records whose `cid` must match the subject's canonical CID. Any network.attested.* speaker can call this to verify without re-deriving the CID machinery.",
+      "parameters": {
+        "type": "params",
+        "required": ["uri"],
+        "properties": {
+          "uri": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "AT-URI of the record to verify."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["uri", "valid", "signatures"],
+          "properties": {
+            "uri": {
+              "type": "string",
+              "format": "at-uri"
+            },
+            "cid": {
+              "type": "string",
+              "format": "cid",
+              "description": "The canonical attestation CID computed for the resolved record."
+            },
+            "valid": {
+              "type": "boolean",
+              "description": "True if at least one attestation verified against the resolved record."
+            },
+            "signatures": {
+              "type": "ref",
+              "ref": "network.attested.signature#signatures",
+              "description": "The verified signature entries (inline and/or remote strongRefs)."
+            },
+            "workflow": {
+              "type": "string",
+              "description": "Optional workflow identifier the caller can use to require a specific set of attestation roles."
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -4,7 +4,7 @@
 
 import { l } from '@atproto/lex'
 import * as RepoStrongRef from '../../../atproto/repo/strongRef.defs.ts'
-import * as MarketAttestation from './attestation.defs.ts'
+import * as AttestedSignature from '../../../../network/attested/signature.defs.ts'
 
 const $nsid = 'com.publicdomainrelay.temp.market.accept'
 
@@ -37,7 +37,7 @@ type Main = {
   /**
    * badge.blue attestations over this accept. Must include the requester's inline signature, attached at creation. The bidder's side of the bilateral agreement is its proof-of-settlement record (the accept's payload) and the market.receipt it mints on submitAccept, both of which are badge.blue remote attestations bound to this record.
    */
-  signatures: MarketAttestation.Signatures
+  signatures: AttestedSignature.Signatures
 }
 
 export type { Main }
@@ -59,8 +59,8 @@ const main = /*#__PURE__*/ l.record<'tid', Main>(
       ),
     ),
     submitEvent: /*#__PURE__*/ l.optional(/*#__PURE__*/ l.string()),
-    signatures: /*#__PURE__*/ l.ref<MarketAttestation.Signatures>(
-      (() => MarketAttestation.signatures) as any,
+    signatures: /*#__PURE__*/ l.ref<AttestedSignature.Signatures>(
+      (() => AttestedSignature.signatures) as any,
     ),
   }),
 )

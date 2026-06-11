@@ -4,7 +4,7 @@
 
 import { l } from '@atproto/lex'
 import * as RepoStrongRef from '../../../atproto/repo/strongRef.defs.ts'
-import * as MarketAttestation from './attestation.defs.ts'
+import * as AttestedSignature from '../../../../network/attested/signature.defs.ts'
 
 const $nsid = 'com.publicdomainrelay.temp.market.receipt'
 
@@ -47,7 +47,7 @@ type Main = {
   /**
    * badge.blue attestations over this receipt. Must include the provider's inline signature, attached at creation.
    */
-  signatures: MarketAttestation.Signatures
+  signatures: AttestedSignature.Signatures
 }
 
 export type { Main }
@@ -73,8 +73,8 @@ const main = /*#__PURE__*/ l.record<'tid', Main>(
     ),
     submitEvent: /*#__PURE__*/ l.optional(/*#__PURE__*/ l.string()),
     cid: /*#__PURE__*/ l.string({ format: 'cid' }),
-    signatures: /*#__PURE__*/ l.ref<MarketAttestation.Signatures>(
-      (() => MarketAttestation.signatures) as any,
+    signatures: /*#__PURE__*/ l.ref<AttestedSignature.Signatures>(
+      (() => AttestedSignature.signatures) as any,
     ),
   }),
 )

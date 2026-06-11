@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Submit the AT-URI and CID of an accept record directly to the bidder named in the winning bid's payload, settling the contract: the bidder resolves accept->bid->rfp->vm, provisions the resource, mints a market.receipt record, and returns a strong reference to it plus its submitEvent service DID reference. Must be called via PDS service-proxying (atproto-proxy); the receiver verifies the inter-service auth JWT and requires its issuer to be the DID that authored the referenced accept record. The receiver additionally verifies badge.blue attestations (com.publicdomainrelay.temp.market.attestation) across the contract graph: the accept's inline signature, the bid's and RFP's inline signatures, and the accept payload's remote-attestation binding (receipts.* cid) before provisioning.",
+      "description": "Submit the AT-URI and CID of an accept record directly to the bidder named in the winning bid's payload, settling the contract: the bidder resolves accept->bid->rfp->vm, provisions the resource, mints a market.receipt record, and returns a strong reference to it plus its submitEvent service DID reference. Must be called via PDS service-proxying (atproto-proxy); the receiver verifies the inter-service auth JWT and requires its issuer to be the DID that authored the referenced accept record. The receiver additionally verifies badge.blue attestations (network.attested.signature) across the contract graph: the accept's inline signature, the bid's and RFP's inline signatures, and the accept payload's remote-attestation binding (receipts.* cid) before provisioning.",
       "input": {
         "encoding": "application/json",
         "schema": {

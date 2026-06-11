@@ -55,6 +55,7 @@ import {
   RFP_NSID,
   type Bid,
 } from "@publicdomainrelay/market";
+import { loadOrCreateAttestationKeyHex } from "../utils/attestation_key.ts";
 import { BIDS_X402_NSID, settleX402Payment } from "@publicdomainrelay/market-x402";
 import { BIDS_FREE_NSID } from "@publicdomainrelay/market-free";
 import {
@@ -697,9 +698,13 @@ export async function marketRFPSubmitWorkflow(
   const agentDidPlcKey = agentDid.split(":")[2];
   log("atproto authenticated", { did: agentDid, handle: config.handle });
 
-  // badge.blue attestation identity: every market record this spindle authors
-  // (rfp, accept, event, accepts.x402) carries an inline signature by this key.
-  const attestationKeypair = await loadOrGenerateKeypair(Deno.env.get("ATTESTATION_PRIVATE_KEY_HEX"));
+  // network.attested identity: every market record this spindle authors (rfp,
+  // accept, event, accepts.x402) carries an inline signature by this key. Stable +
+  // file-backed (spindle/attestation.jwk — the same file main.ts publishes in the
+  // did:web doc), env override wins, so the bidder's bindKeys check resolves it.
+  const attestationKeyHex = Deno.env.get("ATTESTATION_PRIVATE_KEY_HEX") ??
+    await loadOrCreateAttestationKeyHex(new URL("./attestation.jwk", import.meta.url));
+  const attestationKeypair = await loadOrGenerateKeypair(attestationKeyHex);
   const signer: RecordSigner = {
     keypair: attestationKeypair,
     issuer: spindleHostname ? `did:web:${spindleHostname}` : agentDid,
@@ -771,14 +776,16 @@ export async function marketRFPSubmitWorkflow(
   log("bid winner selected", { bidUri: winner.uri, did: winner.did, cost: winner.payload?.cost });
   log("winner", { winner: winner });
 
-  // The bid is a badge.blue-signed record by the bidder; reject it if its inline
-  // signature is missing or does not verify before we settle and accept.
+  // The bid is a network.attested-signed record by the bidder; reject it if its
+  // inline signature is missing or does not verify (canonical CID recomputed for
+  // the bid in the bidder's repo, so a tampered or replayed bid fails) before we
+  // settle and accept — the requester's verification of the bidder's signature.
   const winnerSigOk = await verifyRecordSignatures({
     record: winner.record as unknown as Record<string, unknown>,
     repositoryDid: winner.did,
   });
   if (!winnerSigOk) {
-    throw new Error(`winning bid ${winner.uri} has no valid badge.blue signature; refusing to accept`);
+    throw new Error(`winning bid ${winner.uri} has no valid network.attested signature; refusing to accept`);
   }
 
   // The RBAC grant below is templated from the winner's config (issuer_uri, actx).
@@ -824,7 +831,12 @@ export async function marketRFPSubmitWorkflow(
   // about the resource it provisions directly, bypassing the firehose.
   const acceptRecord: Record<string, unknown> = {
     $type: ACCEPT_NSID,
-    rfp: rfpRef,
+    // strongRef, NOT the createSignedRecord envelope (which carries `record`):
+    // embedding the full signed rfp puts its `signature: {$bytes}` inside the
+    // accept, and that bytes field lex-decodes to a Uint8Array on read while it
+    // was a {$bytes} map at sign time → different DAG-CBOR → the accept's own
+    // signature CID would not reproduce. Match `bid` (already a strongRef).
+    rfp: { $type: "com.atproto.repo.strongRef", uri: rfpRef.uri, cid: rfpRef.cid },
     bid: bidRef,
     ...(paymentReceiptRef ? { payload: paymentReceiptRef } : {}),
     createdAt: new Date().toISOString(),

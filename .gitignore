@@ -2,3 +2,7 @@
 
 # Added by ggshield
 .cache_ggshield
+
+# Attestation private keys (stable, file-backed; never commit)
+attestation.jwk
+*.jwk

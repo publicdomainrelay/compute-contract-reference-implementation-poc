@@ -15,9 +15,14 @@ export const ACCEPT_NSID = "com.publicdomainrelay.temp.market.accept";
 export const RECEIPT_NSID = "com.publicdomainrelay.temp.market.receipt";
 export const EVENT_NSID = "com.publicdomainrelay.temp.market.event";
 export const OFFERING_NSID = "com.publicdomainrelay.temp.market.offering";
-export const ATTESTATION_NSID = "com.publicdomainrelay.temp.market.attestation";
-export const ATTESTATION_INLINE_TYPE = `${ATTESTATION_NSID}#inline`;
-export const BADGE_BLUE_KEY_NSID = "com.publicdomainrelay.temp.market.badgeBlueKey";
+// network.attested.* — shared attestation vocabulary (replaces the former
+// com.publicdomainrelay.temp.market.attestation record + #inline/#signatures defs).
+export const NETWORK_ATTESTED_SIGNATURE_NSID = "network.attested.signature";
+export const NETWORK_ATTESTED_PROOF_NSID = "network.attested.proof";
+export const NETWORK_ATTESTED_VERIFY_NSID = "network.attested.verify";
+// The $type stamped on an inline attestation entry is the bare signature nsid
+// (its `main` def), so verifiers keyed on the network.attested union accept it.
+export const ATTESTATION_INLINE_TYPE = NETWORK_ATTESTED_SIGNATURE_NSID;
 export const SUBMIT_RFP_NSID = "com.publicdomainrelay.temp.market.submitRfp";
 export const SUBMIT_BID_NSID = "com.publicdomainrelay.temp.market.submitBid";
 export const SUBMIT_ACCEPT_NSID = "com.publicdomainrelay.temp.market.submitAccept";

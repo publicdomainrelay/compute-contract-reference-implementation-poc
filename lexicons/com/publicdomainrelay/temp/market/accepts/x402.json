@@ -25,7 +25,7 @@
           },
           "signatures": {
             "type": "ref",
-            "ref": "com.publicdomainrelay.temp.market.attestation#signatures",
+            "ref": "network.attested.signature#signatures",
             "description": "badge.blue attestations over this acceptance. Must include the requester's inline signature, attached at creation; the bidder's receipts.x402 remote attestation completes the bilateral agreement."
           }
         }

@@ -1,0 +1,3 @@
+
+# Deno node_modules (nodeModulesDir: auto, required for @noble/curves override)
+node_modules/

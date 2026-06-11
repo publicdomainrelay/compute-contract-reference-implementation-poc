@@ -39,7 +39,7 @@
           },
           "signatures": {
             "type": "ref",
-            "ref": "com.publicdomainrelay.temp.market.attestation#signatures",
+            "ref": "network.attested.signature#signatures",
             "description": "badge.blue attestations over these payment terms. Must include the bidder's inline signature, attached at creation, so the advertised price and payment endpoint are non-repudiable."
           }
         }

@@ -32,7 +32,7 @@ export type $OutputBody<B = l.BinaryData> = l.InferPayloadBody<
   B
 >
 
-/** Submit an RFP directly to a bidder whose offering record matches the RFP payload NSID. The bidder creates a bid and optionally calls submitBid back to the RFP issuer. Must be called via PDS service-proxying (atproto-proxy); the receiver verifies the inter-service auth JWT and requires its issuer to be the DID that authored the referenced RFP record. The receiver additionally verifies the RFP's badge.blue attestations (com.publicdomainrelay.temp.market.attestation): at least one inline signature must verify against the attestation CID recomputed for the record in its authoring repository — the same durable, replayable check applied to RFPs discovered via the firehose, where no service-auth JWT exists. */
+/** Submit an RFP directly to a bidder whose offering record matches the RFP payload NSID. The bidder creates a bid and optionally calls submitBid back to the RFP issuer. Must be called via PDS service-proxying (atproto-proxy); the receiver verifies the inter-service auth JWT and requires its issuer to be the DID that authored the referenced RFP record. The receiver additionally verifies the RFP's badge.blue attestations (network.attested.signature): at least one inline signature must verify against the attestation CID recomputed for the record in its authoring repository — the same durable, replayable check applied to RFPs discovered via the firehose, where no service-auth JWT exists. */
 const main = /*#__PURE__*/ l.procedure($nsid, $params, $input, $output, [
   'InvalidRequest',
   'NotApplicable',

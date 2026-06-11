@@ -35,12 +35,25 @@ import { cors } from "jsr:@hono/hono/cors";
 import { parse as parseYaml } from "jsr:@std/yaml";
 import { marketRFPSubmitWorkflow, marketRFPConfigFromEnv, pendingBids, type BidRecord } from "./marketRFP.ts";
 import {
+  attestationVerificationMethod,
   createRecordResolver,
   createSubmitBidHandler,
   createSubmitEventHandler,
+  loadOrGenerateKeypair,
   type MarketServerDeps,
   verifyServiceAuth,
 } from "@publicdomainrelay/market";
+import { loadOrCreateAttestationKeyHex } from "../utils/attestation_key.ts";
+
+// The spindle's network.attested signing key — stable + file-backed
+// (spindle/attestation.jwk, env override wins). The same key the market workflow
+// signs rfp/accept/event with (marketRFP.ts loads the same file), published in
+// this spindle's did:web document below so a counterparty (the bidder) running
+// with bindKeys can bind those inline signatures to this DID — the "vice versa"
+// half of key-bound cross-verification.
+const spindleAttestationKeyHex = Deno.env.get("ATTESTATION_PRIVATE_KEY_HEX") ??
+  await loadOrCreateAttestationKeyHex(new URL("./attestation.jwk", import.meta.url));
+const spindleAttestationDidKey: string = (await loadOrGenerateKeypair(spindleAttestationKeyHex)).did();
 
 // ---------------------------------------------------------------------------
 // Structured logger — JSON to stderr
@@ -827,6 +840,10 @@ const marketDeps: MarketServerDeps = {
   hostname: (req) => spindleServiceHostname(req.headers.get("host")),
   idResolver,
   resolve: createRecordResolver(idResolver),
+  // Require inbound bid/event signatures to bind to their author's DID document.
+  // Producers (bidder, this spindle) sign with stable, file-backed keys published
+  // in their did:web docs, so binding holds across restarts.
+  bindKeys: true,
   log,
 };
 
@@ -1411,9 +1428,20 @@ app.get("/xrpc/sh.tangled.owner", (c) => {
 app.get("/.well-known/did.json", (c) => {
   const host = c.req.header("host") ?? HOSTNAME;
   const serviceHost = effectiveHostname(getOwnerDid(host));
+  const did = `did:web:${serviceHost}`;
   return c.json({
-    "@context": ["https://www.w3.org/ns/did/v1"],
-    id: `did:web:${serviceHost}`,
+    "@context": [
+      "https://www.w3.org/ns/did/v1",
+      ...(spindleAttestationDidKey ? ["https://w3id.org/security/multikey/v1"] : []),
+    ],
+    id: did,
+    // When a stable attestation key is configured, publish it so a bidder running
+    // with bindKeys can bind the inline signatures on the rfp/accept/event records
+    // this spindle authors to this did:web (their `issuer`) — the
+    // createFetchKeyResolver resolution path. Omitted in the keyless default.
+    ...(spindleAttestationDidKey
+      ? { verificationMethod: [attestationVerificationMethod(did, spindleAttestationDidKey)] }
+      : {}),
     service: [
       {
         id: `#${SPINDLE_SERVICE_ID}`,

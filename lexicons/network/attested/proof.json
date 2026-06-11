@@ -1,0 +1,49 @@
+{
+  "lexicon": 1,
+  "id": "network.attested.proof",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A remote attestation proof: a standalone record in the attestor's repository that binds, via a canonical attestation CID, to a subject record living elsewhere. Referenced from the subject's `signatures` array via com.atproto.repo.strongRef. The `cid` is computed from the subject record (signatures stripped) with this record's metadata (cid/signature/signatures stripped, `repository` = subject's repo DID added) inserted as $sig, DAG-CBOR + SHA-256 + CIDv1. Verifiers recompute that CID and require it to match; copying the subject to another repository changes the CID and invalidates the proof. The shared network.attested.* replacement for app-specific remote-attestation records.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["subject", "cid", "createdAt"],
+        "properties": {
+          "subject": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the record being attested, so verifiers can fetch it and recompute the attestation CID."
+          },
+          "cid": {
+            "type": "string",
+            "format": "cid",
+            "description": "Canonical attestation CID computed over the subject record, this record's metadata, and the subject's repository DID."
+          },
+          "issuer": {
+            "type": "string",
+            "format": "did",
+            "description": "DID of the attesting party (e.g. the did:web of the service that minted this proof)."
+          },
+          "role": {
+            "type": "string",
+            "description": "The role this proof attests in a workflow (e.g. 'proof-of-settlement', 'broker', 'verification'), so verifiers can require specific attestation completeness."
+          },
+          "status": {
+            "type": "string",
+            "description": "Optional status of the attested subject (e.g. 'valid', 'revoked')."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "signatures": {
+            "type": "ref",
+            "ref": "network.attested.signature#signatures",
+            "description": "Attestations over this proof record itself (the attestor's inline signature)."
+          }
+        }
+      }
+    }
+  }
+}

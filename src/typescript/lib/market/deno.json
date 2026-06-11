@@ -6,8 +6,11 @@
     "@atproto/lex": "npm:@atproto/lex",
     "@atproto/api": "npm:@atproto/api@^0.20.8",
     "@atproto/common-web": "npm:@atproto/common-web@^0.5.0",
+    "@atproto/crypto": "npm:@atproto/crypto@^0.4.4",
     "@atproto/identity": "npm:@atproto/identity@^0.5.0",
     "@atproto/xrpc": "npm:@atproto/xrpc@^0.7.0",
-    "@atproto/xrpc-server": "npm:@atproto/xrpc-server@^0.11.1"
+    "@atproto/xrpc-server": "npm:@atproto/xrpc-server@^0.11.1",
+    "@atiproto/atproto-attestation": "npm:@atiproto/atproto-attestation@^0.1.0",
+    "@atiproto/key-resolver": "npm:@atiproto/key-resolver@^0.1.0"
   }
 }

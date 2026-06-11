@@ -26,7 +26,7 @@
           },
           "signatures": {
             "type": "ref",
-            "ref": "com.publicdomainrelay.temp.market.attestation#signatures",
+            "ref": "network.attested.signature#signatures",
             "description": "badge.blue attestations over this event. Must include the reporting party's inline signature, attached at creation, making the lifecycle claim non-repudiable — events assert facts about resources the counterparty cannot observe itself."
           }
         }

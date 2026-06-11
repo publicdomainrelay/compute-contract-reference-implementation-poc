@@ -12,7 +12,7 @@
 
 export * from "./types.ts";
 export * from "@publicdomainrelay/lexicons";
-export * from "@publicdomainrelay/attestation";
+export * from "./attest.ts";
 export * from "./resolve.ts";
 export * from "./records.ts";
 export * from "./signing.ts";

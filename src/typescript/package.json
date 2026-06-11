@@ -1,0 +1,13 @@
+{
+  "name": "compute-contract-reference-impl-workspace",
+  "private": true,
+  "comment": "Not a real npm package. Exists only to pin @noble/curves for @atiproto/* to 1.9.7 — viem/ox pin @noble/curves to exactly 1.9.1, which lacks Signature.toBytes that @atiproto/atproto-attestation's signer requires. Scoped overrides keep viem/ox on 1.9.1 while @atiproto/* gets 1.9.7.",
+  "overrides": {
+    "@atiproto/atproto-attestation": {
+      "@noble/curves": "1.9.7"
+    },
+    "@atiproto/key-resolver": {
+      "@noble/curves": "1.9.7"
+    }
+  }
+}

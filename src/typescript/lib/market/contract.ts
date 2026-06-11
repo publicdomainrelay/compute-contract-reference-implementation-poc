@@ -11,7 +11,7 @@
 import type { RecordResolver } from "./resolve.ts";
 import { atUriAuthority, refsEqual, stripResolved } from "./resolve.ts";
 import { verifyRecordSignatures } from "./signing.ts";
-import type { KeysForDid } from "@publicdomainrelay/attestation";
+import type { KeysForDid } from "./attest.ts";
 import type { Accept, Bid, Resolved, RFP } from "./types.ts";
 
 /**

@@ -19,10 +19,18 @@ import {
   SUBMIT_EVENT_LXM,
   SUBMIT_RFP_LXM,
 } from "@publicdomainrelay/lexicons";
+import { Agent } from "@atproto/api";
+import { getPdsEndpoint } from "@atproto/common-web";
 import { verifyMarketServiceAuth } from "./auth.ts";
-import { atUriAuthority, nsidFromUri, stripResolved, type RecordResolver } from "./resolve.ts";
+import { atUriAuthority, nsidFromUri, parseAtUri, stripResolved, type RecordResolver } from "./resolve.ts";
 import { verifyRecordSignatures } from "./signing.ts";
-import { createDidKeyResolver, type KeysForDid } from "@publicdomainrelay/attestation";
+import {
+  createDidKeyResolver,
+  verifyInlineAttestation,
+  verifyRemoteProof,
+  type InlineAttestation,
+  type KeysForDid,
+} from "./attest.ts";
 import { noopLogger } from "./types.ts";
 import type { IdResolver } from "@atproto/identity";
 import type { Accept, Bid, Logger, MarketEvent, Resolved, RFP } from "./types.ts";
@@ -47,10 +55,14 @@ export interface MarketServerDeps {
    */
   verifySignatures?: boolean;
   /**
-   * Additionally require the signing did:key to be vouched for by the issuer (or
-   * author) DID document — needs the producer to publish its attestation key
-   * (see attestationVerificationMethod). Defaults to false (signature validity
-   * only, which already proves the record is untampered).
+   * Additionally require the signing did:key to be published by the issuer (or
+   * author) DID document — resolved via @atiproto/key-resolver (did:web/did:plc).
+   * Defaults to **false**: signature validity + repository binding already prove
+   * the record is untampered and bound to its author's repo, which is the
+   * guarantee a keyless producer (no stable, published ATTESTATION_PRIVATE_KEY_HEX)
+   * can offer. Set true only when every producer publishes a stable attestation
+   * key in its DID document (see attestationVerificationMethod); a valid signature
+   * by an unpublished/ephemeral key is then rejected.
    */
   bindKeys?: boolean;
   /** Optional structured logger. Defaults to a no-op. */
@@ -134,7 +146,10 @@ async function authorize(
  * binding). Constructed once per handler factory so DID-doc lookups are cached.
  */
 function keysForDidFrom(deps: MarketServerDeps): KeysForDid | undefined {
-  return deps.bindKeys ? createDidKeyResolver(deps.idResolver) : undefined;
+  // Opt-in: only bind the signing did:key to the issuer/author DID document
+  // (fetched via @atiproto/key-resolver) when bindKeys is explicitly enabled.
+  // Off by default so keyless producers (ephemeral signing keys) are not rejected.
+  return deps.bindKeys ? createDidKeyResolver() : undefined;
 }
 
 /**
@@ -459,5 +474,120 @@ export function createSubmitEventHandler(cfg: SubmitEventHandlerConfig): Handler
     }
 
     return finish(await cb(ctx));
+  };
+}
+
+// ---------------------------------------------------------------------------
+// network.attested.verify — standard attestation verification endpoint
+// ---------------------------------------------------------------------------
+
+/** Dependencies for the network.attested.verify query handler. */
+export interface VerifyHandlerDeps {
+  /** Resolves DIDs to their PDS so records (and remote proofs) can be fetched. */
+  idResolver: IdResolver;
+  /**
+   * Optional did:key binding: when supplied, an inline entry only counts if its
+   * `key` is vouched for by the entry's `issuer` (or the record author) DID
+   * document. Build one with createDidKeyResolver(idResolver).
+   */
+  keysForDid?: KeysForDid;
+  log?: Logger;
+}
+
+function isStrongRefEntry(v: unknown): v is { uri: string; cid: string } {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.uri === "string" && typeof o.cid === "string" && typeof o.key !== "string";
+}
+
+function isInlineEntry(v: unknown): v is InlineAttestation {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.key === "string" && typeof o.cid === "string" && o.signature != null;
+}
+
+/**
+ * Handler for network.attested.verify. Resolves the record at `uri` (latest, or
+ * the version named by an optional `cid` query param), then checks every entry
+ * in its `signatures` array: inline network.attested.signature entries are
+ * verified by recomputing the canonical attestation CID and the ECDSA signature;
+ * remote strongRefs are resolved to their proof record and verified to bind to
+ * this record's canonical CID. Returns the standard
+ * `{ uri, cid, valid, signatures }` shape any network.attested.* speaker expects.
+ */
+export function createVerifyHandler(deps: VerifyHandlerDeps): Handler {
+  const log = deps.log ?? noopLogger;
+  const pdsCache = new Map<string, string>();
+
+  async function pdsForDid(did: string): Promise<string> {
+    const cached = pdsCache.get(did);
+    if (cached) return cached;
+    const doc = await deps.idResolver.did.resolve(did);
+    if (!doc) throw new Error(`could not resolve did ${did}`);
+    const pds = getPdsEndpoint(doc);
+    if (!pds) throw new Error(`no pds for ${did}`);
+    pdsCache.set(did, pds);
+    return pds;
+  }
+
+  async function fetchRecord(uri: string, cid?: string): Promise<{ value: Record<string, unknown>; cid: string }> {
+    const { repo, collection, rkey } = parseAtUri(uri);
+    const pds = await pdsForDid(repo);
+    const read = new Agent(new URL(pds));
+    const res = await read.com.atproto.repo.getRecord({ repo, collection, rkey, ...(cid ? { cid } : {}) });
+    return { value: res.data.value as Record<string, unknown>, cid: res.data.cid ?? cid ?? "" };
+  }
+
+  return async (req) => {
+    const url = new URL(req.url);
+    const uri = url.searchParams.get("uri") ?? undefined;
+    const cidParam = url.searchParams.get("cid") ?? undefined;
+    if (!uri) return xrpcError("InvalidRequest", "missing uri", 400);
+
+    let record: Record<string, unknown>;
+    let recordCid: string;
+    try {
+      const fetched = await fetchRecord(uri, cidParam);
+      record = fetched.value;
+      recordCid = fetched.cid;
+    } catch (err) {
+      log("warn", "verify: could not resolve record", { uri, err: String(err) });
+      return xrpcError("RecordNotFound", `could not resolve ${uri}: ${String(err)}`, 400);
+    }
+
+    const repositoryDid = atUriAuthority(uri);
+    const entries = Array.isArray(record.signatures) ? record.signatures : [];
+    const verified: unknown[] = [];
+
+    for (const entry of entries) {
+      try {
+        if (isInlineEntry(entry)) {
+          const ok = await verifyInlineAttestation({ record, entry, repositoryDid });
+          if (!ok) continue;
+          if (deps.keysForDid) {
+            const allowed = await deps.keysForDid(entry.issuer ?? repositoryDid);
+            if (!allowed.includes(entry.key)) continue;
+          }
+          verified.push(entry);
+        } else if (isStrongRefEntry(entry)) {
+          const proof = await fetchRecord(entry.uri, entry.cid);
+          const ok = await verifyRemoteProof({
+            subjectRecord: record,
+            subjectRepositoryDid: repositoryDid,
+            proofRecord: proof.value,
+          });
+          if (ok) verified.push(entry);
+        }
+      } catch (err) {
+        log("warn", "verify: signature entry check failed", { uri, err: String(err) });
+      }
+    }
+
+    return json({
+      uri,
+      cid: recordCid,
+      valid: verified.length > 0,
+      signatures: verified,
+    });
   };
 }
