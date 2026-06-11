@@ -709,7 +709,11 @@ export async function marketRFPSubmitWorkflow(
   // MarketClient over our own PDS session; each method service-proxies via the
   // `atproto-proxy` header carrying the target's service DID ref. Bound to our
   // agent + signer so submitEvent signs the event record for us. See ../lib/market.
-  const marketClient = createMarketClient(session, { agent, signer });
+  const marketClient = createMarketClient(session, {
+    agent,
+    signer,
+    log: (_level, msg, fields) => log(msg, fields),
+  });
 
   // Build user_data with policy-engine bootstrap
   const userData = buildUserData(serviceName);

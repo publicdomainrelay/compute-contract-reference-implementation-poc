@@ -232,7 +232,7 @@ const marketFactory = createMarketFactory(marketDeps, {
     // issued (proof of payment for x402, proof of grant for free). Without it we
     // have no evidence the contract is settled, so we refuse to provision.
     await settlement.verifyAcceptPayload(accept.payload);
-    const payloadRef = accept.payload!;
+    const payloadRef = accept.payload;
 
     // Provenance bundle written into the VM so it can verify what it was
     // provisioned for. Reuses ACCEPT_NSID as the $type; each entry is the
@@ -383,7 +383,7 @@ const main = async () => {
   };
   log("info", "attestation keypair loaded", { key: keypair.did(), issuer: attestationSigner.issuer });
   // Signer-bound client for outbound submitBid: signs + writes + forwards the bid.
-  bidderMarketClient = createMarketClient(session, { agent, signer: attestationSigner });
+  bidderMarketClient = createMarketClient(session, { agent, signer: attestationSigner, log });
   await configureAccountAuthRbac();
   if (cfg.server.baseUrl) {
     const expectedEndpoint = `${ownServiceDidWeb(cfg.server.baseUrl)}#${MARKET_SERVICE_ID}`;

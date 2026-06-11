@@ -11,7 +11,7 @@ import { getPdsEndpoint } from "@atproto/common-web";
 import type { IdResolver } from "@atproto/identity";
 import { parseAtUri, type RecordRef } from "./resolve.ts";
 import { strongRef, type StrongRef } from "./types.ts";
-import { OFFERING_NSID, RECEIPT_NSID } from "@publicdomainrelay/lexicons";
+import { BADGE_BLUE_KEY_NSID, OFFERING_NSID, RECEIPT_NSID } from "@publicdomainrelay/lexicons";
 import type { Logger } from "./types.ts";
 import { createRemoteProofRecord, type RecordSigner } from "./signing.ts";
 
@@ -38,8 +38,8 @@ export interface ReceiptRefs {
   rfp: RecordRef;
   bid: RecordRef;
   accept: RecordRef;
-  /** Proof-of-settlement record (the bid's payment/grant receipt). */
-  payload: RecordRef;
+  /** Proof-of-settlement record (the bid's payment/grant receipt). Optional — free settlement has no separate receipt. */
+  payload?: RecordRef;
   /** Service DID reference (did:web:HOST#compute_event) where teardown events are sent. */
   submitEvent: string;
 }
@@ -73,7 +73,7 @@ export function createReceiptRecord(
       rfp: strongRef(refs.rfp.uri, refs.rfp.cid),
       bid: strongRef(refs.bid.uri, refs.bid.cid),
       accept: strongRef(refs.accept.uri, refs.accept.cid),
-      payload: strongRef(refs.payload.uri, refs.payload.cid),
+      payload: refs.payload ? strongRef(refs.payload.uri, refs.payload.cid) : undefined,
       submitEvent: refs.submitEvent,
       createdAt: new Date().toISOString(),
     },
@@ -185,4 +185,42 @@ export async function ensureOfferingRecord(
   log("info", "offering record created", {
     ref: { $type: "com.atproto.repo.strongRef", uri: res.data.uri, cid: res.data.cid },
   });
+}
+
+/**
+ * Ensure the public half of a badge.blue attestation key is published in the
+ * agent's repo as a `com.publicdomainrelay.temp.market.badgeBlueKey` record,
+ * keyed by the key's `did:key` (a valid record key — colons are allowed). This
+ * is the verifier-facing registry: anyone can look up a signing key by its
+ * did:key directly in the author's PDS. Idempotent — a no-op if already present.
+ */
+export async function ensureBadgeBlueKeyRecord(
+  agent: Agent,
+  didKey: string,
+  issuer: string | undefined,
+  log: Logger,
+): Promise<void> {
+  try {
+    await agent.com.atproto.repo.getRecord({
+      repo: agent.assertDid,
+      collection: BADGE_BLUE_KEY_NSID,
+      rkey: didKey,
+    });
+    log("info", "badge.blue key record exists", { key: didKey });
+    return;
+  } catch {
+    // Not found (or unreadable) — fall through and (re)create it.
+  }
+  await agent.com.atproto.repo.putRecord({
+    repo: agent.assertDid,
+    collection: BADGE_BLUE_KEY_NSID,
+    rkey: didKey,
+    record: {
+      $type: BADGE_BLUE_KEY_NSID,
+      key: didKey,
+      ...(issuer ? { issuer } : {}),
+      createdAt: new Date().toISOString(),
+    },
+  });
+  log("info", "badge.blue key record created", { key: didKey, issuer });
 }

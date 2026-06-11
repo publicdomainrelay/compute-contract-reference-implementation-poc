@@ -23,8 +23,10 @@ import {
   SUBMIT_EVENT_NSID,
   SUBMIT_RFP_NSID,
 } from "@publicdomainrelay/lexicons";
-import type { StrongRef } from "./types.ts";
+import { loadOrGenerateKeypair } from "@publicdomainrelay/attestation";
+import { noopLogger, type Logger, type StrongRef } from "./types.ts";
 import { createSignedRecord, type RecordSigner, type SignedRecord } from "./signing.ts";
+import { ensureBadgeBlueKeyRecord } from "./records.ts";
 
 // Minimal LexiconDoc stubs for the four market submit procedures.
 // XrpcClient.call() requires a registered lexicon to determine HTTP method
@@ -80,12 +82,24 @@ export interface Submission<T extends Record<string, unknown> = Record<string, u
   error?: string;
 }
 
-/** A MarketClient given an `agent` + `signer` can sign records on the caller's behalf. */
+/**
+ * A MarketClient given an `agent` can sign records on the caller's behalf. The
+ * signing identity is resolved on first use, in priority order: an explicit
+ * `signer`; else a keypair from `privateKeyHex`; else a freshly *generated*
+ * keypair (ephemeral — it does not survive restarts and is not published in any
+ * did:web doc, so it only passes signature-validity checks, not key binding).
+ */
 export interface MarketClientOptions {
   /** Agent whose repo signed records are written to (its DID is the author). */
   agent?: Agent;
-  /** badge.blue signer for the records this client mints. */
+  /** Explicit badge.blue signer. Wins over `privateKeyHex`/auto-generation. */
   signer?: RecordSigner;
+  /** secp256k1 private key hex to derive the signer from when `signer` is absent. */
+  privateKeyHex?: string;
+  /** Issuer DID for an auto-created signer (defaults to the agent's DID). */
+  issuer?: string;
+  /** Logger for key-publishing/diagnostics (defaults to a no-op). */
+  log?: Logger;
 }
 
 function proxyHeaders(target: string): Record<string, string> {
@@ -94,18 +108,36 @@ function proxyHeaders(target: string): Record<string, string> {
 
 /**
  * Wrapper over an authenticated XrpcClient for the market submit procedures.
- * Construct via {@link createMarketClient}. When built with an `agent` + `signer`,
- * `submitBid`/`submitEvent`/`create` sign on your behalf.
+ * Construct via {@link createMarketClient}. When built with an `agent`,
+ * `submitBid`/`submitEvent`/`create` sign on your behalf (the signer is taken
+ * from `signer`/`privateKeyHex` or auto-generated — see {@link MarketClientOptions}).
  */
 export class MarketClient {
   readonly xrpc: XrpcClient;
   readonly #agent?: Agent;
-  readonly #signer?: RecordSigner;
+  #signer?: RecordSigner;
+  readonly #privateKeyHex?: string;
+  readonly #issuer?: string;
+  readonly #log: Logger;
+  #keyPublished?: Promise<void>;
 
   constructor(service: XrpcService, opts: MarketClientOptions = {}) {
     this.xrpc = new XrpcClient(service, MARKET_PROCEDURE_LEXICONS);
     this.#agent = opts.agent;
     this.#signer = opts.signer;
+    this.#privateKeyHex = opts.privateKeyHex;
+    this.#issuer = opts.issuer;
+    this.#log = opts.log ?? noopLogger;
+    // When we already have a concrete identity (explicit signer or a key to
+    // derive one), publish its public half now — "on createMarketClient" — so it
+    // exists even for callers that only ever sign records *outside* the client.
+    // Skipped when a key would have to be generated, so construction has no
+    // surprising ephemeral-key side effect. Fire-and-forget + best-effort.
+    if (this.#agent && (this.#signer || this.#privateKeyHex !== undefined)) {
+      this.ensureSigner().catch((err) =>
+        this.#log("warn", "badge.blue key publish (eager) failed", { err: String(err) })
+      );
+    }
   }
 
   /**
@@ -114,19 +146,53 @@ export class MarketClient {
    * mint a signed record without immediately forwarding it (e.g. a bid for an RFP
    * that carries no `submitBid` ref).
    */
-  create<T extends Record<string, unknown>>(collection: string, record: T): Promise<SignedRecord<T>> {
-    const { agent, signer } = this.#requireSigning();
-    return createSignedRecord(agent, collection, record, signer);
+  async create<T extends Record<string, unknown>>(collection: string, record: T): Promise<SignedRecord<T>> {
+    const signer = await this.ensureSigner();
+    return createSignedRecord(this.#agent!, collection, record, signer);
   }
 
-  #requireSigning(): { agent: Agent; signer: RecordSigner } {
-    if (!this.#agent || !this.#signer) {
+  /**
+   * Resolve (and memoise) this client's signing identity, creating one if none
+   * was supplied. Exposed so a caller that *also* signs records outside the
+   * client can reuse the exact same identity — pass it to `createSignedRecord`
+   * rather than building a second signer that would diverge.
+   */
+  async ensureSigner(): Promise<RecordSigner> {
+    if (!this.#agent) {
       throw new Error(
-        "MarketClient was created without an agent+signer; pass them to " +
-          "createMarketClient(service, { agent, signer }) to sign records.",
+        "MarketClient needs an agent to sign/create records; pass { agent } to createMarketClient.",
       );
     }
-    return { agent: this.#agent, signer: this.#signer };
+    if (!this.#signer) {
+      const keypair = await loadOrGenerateKeypair(this.#privateKeyHex);
+      if (!this.#privateKeyHex) {
+        console.error(
+          "[market] MarketClient created without a signer or privateKeyHex; generated an " +
+            "ephemeral attestation key. It will not survive restarts and is not published in " +
+            "any did:web doc (passes signature validity, fails key binding).",
+        );
+      }
+      this.#signer = { keypair, issuer: this.#issuer ?? this.#agent.assertDid };
+    }
+    // Publish the public half of the signing key to the agent's repo (keyed by
+    // its did:key), once, so verifiers can discover it. Best-effort: a failure
+    // is logged but never blocks signing. Mirrors ensureOfferingRecord.
+    await this.#ensureKeyPublished(this.#signer);
+    return this.#signer;
+  }
+
+  #ensureKeyPublished(signer: RecordSigner): Promise<void> {
+    if (!this.#keyPublished) {
+      this.#keyPublished = ensureBadgeBlueKeyRecord(
+        this.#agent!,
+        signer.keypair.did(),
+        signer.issuer,
+        this.#log,
+      ).catch((err) => {
+        this.#log("warn", "badge.blue key record ensure failed", { err: String(err) });
+      });
+    }
+    return this.#keyPublished;
   }
 
   /**
@@ -192,10 +258,11 @@ export class MarketClient {
  * Agent's session (`new CredentialSession(...)` after login), an Agent, or any
  * value @atproto/xrpc's XrpcClient accepts as a fetch handler.
  *
- * Supply `{ agent, signer }` to make the client sign on your behalf: then
- * `submitBid`/`submitEvent`/`create` take unsigned record bodies and the client
- * mints the badge.blue attestation. Omit them for a transport-only client that
- * can still call the ref-based `submitRfp`/`submitAccept`.
+ * Supply `{ agent }` to make the client sign on your behalf: then `submitBid`/
+ * `submitEvent`/`create` take unsigned record bodies and the client mints the
+ * badge.blue attestation, deriving its signer from `signer` → `privateKeyHex` →
+ * a generated key. Omit `agent` for a transport-only client that can still call
+ * the ref-based `submitRfp`/`submitAccept`.
  */
 export function createMarketClient(service: XrpcService, opts: MarketClientOptions = {}): MarketClient {
   return new MarketClient(service, opts);

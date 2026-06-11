@@ -112,7 +112,7 @@ const DEADLINE = Date.now() + 30 * 60 * 1000; // 30 min safety cap
 let printed = 0; // data lines already emitted (monotonic across reconnects)
 
 const isTerminal = (s: string | null) =>
-  s === "complete" || s === "input_validation_error";
+  s === "complete" || s === "input_validation_error" || s === "unknown";
 
 async function pollStatus(): Promise<string | null> {
   try {

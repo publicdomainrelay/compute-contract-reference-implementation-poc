@@ -17,6 +17,7 @@ export const EVENT_NSID = "com.publicdomainrelay.temp.market.event";
 export const OFFERING_NSID = "com.publicdomainrelay.temp.market.offering";
 export const ATTESTATION_NSID = "com.publicdomainrelay.temp.market.attestation";
 export const ATTESTATION_INLINE_TYPE = `${ATTESTATION_NSID}#inline`;
+export const BADGE_BLUE_KEY_NSID = "com.publicdomainrelay.temp.market.badgeBlueKey";
 export const SUBMIT_RFP_NSID = "com.publicdomainrelay.temp.market.submitRfp";
 export const SUBMIT_BID_NSID = "com.publicdomainrelay.temp.market.submitBid";
 export const SUBMIT_ACCEPT_NSID = "com.publicdomainrelay.temp.market.submitAccept";

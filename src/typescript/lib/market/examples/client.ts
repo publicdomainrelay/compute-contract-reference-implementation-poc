@@ -11,7 +11,7 @@
 //     deno run --allow-net --allow-env client.ts
 
 import { Agent, CredentialSession } from "@atproto/api";
-import { createMarketClient, loadOrGenerateKeypair, type RecordSigner } from "../mod.ts";
+import { createMarketClient } from "../mod.ts";
 
 const session = new CredentialSession(new URL(Deno.env.get("ATPROTO_PDS") ?? "https://bsky.social"));
 await session.login({
@@ -19,16 +19,16 @@ await session.login({
   password: Deno.env.get("ATPROTO_PASSWORD")!,
 });
 
-// A signer-bound client signs + writes + forwards records for you. Give it the
-// agent whose repo records are written to and your badge.blue signer; then the
-// submit methods take *unsigned* record bodies. (For ref-only calls like
-// submitRfp/submitAccept you can omit { agent, signer }.)
-const agent = new Agent(session);
-const signer: RecordSigner = {
-  keypair: await loadOrGenerateKeypair(Deno.env.get("ATTESTATION_PRIVATE_KEY_HEX")),
-  issuer: "did:web:you.example",
-};
-const market = createMarketClient(session, { agent, signer });
+// A signer-bound client signs + writes + forwards records for you: the submit
+// methods take *unsigned* bodies. Pass the agent whose repo records are written
+// to; the signer is resolved automatically (here from ATTESTATION_PRIVATE_KEY_HEX,
+// else a generated ephemeral key). For a stable, published identity pass an
+// explicit `signer` or `issuer`. For ref-only calls (submitRfp/submitAccept) you
+// can omit `agent` entirely.
+const market = createMarketClient(session, {
+  agent: new Agent(session),
+  privateKeyHex: Deno.env.get("ATTESTATION_PRIVATE_KEY_HEX"),
+});
 
 const bidderMarketRef = "did:web:bidder.example#pdr_temp_market";
 const rfp = { uri: "at://…/rfp/1", cid: "bafy…" };

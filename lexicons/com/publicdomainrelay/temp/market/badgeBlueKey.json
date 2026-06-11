@@ -1,0 +1,31 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.badgeBlueKey",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Publishes the public half of a badge.blue attestation key that this repo signs market.* records with. The record key is the key's did:key, so a verifier can look up a key by did:key directly in the author's PDS repo — a PDS-native key registry complementing DID-document key binding.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["key", "createdAt"],
+        "properties": {
+          "key": {
+            "type": "string",
+            "format": "did",
+            "description": "The did:key of the public key (the same value as this record's key)."
+          },
+          "issuer": {
+            "type": "string",
+            "format": "did",
+            "description": "DID (e.g. a did:web) that controls/advertises this key when it is bound to a service identity."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}
