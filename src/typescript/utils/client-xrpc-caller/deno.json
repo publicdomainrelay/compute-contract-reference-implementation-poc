@@ -1,0 +1,10 @@
+{
+  "imports": {
+    "@atproto/api": "npm:@atproto/api@^0.20.8",
+    "@atproto/crypto": "npm:@atproto/crypto@^0.4.4",
+    "@atproto/identity": "npm:@atproto/identity@^0.5.0",
+    "@publicdomainrelay/did-plc": "../../lib/did-plc/mod.ts",
+    "@publicdomainrelay/market": "../../lib/market/mod.ts",
+    "@publicdomainrelay/market-free": "../../lib/market-free/mod.ts"
+  }
+}

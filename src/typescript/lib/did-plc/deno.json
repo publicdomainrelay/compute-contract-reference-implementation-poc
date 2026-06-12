@@ -1,0 +1,9 @@
+{
+  "name": "@publicdomainrelay/did-plc",
+  "version": "0.0.0",
+  "exports": "./mod.ts",
+  "imports": {
+    "@ipld/dag-cbor": "npm:@ipld/dag-cbor@^9.0.0",
+    "multiformats/bases/base32": "npm:multiformats@^13.0.0/bases/base32"
+  }
+}
