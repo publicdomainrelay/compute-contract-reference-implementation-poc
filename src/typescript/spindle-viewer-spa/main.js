@@ -1,36 +1,16 @@
-// Tangled Pipelines Viewer — DOM glue + routing.
+// Tangled Pipelines Viewer + Market Graph Viewer — merged SPA.
 //
-// Read-only SPA: resolves an owner (handle or DID) + repo name to its
-// `sh.tangled.repo` record (knot + spindle hostnames), links out to the
-// official appview for browsing pipelines/workflows (that data has no public
-// XRPC/CORS surface — see the header comment in tangled.js for why), and
-// opens a websocket straight to the spindle's `/logs/{knot}/{rkey}/{name}`
-// endpoint to tail live logs for a given pipeline + workflow.
+// Two tabs:
+//   "Tangled Pipelines" — resolve repos, stream live spindle logs, trigger runs.
+//   "Market Graph"      — live D3 force-directed graph of market record flow via Jetstream.
 //
-// Reading is still anonymous — every record here is public, and the spindle
-// log-streaming endpoint is unauthenticated (see core/spindle/server.go) — but
-// *triggering* a pipeline run requires proving who you are. Signing in (via
-// @atproto/oauth-client-browser) lets us call the trigger XRPC on the user's
-// own PDS with an `atproto-proxy` header; the PDS mints a short-lived
-// service-auth token and proxies the request to the repo's spindle (PDS service
-// proxying, see TRIGGER_LXM / spindleProxyHeader in tangled.js).
-//
-// URLs are hash-routed (no server-side rewrite rules needed to serve
-// index.html for arbitrary paths, which static hosts for SPAs don't always
-// provide):
-//
-//   #/<owner>/<repo>                       repo overview + pipeline browser link
-//   #/<owner>/<repo>/<pipeline>/<workflow> deep link straight to live logs
-//
-// e.g. #/johnandersen777.bsky.social/compute-contract-reference-implementation-poc
-//
-// All the DOM-free logic (XRPC calls, identity resolution, route parsing,
-// URL building, …) lives in ./tangled.js so it can be unit-tested with
-// `deno test` without a browser — see tangled_test.js.
+// All DOM-free logic for pipelines lives in ./tangled.js.
+// All DOM-free logic for the graph lives in ./graph.js.
 
 import { BrowserOAuthClient } from "@atproto/oauth-client-browser";
 import { Agent } from "@atproto/api";
 import { XrpcClient } from "@atproto/xrpc";
+import * as d3 from "d3";
 
 import {
 	REPO_NSID,
@@ -41,31 +21,62 @@ import {
 	TRIGGER_LXM, TRIGGER_LEXICON, spindleProxyHeader, buildTriggerPayload, resolveLatestSha,
 } from "./tangled.js";
 
-let activeSocket; // undefined | WebSocket — the currently open log stream
-let activeEventsSocket; // undefined | WebSocket — the currently open /events jetstream
-let pipelineRuns = []; // accumulated, most-recent-first; persisted to localStorage per repo
-let suppressNextHashChange = false; // set when we update the hash ourselves
+import {
+	WATCHED_NSIDS,
+	nsidLabel,
+	nsidColor,
+	parseJetstreamFrame,
+	extractEdges,
+	fixUps,
+	toYaml,
+	pdslsUrl,
+	shortDid,
+} from "./graph.js";
 
-// currentView holds everything we need to re-render or drill further down.
-let currentView = {}; // { owner: { identifier, did, pds }, repoName, repoRecord }
+/* =========================================================================
+   TAB SWITCHING
+   ========================================================================= */
 
-/* ----------------------------------------------------------------------- */
-/* Sign-in (OAuth) — needed so the PDS can proxy the trigger XRPC for us     */
-/* ----------------------------------------------------------------------- */
+let graphInitialized = false;
 
-let oauthClient; // undefined | BrowserOAuthClient
-let session; // undefined | OAuthSession — set once signed in
-let agent; // undefined | Agent — wraps `session`, used for agent.did
-// triggerClient — an XrpcClient bound to the user's OAuth session (their PDS)
-// and taught the TRIGGER_LEXICON, so triggerPipeline can issue the trigger call
-// with an `atproto-proxy` header and have the PDS proxy it to the spindle.
-let triggerClient; // undefined | XrpcClient
+function switchTab(name) {
+	const isPipelines = name === "pipelines";
+	document.getElementById("tab-pipelines").style.display = isPipelines ? "" : "none";
+	document.getElementById("tab-graph").style.display = isPipelines ? "none" : "flex";
+	document.getElementById("tab-btn-pipelines").classList.toggle("active", isPipelines);
+	document.getElementById("tab-btn-graph").classList.toggle("active", !isPipelines);
 
-// buildClientId mirrors the loopback-client special case from the OAuth spec
-// (atproto.com/specs/oauth#localhost-client-development) for local dev, and
-// otherwise points at the static oauth-client-metadata.json served alongside
-// this SPA — whose `client_id`/`redirect_uris` must be kept in sync with
-// wherever this SPA is actually deployed.
+	if (!isPipelines && !graphInitialized) {
+		graphInitialized = true;
+		initGraph();
+		buildLegend();
+		buildNsidToggles();
+		buildSessionDropdown();
+		startRecording();
+		connectJetstream();
+	}
+	if (!isPipelines) {
+		resizeGraph();
+	}
+}
+
+/* =========================================================================
+   PIPELINES TAB
+   ========================================================================= */
+
+let activeSocket;
+let activeEventsSocket;
+let pipelineRuns = [];
+let suppressNextHashChange = false;
+let currentView = {};
+
+/* --- OAuth --- */
+
+let oauthClient;
+let session;
+let agent;
+let triggerClient;
+
 function buildClientId() {
 	const isLocal = ["localhost", "127.0.0.1"].includes(window.location.hostname);
 	if (isLocal) {
@@ -95,7 +106,6 @@ async function doSignIn(handle) {
 	errorEl.textContent = "";
 	button.setAttribute("aria-busy", "true");
 	try {
-		// Never resolves — the browser navigates away to the user's PDS.
 		await oauthClient.signIn(handle, { state: window.location.hash });
 	} catch (err) {
 		errorEl.textContent = `Sign-in failed: ${err.message || err}`;
@@ -118,10 +128,6 @@ async function initOAuth() {
 	if (result) {
 		session = result.session;
 		agent = new Agent(session);
-		// The OAuthSession is a FetchHandlerObject: requests it handles go to the
-		// user's PDS with OAuth/DPoP auth applied, so this XrpcClient's calls are
-		// authenticated PDS calls that the PDS will proxy onward (per the
-		// atproto-proxy header we set on each trigger).
 		triggerClient = new XrpcClient(session, [TRIGGER_LEXICON]);
 		if (typeof result.state === "string" && result.state.startsWith("#")) {
 			suppressNextHashChange = true;
@@ -139,9 +145,7 @@ async function initOAuth() {
 	renderSession();
 }
 
-/* ----------------------------------------------------------------------- */
-/* Manual trigger — calls the trigger XRPC via PDS service proxying          */
-/* ----------------------------------------------------------------------- */
+/* --- Trigger --- */
 
 function updateTriggerVisibility() {
 	const { repoRecord } = currentView;
@@ -154,13 +158,6 @@ function updateTriggerVisibility() {
 	}
 }
 
-// triggerPipeline calls the trigger procedure on the user's OWN PDS with an
-// `atproto-proxy: did:web:<spindle>#tangled_spindle` header. The PDS mints and
-// signs the inter-service auth token (lxm=TRIGGER_LXM) with the user's repo key
-// and proxies the request to the spindle, which verifies the token against the
-// issuer's DID document and requires iss === actor. The browser never mints or
-// sees a token, and never talks to the spindle directly.
-// See atproto.com/specs/xrpc#service-proxying.
 async function triggerPipeline() {
 	const statusEl = document.getElementById("trigger-status");
 	const button = document.getElementById("trigger-button");
@@ -192,9 +189,7 @@ async function triggerPipeline() {
 	}
 }
 
-/* ----------------------------------------------------------------------- */
-/* DOM helpers                                                              */
-/* ----------------------------------------------------------------------- */
+/* --- DOM helpers --- */
 
 function hide(...ids) {
 	for (const id of ids) document.getElementById(id).style.display = "none";
@@ -221,9 +216,7 @@ function closeEventsSocket() {
 	document.getElementById("events-status").textContent = "";
 }
 
-/* ----------------------------------------------------------------------- */
-/* localStorage persistence — pipeline runs survive a reload                */
-/* ----------------------------------------------------------------------- */
+/* --- localStorage --- */
 
 function loadPersistedPipelineRuns(owner, repoName) {
 	try {
@@ -238,15 +231,11 @@ function loadPersistedPipelineRuns(owner, repoName) {
 function savePersistedPipelineRuns(owner, repoName, runs) {
 	try {
 		localStorage.setItem(pipelineStorageKey(owner, repoName), JSON.stringify(runs));
-	} catch { /* storage unavailable/full — live view still works */ }
+	} catch { /* storage unavailable/full */ }
 }
 
-/* ----------------------------------------------------------------------- */
-/* Routing                                                                  */
-/* ----------------------------------------------------------------------- */
+/* --- Routing --- */
 
-// navigateToRepo / navigateToLogs update the address bar (without
-// retriggering a redundant load) and drive the corresponding view.
 function navigateToRepo(owner, repo) {
 	setHash(buildRoute(owner, repo));
 	document.getElementById("owner-input").value = owner;
@@ -276,9 +265,6 @@ async function handleHashChange() {
 	await followRoute(parseRoute(window.location.hash));
 }
 
-// followRoute drives the app from a parsed route, loading the repo first and
-// — for the four-segment "deep link to logs" shape — opening the log stream
-// once the repo (and therefore its spindle hostname) is known.
 async function followRoute(route) {
 	if (!route) return;
 
@@ -293,9 +279,7 @@ async function followRoute(route) {
 	}
 }
 
-/* ----------------------------------------------------------------------- */
-/* Step 1: resolve + render the repo                                        */
-/* ----------------------------------------------------------------------- */
+/* --- Repo load --- */
 
 async function loadRepo(ownerIdentifier, repoName) {
 	const errorEl = document.getElementById("lookup-error");
@@ -391,10 +375,6 @@ function renderRepo() {
 	show("repo-container");
 }
 
-/* ----------------------------------------------------------------------- */
-/* Step 2: pipelines/logs panel — link out to the appview, jump to logs     */
-/* ----------------------------------------------------------------------- */
-
 function renderPipelinesPanel() {
 	const { owner, repoName } = currentView;
 
@@ -405,9 +385,7 @@ function renderPipelinesPanel() {
 	show("pipelines-container");
 }
 
-/* ----------------------------------------------------------------------- */
-/* Step 2.5: subscribe to the spindle's /events jetstream of pipeline runs  */
-/* ----------------------------------------------------------------------- */
+/* --- Events stream --- */
 
 function appendEventLine(text, className = "log-line-control") {
 	const output = document.getElementById("events-output");
@@ -448,7 +426,7 @@ function handlePipelineStatusEnvelope(raw) {
 	try { envelope = JSON.parse(raw); } catch { return; }
 
 	const run = parsePipelineStatusEnvelope(envelope);
-	if (!run) return; // not a pipeline-status record (e.g. the {"type":"ping"} keepalive)
+	if (!run) return;
 
 	appendEventLine(`${run.pipelineRkey} / ${run.workflow} → ${run.status}`, "log-line-data");
 
@@ -459,17 +437,13 @@ function handlePipelineStatusEnvelope(raw) {
 	if (owner && repoName) savePersistedPipelineRuns(owner.identifier, repoName, pipelineRuns);
 }
 
-// startEventsStream subscribes to the repo's spindle /events websocket — a
-// fan-out of `sh.tangled.pipeline.status` updates — as soon as the repo (and
-// therefore its spindle hostname) is known. Past runs are loaded from
-// localStorage first so a reload doesn't lose the browsable pipeline list.
 function startEventsStream() {
 	const { repoRecord, owner, repoName } = currentView;
 	if (!repoRecord) return;
 
 	const spindle = repoRecord.value.spindle;
 	closeEventsSocket();
-	if (!spindle) return; // no spindle configured — nothing to subscribe to
+	if (!spindle) return;
 
 	pipelineRuns = loadPersistedPipelineRuns(owner.identifier, repoName);
 	renderPipelinesList();
@@ -501,9 +475,7 @@ function startEventsStream() {
 	};
 }
 
-/* ----------------------------------------------------------------------- */
-/* Step 3: live logs from the spindle, over its public /logs websocket      */
-/* ----------------------------------------------------------------------- */
+/* --- Log stream --- */
 
 function appendLogLine(raw) {
 	const output = document.getElementById("log-output");
@@ -512,7 +484,7 @@ function appendLogLine(raw) {
 	const line = document.createElement("span");
 
 	let parsed;
-	try { parsed = JSON.parse(raw); } catch { /* not JSON — render verbatim */ }
+	try { parsed = JSON.parse(raw); } catch { /* not JSON */ }
 
 	if (parsed && typeof parsed === "object" && "kind" in parsed) {
 		if (parsed.kind === "control") {
@@ -585,11 +557,555 @@ function openLogStream(pipelineRkey, workflowName) {
 	};
 }
 
-/* ----------------------------------------------------------------------- */
-/* Init                                                                     */
-/* ----------------------------------------------------------------------- */
+/* =========================================================================
+   GRAPH TAB
+   ========================================================================= */
+
+const JETSTREAM_URL = "wss://jetstream2.us-east.bsky.network/subscribe";
+const GRAPH_STORAGE_KEY = "market-graph-recordings";
+
+let jetstreamSocket;
+let graphPaused = false;
+const recordNodes = [];
+const nodeMap = new Map();
+const edgeList = [];
+const hiddenNsids = new Set();
+
+let recordingFrames = [];
+let isRecording = false;
+
+const graphStatusEl = () => document.getElementById("graph-status");
+const nodeCountEl = () => document.getElementById("node-count");
+const edgeCountEl = () => document.getElementById("edge-count");
+
+let simulation;
+let svg, gZoom, linkG, nodeG, labelG;
+let nodeSel, linkSel, labelSel, edgeLabelSel;
+let zoomBehavior;
+let pendingCenterNode = null;
+
+let pinnedUri = null;
+
+function buildLegend() {
+	const legend = document.getElementById("legend");
+	let html = '<table>';
+	for (const nsid of WATCHED_NSIDS) {
+		const color = nsidColor(nsid);
+		html += `<tr><td><span class="swatch" style="background:${color};"></span>${nsidLabel(nsid)}</td></tr>`;
+	}
+	html += '</table>';
+	legend.innerHTML = html;
+}
+
+function buildNsidToggles() {
+	const nsidFiltersEl = document.getElementById("nsid-filters");
+	nsidFiltersEl.innerHTML = "";
+	for (const nsid of WATCHED_NSIDS) {
+		const label = document.createElement("label");
+		label.title = nsid;
+		const input = document.createElement("input");
+		input.type = "checkbox";
+		input.checked = true;
+		input.addEventListener("change", () => {
+			if (input.checked) {
+				hiddenNsids.delete(nsid);
+				label.classList.remove("off");
+			} else {
+				hiddenNsids.add(nsid);
+				label.classList.add("off");
+			}
+			restartSimulation();
+		});
+		label.appendChild(input);
+		label.appendChild(document.createTextNode(nsidLabel(nsid)));
+		nsidFiltersEl.appendChild(label);
+	}
+}
+
+function showDetail(node) {
+	document.getElementById("detail-empty").style.display = "none";
+	document.getElementById("detail-header").style.display = "";
+	document.getElementById("detail-yaml").style.display = "";
+	document.getElementById("detail-actions").style.display = "flex";
+
+	document.getElementById("detail-title").textContent = `${nsidLabel(node.collection)} · ${node.rkey}`;
+	document.getElementById("detail-uri").textContent = node.uri;
+	document.getElementById("detail-meta").textContent = `DID: ${shortDid(node.did, 32)} · ${node.createdAt}`;
+
+	let yaml;
+	try {
+		yaml = toYaml(node.record);
+	} catch {
+		yaml = JSON.stringify(node.record, null, 2);
+	}
+	document.getElementById("detail-yaml").textContent = yaml;
+
+	document.getElementById("detail-pdsls-link").onclick = () => {
+		window.open(pdslsUrl(node.uri), "_blank");
+	};
+
+	const pinBtn = document.getElementById("detail-pin-button");
+	pinBtn.textContent = pinnedUri === node.uri ? "Unpin node" : "Pin node";
+	pinBtn.onclick = () => {
+		if (pinnedUri === node.uri) {
+			pinnedUri = null;
+			pinBtn.textContent = "Pin node";
+		} else {
+			pinnedUri = node.uri;
+			pinBtn.textContent = "Unpin node";
+		}
+	};
+}
+
+function hideDetail() {
+	if (pinnedUri && nodeMap.has(pinnedUri)) {
+		showDetail(recordNodes[nodeMap.get(pinnedUri)]);
+		return;
+	}
+	pinnedUri = null;
+	document.getElementById("detail-empty").style.display = "";
+	document.getElementById("detail-header").style.display = "none";
+	document.getElementById("detail-yaml").style.display = "none";
+	document.getElementById("detail-actions").style.display = "none";
+}
+
+function visibleNodes() {
+	return recordNodes.filter(n => !hiddenNsids.has(n.collection));
+}
+
+function visibleEdges() {
+	const visibleUris = new Set(visibleNodes().map(n => n.uri));
+	return edgeList.filter(e => visibleUris.has(e.from) && visibleUris.has(e.to));
+}
+
+function initGraph() {
+	svg = d3.select("#graph-pane svg");
+	gZoom = svg.append("g");
+
+	zoomBehavior = d3.zoom()
+		.scaleExtent([0.1, 8])
+		.on("zoom", (event) => gZoom.attr("transform", event.transform));
+	svg.call(zoomBehavior);
+
+	linkG = gZoom.append("g").attr("class", "links");
+	nodeG = gZoom.append("g").attr("class", "nodes");
+	labelG = gZoom.append("g").attr("class", "labels");
+
+	simulation = d3.forceSimulation()
+		.force("link", d3.forceLink().id(d => d.uri).distance(150).iterations(2))
+		.force("charge", d3.forceManyBody().strength(-800).distanceMin(30).distanceMax(600))
+		.force("collide", d3.forceCollide(45).strength(0.8).iterations(3))
+		.force("center", d3.forceCenter(0, 0).strength(0.1))
+		.alphaDecay(0.02)
+		.on("tick", () => {
+			ticked();
+			if (pendingCenterNode && simulation.alpha() < 0.05) {
+				centerOnNode(pendingCenterNode);
+				pendingCenterNode = null;
+			}
+		});
+
+	resizeGraph();
+}
+
+function resizeGraph() {
+	if (!svg) return;
+	const pane = document.getElementById("graph-pane");
+	if (!pane) return;
+	svg.attr("viewBox", [-pane.clientWidth / 2, -pane.clientHeight / 2, pane.clientWidth, pane.clientHeight]);
+}
+
+window.addEventListener("resize", resizeGraph);
+
+function restartSimulation() {
+	pendingCenterNode = null;
+	const nodes = visibleNodes();
+	const edges = visibleEdges();
+
+	nodeCountEl().textContent = nodes.length;
+	edgeCountEl().textContent = edges.length;
+
+	linkSel = linkG.selectAll("line").data(edges, d => `${d.from}→${d.to}@${d.label}`);
+	linkSel.exit().remove();
+	const linkEnter = linkSel.enter().append("line")
+		.attr("stroke", "#999")
+		.attr("stroke-width", 1.5)
+		.attr("stroke-opacity", 0.6);
+	linkSel = linkEnter.merge(linkSel);
+
+	nodeSel = nodeG.selectAll("circle").data(nodes, d => d.uri);
+	nodeSel.exit().remove();
+	const nodeEnter = nodeSel.enter().append("circle")
+		.attr("r", 8)
+		.attr("fill", d => nsidColor(d.collection))
+		.attr("stroke", "#555")
+		.attr("stroke-width", 1.5)
+		.attr("cursor", "pointer")
+		.call(d3.drag()
+			.on("start", dragStarted)
+			.on("drag", dragged)
+			.on("end", dragEnded))
+		.on("mouseenter", (event, d) => {
+			showDetail(d);
+			d3.select(event.target).attr("stroke", "#000").attr("stroke-width", 3);
+		})
+		.on("mouseleave", (event, d) => {
+			d3.select(event.target).attr("stroke", "#555").attr("stroke-width", 1.5);
+		});
+	nodeSel = nodeEnter.merge(nodeSel);
+
+	labelSel = labelG.selectAll("text.node-label").data(nodes, d => d.uri);
+	labelSel.exit().remove();
+	const labelEnter = labelSel.enter().append("text")
+		.attr("class", "node-label")
+		.text(d => nsidLabel(d.collection));
+	labelSel = labelEnter.merge(labelSel);
+
+	edgeLabelSel = labelG.selectAll("text.edge-label").data(edges, d => `${d.from}→${d.to}@${d.label}`);
+	edgeLabelSel.exit().remove();
+	const edgeLabelEnter = edgeLabelSel.enter().append("text")
+		.attr("class", "edge-label")
+		.text(d => d.label.slice(d.label.indexOf(':') + 1));
+	edgeLabelSel = edgeLabelEnter.merge(edgeLabelSel);
+
+	const degree = new Map(nodes.map(n => [n.uri, 0]));
+	for (const e of edges) {
+		if (degree.has(e.from)) degree.set(e.from, degree.get(e.from) + 1);
+		if (degree.has(e.to))   degree.set(e.to,   degree.get(e.to)   + 1);
+	}
+	const radialR = Math.max(200, Math.sqrt(nodes.length) * 70);
+	simulation.force("radial", d3.forceRadial(radialR, 0, 0).strength(d => {
+		return (degree.get(d.uri) || 0) <= 1 ? 1.0 : 0;
+	}));
+
+	simulation.nodes(nodes);
+	simulation.force("link").links(edges);
+	simulation.alpha(0.3).restart();
+}
+
+function ticked() {
+	if (linkSel) {
+		linkSel
+			.attr("x1", d => d.source.x)
+			.attr("y1", d => d.source.y)
+			.attr("x2", d => d.target.x)
+			.attr("y2", d => d.target.y);
+	}
+	if (nodeSel) {
+		nodeSel.attr("cx", d => d.x).attr("cy", d => d.y);
+	}
+	if (labelSel) {
+		labelSel.attr("x", d => d.x).attr("y", d => d.y + 16);
+	}
+	if (edgeLabelSel) {
+		edgeLabelSel
+			.attr("x", d => (d.source.x + d.target.x) / 2)
+			.attr("y", d => (d.source.y + d.target.y) / 2);
+	}
+}
+
+function dragStarted(event, d) {
+	if (!event.active) simulation.alphaTarget(0.3).restart();
+	d.fx = d.x;
+	d.fy = d.y;
+}
+function dragged(event, d) {
+	d.fx = event.x;
+	d.fy = event.y;
+}
+function dragEnded(event, d) {
+	if (!event.active) simulation.alphaTarget(0);
+	d.fx = null;
+	d.fy = null;
+}
+
+function _ingestNode(node) {
+	if (!node || !node.uri) return false;
+	if (nodeMap.has(node.uri)) return false;
+	if (hiddenNsids.has(node.collection)) return false;
+	const idx = recordNodes.length;
+	recordNodes.push(node);
+	nodeMap.set(node.uri, idx);
+	for (const e of extractEdges(node)) edgeList.push(e);
+	return true;
+}
+
+function _pushEdge(e) {
+	if (!edgeList.some((x) => x.from === e.from && x.to === e.to && x.label === e.label)) {
+		edgeList.push(e);
+	}
+}
+
+function _applyFixUps(node) {
+	const uriToNode = new Map(recordNodes.map((n) => [n.uri, n]));
+	const { nodes: synthNodes, edges: fixEdges } = fixUps(node, uriToNode);
+	for (const synth of synthNodes) {
+		if (_ingestNode(synth)) _applyFixUps(synth);
+	}
+	for (const e of fixEdges) _pushEdge(e);
+}
+
+function _mergeMarketEventIfSynthetic(node) {
+	if (node.collection !== "com.publicdomainrelay.temp.market.event") return false;
+	if (node.cid === "synthetic") return false;
+	const receiptUri = node.record["receipt"]?.uri;
+	if (!receiptUri) return false;
+	const synth = recordNodes.find(
+		(n) =>
+			n.collection === "com.publicdomainrelay.temp.market.event" &&
+			n.cid === "synthetic" &&
+			n.record["receipt"]?.uri === receiptUri,
+	);
+	if (!synth) return false;
+	const payloadUri = node.record["payload"]?.uri;
+	if (payloadUri) {
+		_pushEdge({ from: synth.uri, to: payloadUri, source: synth.uri, target: payloadUri, label: `${node.rkey}:payload` });
+	}
+	return true;
+}
+
+function addRecord(node) {
+	if (_mergeMarketEventIfSynthetic(node)) {
+		restartSimulation();
+		return;
+	}
+	if (!_ingestNode(node)) return;
+	_applyFixUps(node);
+	restartSimulation();
+	pendingCenterNode = node;
+}
+
+function centerOnNode(node) {
+	const currentTransform = d3.zoomTransform(svg.node());
+	const k = currentTransform.k;
+	const tx = -node.x * k;
+	const ty = -node.y * k;
+	svg.transition().duration(600).call(
+		zoomBehavior.transform,
+		d3.zoomIdentity.translate(tx, ty).scale(k),
+	);
+}
+
+/* --- Recording --- */
+
+function getRecordings() {
+	try {
+		return JSON.parse(localStorage.getItem(GRAPH_STORAGE_KEY) || "[]");
+	} catch {
+		return [];
+	}
+}
+
+function setRecordings(arr) {
+	localStorage.setItem(GRAPH_STORAGE_KEY, JSON.stringify(arr));
+}
+
+function buildSessionDropdown() {
+	const sessionSelect = document.getElementById("session-select");
+	const recordings = getRecordings();
+	sessionSelect.innerHTML = '<option value="">— saved sessions —</option>';
+	for (let i = recordings.length - 1; i >= 0; i--) {
+		const r = recordings[i];
+		const sizeKB = Math.round(JSON.stringify(r).length / 1024);
+		const opt = document.createElement("option");
+		opt.value = String(i);
+		opt.textContent = `${r.name} (${r.nodeCount}n · ~${sizeKB}KB)`;
+		sessionSelect.appendChild(opt);
+	}
+	updateSessionButtons();
+}
+
+function updateSessionButtons() {
+	const sessionSelect = document.getElementById("session-select");
+	const hasSelection = sessionSelect.value !== "";
+	document.getElementById("session-load-button").disabled = !hasSelection;
+	document.getElementById("session-download-button").disabled = !hasSelection;
+}
+
+function updateRecUI() {
+	const recButton = document.getElementById("rec-button");
+	const recIndicator = document.getElementById("rec-indicator");
+	if (isRecording) {
+		recButton.textContent = "⏹ Stop";
+		recButton.classList.add("recording");
+		recIndicator.style.display = "";
+	} else {
+		recButton.textContent = "⏺ Record";
+		recButton.classList.remove("recording");
+		recIndicator.style.display = "none";
+	}
+}
+
+function startRecording() {
+	recordingFrames = [];
+	isRecording = true;
+	updateRecUI();
+}
+
+function stopRecording() {
+	isRecording = false;
+	updateRecUI();
+	if (recordingFrames.length === 0) return;
+
+	const referencedDids = new Set();
+	for (const frame of recordingFrames) {
+		if (frame.kind === "commit" && frame.commit && frame.did) {
+			referencedDids.add(frame.did);
+		}
+	}
+
+	const filtered = recordingFrames.filter(frame => {
+		if (frame.kind === "identity" || frame.kind === "account") {
+			const did = frame.kind === "identity"
+				? (frame.identity && frame.identity.did)
+				: (frame.account && frame.account.did);
+			return did && referencedDids.has(did);
+		}
+		return true;
+	});
+
+	const recordings = getRecordings();
+	const name = `Session ${recordings.length + 1} — ${new Date().toLocaleString()}`;
+	recordings.push({
+		id: Date.now().toString(36),
+		name,
+		nodeCount: recordNodes.length,
+		edgeCount: edgeList.length,
+		createdAt: new Date().toISOString(),
+		events: filtered,
+	});
+	setRecordings(recordings);
+	recordingFrames = [];
+	buildSessionDropdown();
+}
+
+function replaySession(stored) {
+	recordNodes.length = 0;
+	nodeMap.clear();
+	edgeList.length = 0;
+	pinnedUri = null;
+	hideDetail();
+
+	for (const frame of stored.events) {
+		const rec = parseJetstreamFrame(frame);
+		if (!rec) continue;
+		if (_mergeMarketEventIfSynthetic(rec)) continue;
+		if (_ingestNode(rec)) _applyFixUps(rec);
+	}
+
+	restartSimulation();
+}
+
+function downloadRecording(stored) {
+	const blob = new Blob([JSON.stringify(stored, null, 2)], { type: "application/json" });
+	const url = URL.createObjectURL(blob);
+	const a = document.createElement("a");
+	a.href = url;
+	a.download = `market-graph-${stored.id}.json`;
+	document.body.appendChild(a);
+	a.click();
+	document.body.removeChild(a);
+	URL.revokeObjectURL(url);
+}
+
+function importRecording(file) {
+	const reader = new FileReader();
+	reader.onload = () => {
+		try {
+			const data = JSON.parse(reader.result);
+			const items = Array.isArray(data) ? data : [data];
+			const recordings = getRecordings();
+			let added = 0;
+			for (const item of items) {
+				if (!item.events || !Array.isArray(item.events)) continue;
+				item.id = item.id || Date.now().toString(36) + "_" + added;
+				item.importedAt = new Date().toISOString();
+				recordings.push(item);
+				added++;
+			}
+			if (added === 0) throw new Error("No valid recording found in file (missing events array).");
+			setRecordings(recordings);
+			buildSessionDropdown();
+			const gs = graphStatusEl();
+			gs.textContent = `📂 imported ${added} recording(s)`;
+			setTimeout(() => {
+				if (gs.textContent.startsWith("📂")) {
+					gs.textContent = jetstreamSocket && jetstreamSocket.readyState === WebSocket.OPEN ? "● live" : "● disconnected";
+				}
+			}, 3000);
+		} catch (err) {
+			alert(`Failed to import recording: ${err.message}`);
+		}
+	};
+	reader.readAsText(file);
+}
+
+/* --- Jetstream --- */
+
+function connectJetstream() {
+	const url = new URL(JETSTREAM_URL);
+	for (const nsid of WATCHED_NSIDS) {
+		url.searchParams.append("wantedCollections", nsid);
+	}
+
+	const gs = graphStatusEl();
+	gs.textContent = "● connecting…";
+	gs.className = "";
+
+	let socket;
+	try {
+		socket = new WebSocket(url.toString());
+	} catch (err) {
+		gs.textContent = `● connection failed: ${err.message || err}`;
+		gs.className = "disconnected";
+		setTimeout(connectJetstream, 5000);
+		return;
+	}
+	jetstreamSocket = socket;
+
+	socket.onopen = () => {
+		gs.textContent = "● live";
+		gs.className = "connected";
+	};
+
+	socket.onmessage = (event) => {
+		if (graphPaused) return;
+		let frame;
+		try {
+			frame = JSON.parse(event.data);
+		} catch {
+			return;
+		}
+		if (isRecording) recordingFrames.push(frame);
+		const rec = parseJetstreamFrame(frame);
+		if (rec) addRecord(rec);
+	};
+
+	socket.onerror = () => {
+		gs.textContent = "● stream error";
+		gs.className = "disconnected";
+	};
+
+	socket.onclose = (event) => {
+		jetstreamSocket = undefined;
+		gs.textContent = `● disconnected (code ${event.code})`;
+		gs.className = "disconnected";
+		if (!graphPaused) {
+			setTimeout(connectJetstream, 3000);
+		}
+	};
+}
+
+/* =========================================================================
+   INIT
+   ========================================================================= */
 
 function init() {
+	/* tab buttons */
+	document.getElementById("tab-btn-pipelines").addEventListener("click", () => switchTab("pipelines"));
+	document.getElementById("tab-btn-graph").addEventListener("click", () => switchTab("graph"));
+
+	/* pipelines forms */
 	document.getElementById("lookup-form").onsubmit = (e) => {
 		e.preventDefault();
 		const owner = document.getElementById("owner-input").value.trim();
@@ -625,8 +1141,63 @@ function init() {
 
 	window.addEventListener("hashchange", handleHashChange);
 
-	// Deep link on first load (state restoration from initOAuth may also set
-	// the hash and suppress the resulting hashchange — see suppressNextHashChange).
+	/* graph controls (wired up now but graph init deferred until tab switch) */
+	document.getElementById("pause-button").addEventListener("click", () => {
+		graphPaused = !graphPaused;
+		document.getElementById("pause-button").textContent = graphPaused ? "Resume" : "Pause";
+		if (graphPaused) {
+			if (jetstreamSocket) {
+				jetstreamSocket.close();
+				jetstreamSocket = undefined;
+			}
+			const gs = graphStatusEl();
+			gs.textContent = "⏸ paused";
+			gs.className = "";
+		} else {
+			connectJetstream();
+		}
+	});
+
+	document.getElementById("graph-clear-button").addEventListener("click", () => {
+		recordNodes.length = 0;
+		nodeMap.clear();
+		edgeList.length = 0;
+		pinnedUri = null;
+		hideDetail();
+		restartSimulation();
+	});
+
+	document.getElementById("rec-button").addEventListener("click", () => {
+		if (isRecording) stopRecording(); else startRecording();
+	});
+
+	document.getElementById("session-select").addEventListener("change", updateSessionButtons);
+
+	document.getElementById("session-load-button").addEventListener("click", () => {
+		const recordings = getRecordings();
+		const idx = parseInt(document.getElementById("session-select").value);
+		if (isNaN(idx) || !recordings[idx]) return;
+		replaySession(recordings[idx]);
+	});
+
+	document.getElementById("session-download-button").addEventListener("click", () => {
+		const recordings = getRecordings();
+		const idx = parseInt(document.getElementById("session-select").value);
+		if (isNaN(idx) || !recordings[idx]) return;
+		downloadRecording(recordings[idx]);
+	});
+
+	document.getElementById("session-import-button").addEventListener("click", () => {
+		document.getElementById("import-file-input").click();
+	});
+
+	document.getElementById("import-file-input").addEventListener("change", () => {
+		const file = document.getElementById("import-file-input").files[0];
+		if (file) importRecording(file);
+		document.getElementById("import-file-input").value = "";
+	});
+
+	/* pipelines OAuth + deep-link routing */
 	initOAuth()
 		.catch((err) => console.error("OAuth init failed:", err))
 		.finally(() => followRoute(parseRoute(window.location.hash)));

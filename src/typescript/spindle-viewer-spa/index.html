@@ -6,6 +6,7 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.purple.min.css">
 	<style>
+		/* ── shared ── */
 		code {
 			display: inline;
 			word-break: break-all;
@@ -13,6 +14,26 @@
 		article {
 			max-width: 100%;
 		}
+
+		/* ── tab nav ── */
+		#tab-nav {
+			display: flex;
+			gap: 0.5rem;
+			padding: 0.5rem 1rem;
+			border-bottom: 1px solid var(--pico-muted-border-color);
+			background: var(--pico-background-color);
+		}
+		#tab-nav button {
+			font-size: 0.85rem;
+			padding: 0.25rem 0.75rem;
+		}
+		#tab-nav button.active {
+			background: var(--pico-primary-background);
+			border-color: var(--pico-primary-border);
+			color: var(--pico-primary-inverse);
+		}
+
+		/* ── pipelines tab ── */
 		.list-item {
 			margin-bottom: 1rem;
 			padding-bottom: 1rem;
@@ -67,150 +88,300 @@
 		.log-line-control { display: block; color: var(--pico-muted-color); font-style: italic; }
 		.log-line-stderr { color: #E37474; }
 		.crumb-link { cursor: pointer; }
+
+		/* ── graph tab ── */
+		#tab-graph {
+			display: none;
+			flex-direction: column;
+			height: calc(100vh - 2.6rem); /* subtract tab-nav height */
+		}
+		:root { --graph-bg: #ffffff; }
+
+		#graph-topbar {
+			display: flex;
+			align-items: center;
+			gap: 1rem;
+			flex-wrap: wrap;
+			padding: 0.5rem 1rem;
+			border-bottom: 1px solid var(--pico-muted-border-color);
+		}
+		#graph-topbar h1 { font-size: 1.2rem; margin: 0; white-space: nowrap; }
+		#graph-status { font-size: 0.8rem; color: var(--pico-muted-color); min-width: 12rem; }
+		#graph-status.connected { color: var(--pico-color-green-400); }
+		#graph-status.disconnected { color: var(--pico-color-red-400); }
+		#nsid-filters { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+		#nsid-filters label { font-size: 0.7rem; cursor: pointer; user-select: none;
+			padding: 0.15rem 0.4rem; border-radius: 4px;
+			border: 1px solid var(--pico-muted-border-color);
+			background: var(--pico-code-background-color);
+		}
+		#nsid-filters label.off { opacity: 0.35; }
+		#nsid-filters input { display: none; }
+
+		#graph-main-area {
+			display: flex;
+			flex: 1;
+			min-height: 0;
+		}
+		#graph-pane {
+			flex: 1;
+			min-width: 0;
+			background: var(--graph-bg);
+			position: relative;
+		}
+		#graph-pane svg { width: 100%; height: 100%; display: block; }
+
+		#detail-pane {
+			width: 380px;
+			max-width: 45vw;
+			border-left: 1px solid var(--pico-muted-border-color);
+			overflow-y: auto;
+			padding: 1rem;
+			font-size: 0.8rem;
+			display: flex;
+			flex-direction: column;
+			gap: 0.5rem;
+		}
+		#detail-empty { color: var(--pico-muted-color); font-style: italic; }
+		#detail-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem; }
+		#detail-header code { word-break: break-all; font-size: 0.75rem; }
+		#detail-yaml {
+			background: var(--pico-code-background-color);
+			color: var(--pico-code-color);
+			font-family: monospace;
+			font-size: 0.75rem;
+			padding: 0.75rem;
+			white-space: pre-wrap;
+			word-break: break-all;
+			max-height: 55vh;
+			overflow-y: auto;
+			border-radius: 4px;
+			line-height: 1.4;
+		}
+		#detail-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+		#detail-actions button { font-size: 0.75rem; padding: 0.25rem 0.5rem; }
+
+		#legend {
+			position: absolute;
+			top: 8px;
+			left: 8px;
+			background: rgba(255,255,255,0.92);
+			border: 1px solid var(--pico-muted-border-color);
+			border-radius: 6px;
+			padding: 0.5rem;
+			font-size: 0.65rem;
+			color: #333;
+			max-height: 50vh;
+			overflow-y: auto;
+			z-index: 10;
+		}
+		#legend table { margin: 0; }
+		#legend td { padding: 1px 4px; }
+		#legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; }
+
+		@media (max-width: 720px) {
+			#graph-main-area { flex-direction: column; }
+			#detail-pane { width: 100%; max-width: 100%; max-height: 40vh; border-left: none; border-top: 1px solid var(--pico-muted-border-color); }
+		}
+
+		.node-label { fill: #333; font-size: 9px; pointer-events: none; text-anchor: middle; }
+		.edge-label { fill: #666; font-size: 7px; text-anchor: middle; }
+
+		#rec-indicator { font-size: 0.75rem; color: #d00; animation: rec-blink 1s step-end infinite; }
+		@keyframes rec-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+		#rec-button.recording { color: var(--pico-color-red-400); border-color: var(--pico-color-red-400); }
 	</style>
-	<title>Tangled Pipelines Viewer</title>
+	<title>Tangled Pipelines + Market Graph</title>
 	<script type="importmap">
 	{
 		"imports": {
 			"@atproto/api": "https://esm.sh/@atproto/api@0.16.4",
 			"@atproto/xrpc": "https://esm.sh/@atproto/xrpc@0.7.7",
-			"@atproto/oauth-client-browser": "https://esm.sh/@atproto/oauth-client-browser@0.3.29"
+			"@atproto/oauth-client-browser": "https://esm.sh/@atproto/oauth-client-browser@0.3.29",
+			"d3": "https://esm.sh/d3@7.9.0"
 		}
 	}
 	</script>
 </head>
 <body>
-	<main class="container">
-		<section class="content">
-			<header>
-				<hgroup>
-					<h1>Tangled Pipelines Viewer</h1>
-					<h2>Browse repos, pipelines, and live spindle logs over the Atmosphere</h2>
-				</hgroup>
-				<nav>
-					<ul>
-						<li id="logout-nav" style="display: none;"><a href="#" id="logout-link">Sign out (<code id="session-handle"></code>)</a></li>
-						<li id="login-nav"><a href="#" id="login-link">Sign in</a></li>
-						<li><a target="_blank" href="https://tangled.org">tangled.org</a></li>
-					</ul>
-				</nav>
-			</header>
 
-			<!-- hidden by default, shown when "Sign in" is clicked and no session exists -->
-			<article id="login-container" style="display: none;">
-				<h3>Sign in with the Atmosphere</h3>
-				<p>
-					Signing in lets your own PDS
-					<a target="_blank" href="https://atproto.com/specs/xrpc#service-proxying">proxy an authenticated XRPC call</a>
-					to a repo's spindle and kick off a pipeline run yourself, instead of waiting for a knot
-					push event. Your PDS mints and signs the short-lived service-auth token behind the
-					scenes — the token never touches the browser.
-				</p>
-				<form id="login-form">
-					<fieldset role="group">
-						<input name="handle" id="login-handle-input" placeholder="alice.example.com" style="font-family: monospace;" required>
-						<button id="login-button">Sign in</button>
-					</fieldset>
-				</form>
-				<p id="login-error" style="color: #E37474;"></p>
-			</article>
+	<!-- ── tab switcher ── -->
+	<div id="tab-nav">
+		<button id="tab-btn-pipelines" class="active outline">Tangled Pipelines</button>
+		<button id="tab-btn-graph" class="outline">Market Graph</button>
+	</div>
 
-			<article id="lookup-container">
-				<h3>Look up a repo</h3>
-				<form id="lookup-form">
-					<fieldset role="group">
-						<input name="owner" id="owner-input" placeholder="owner handle or DID, e.g. alice.example.com" style="font-family: monospace;" required>
-						<input name="repo" id="repo-input" placeholder="repo name, e.g. my-cool-repo" style="font-family: monospace;" required>
-						<button id="lookup-button">Load</button>
-					</fieldset>
-				</form>
-				<p id="lookup-error" style="color: #E37474;"></p>
-			</article>
+	<!-- ── pipelines tab ── -->
+	<div id="tab-pipelines">
+		<main class="container">
+			<section class="content">
+				<header>
+					<hgroup>
+						<h1>Tangled Pipelines Viewer</h1>
+						<h2>Browse repos, pipelines, and live spindle logs over the Atmosphere</h2>
+					</hgroup>
+					<nav>
+						<ul>
+							<li id="logout-nav" style="display: none;"><a href="#" id="logout-link">Sign out (<code id="session-handle"></code>)</a></li>
+							<li id="login-nav"><a href="#" id="login-link">Sign in</a></li>
+							<li><a target="_blank" href="https://tangled.org">tangled.org</a></li>
+						</ul>
+					</nav>
+				</header>
 
-			<nav id="breadcrumbs" aria-label="breadcrumb" style="display: none;">
-				<ul id="breadcrumb-list"></ul>
-			</nav>
-
-			<!-- repo summary -->
-			<article id="repo-container" style="display: none;">
-				<h3 id="repo-title"></h3>
-				<p id="repo-description"></p>
-				<ul id="repo-meta"></ul>
-			</article>
-
-			<!-- live jetstream of pipeline-status events from the repo's spindle -->
-			<article id="events-container" style="display: none;">
-				<h3>Live pipeline events</h3>
-				<p>
-					Subscribed to the spindle's <code>/events</code> stream — every
-					<code>sh.tangled.pipeline.status</code> update appears below as it happens, and
-					builds up the pipeline list beneath it. Runs are saved to your browser's
-					<code>localStorage</code> so they're still here next time you load this repo.
-				</p>
-				<p id="events-status"></p>
-				<div id="events-output"></div>
-
-				<h4>Pipelines seen so far</h4>
-				<p id="pipelines-list-empty" style="display: none;"><em>No pipeline events seen yet — trigger a pipeline run to see it appear here.</em></p>
-				<ul id="pipelines-list"></ul>
-			</article>
-
-			<!-- pipelines: browse on the appview, then jump straight to live logs here -->
-			<article id="pipelines-container" style="display: none;">
-				<h3>Pipelines &amp; Logs</h3>
-				<p>
-					Pipeline and workflow data isn't available over public XRPC — knots emit
-					<code>sh.tangled.pipeline</code> records onto an internal event stream that only the
-					appview indexes, and it serves them as plain HTML with no CORS headers. Browse them
-					there, then paste the pipeline ID and workflow name below to stream live logs straight
-					from the spindle (its <code>/logs/</code> endpoint is a public, unauthenticated websocket).
-				</p>
-				<p>
-					<a id="appview-pipelines-link" target="_blank" href="#">
-						<button class="outline">Browse pipelines on tangled.sh</button>
-					</a>
-				</p>
-
-				<!-- manual trigger: calls the trigger XRPC on the user's own PDS with an
-				     atproto-proxy header, so the PDS mints the service-auth token and
-				     proxies the request to the repo's spindle. Only shown once the user
-				     has signed in (see "Sign in" above). -->
-				<div id="trigger-container" style="display: none;">
+				<article id="login-container" style="display: none;">
+					<h3>Sign in with the Atmosphere</h3>
 					<p>
-						Manually start a pipeline run on <code id="trigger-default-branch"></code> by calling
-						<code>com.publicdomainrelay.temp.tangled.spindle.trigger</code> on <em>your</em> PDS with an
-						<code>atproto-proxy</code> header pointed at the spindle's
-						<code>did:web</code> service entry. Your PDS signs a service-auth token
-						(<code>iss</code> = your DID, <code>aud</code> = the spindle's service DID,
-						<code>lxm</code> = the trigger method) and forwards the request; the spindle verifies
-						the token against your DID document before running anything.
+						Signing in lets your own PDS
+						<a target="_blank" href="https://atproto.com/specs/xrpc#service-proxying">proxy an authenticated XRPC call</a>
+						to a repo's spindle and kick off a pipeline run yourself, instead of waiting for a knot
+						push event. Your PDS mints and signs the short-lived service-auth token behind the
+						scenes — the token never touches the browser.
 					</p>
-					<button id="trigger-button">Trigger pipeline run</button>
-					<p id="trigger-status"></p>
+					<form id="login-form">
+						<fieldset role="group">
+							<input name="handle" id="login-handle-input" placeholder="alice.example.com" style="font-family: monospace;" required>
+							<button id="login-button">Sign in</button>
+						</fieldset>
+					</form>
+					<p id="login-error" style="color: #E37474;"></p>
+				</article>
+
+				<article id="lookup-container">
+					<h3>Look up a repo</h3>
+					<form id="lookup-form">
+						<fieldset role="group">
+							<input name="owner" id="owner-input" placeholder="owner handle or DID, e.g. alice.example.com" style="font-family: monospace;" required>
+							<input name="repo" id="repo-input" placeholder="repo name, e.g. my-cool-repo" style="font-family: monospace;" required>
+							<button id="lookup-button">Load</button>
+						</fieldset>
+					</form>
+					<p id="lookup-error" style="color: #E37474;"></p>
+				</article>
+
+				<nav id="breadcrumbs" aria-label="breadcrumb" style="display: none;">
+					<ul id="breadcrumb-list"></ul>
+				</nav>
+
+				<article id="repo-container" style="display: none;">
+					<h3 id="repo-title"></h3>
+					<p id="repo-description"></p>
+					<ul id="repo-meta"></ul>
+				</article>
+
+				<article id="events-container" style="display: none;">
+					<h3>Live pipeline events</h3>
+					<p>
+						Subscribed to the spindle's <code>/events</code> stream — every
+						<code>sh.tangled.pipeline.status</code> update appears below as it happens, and
+						builds up the pipeline list beneath it. Runs are saved to your browser's
+						<code>localStorage</code> so they're still here next time you load this repo.
+					</p>
+					<p id="events-status"></p>
+					<div id="events-output"></div>
+
+					<h4>Pipelines seen so far</h4>
+					<p id="pipelines-list-empty" style="display: none;"><em>No pipeline events seen yet — trigger a pipeline run to see it appear here.</em></p>
+					<ul id="pipelines-list"></ul>
+				</article>
+
+				<article id="pipelines-container" style="display: none;">
+					<h3>Pipelines &amp; Logs</h3>
+					<p>
+						Pipeline and workflow data isn't available over public XRPC — knots emit
+						<code>sh.tangled.pipeline</code> records onto an internal event stream that only the
+						appview indexes, and it serves them as plain HTML with no CORS headers. Browse them
+						there, then paste the pipeline ID and workflow name below to stream live logs straight
+						from the spindle (its <code>/logs/</code> endpoint is a public, unauthenticated websocket).
+					</p>
+					<p>
+						<a id="appview-pipelines-link" target="_blank" href="#">
+							<button class="outline">Browse pipelines on tangled.sh</button>
+						</a>
+					</p>
+
+					<div id="trigger-container" style="display: none;">
+						<p>
+							Manually start a pipeline run on <code id="trigger-default-branch"></code> by calling
+							<code>com.publicdomainrelay.temp.tangled.spindle.trigger</code> on <em>your</em> PDS with an
+							<code>atproto-proxy</code> header pointed at the spindle's
+							<code>did:web</code> service entry. Your PDS signs a service-auth token
+							(<code>iss</code> = your DID, <code>aud</code> = the spindle's service DID,
+							<code>lxm</code> = the trigger method) and forwards the request; the spindle verifies
+							the token against your DID document before running anything.
+						</p>
+						<button id="trigger-button">Trigger pipeline run</button>
+						<p id="trigger-status"></p>
+					</div>
+
+					<form id="logs-lookup-form">
+						<fieldset role="group">
+							<input name="pipeline" id="pipeline-input" placeholder="pipeline id, e.g. 3lk2x9f7q2c2a" style="font-family: monospace;" required>
+							<input name="workflow" id="workflow-input" placeholder="workflow name, e.g. build" style="font-family: monospace;" required>
+							<button id="logs-lookup-button">View logs</button>
+						</fieldset>
+					</form>
+				</article>
+
+				<article id="logs-container" style="display: none;">
+					<h3>Logs: <code id="logs-workflow-name"></code></h3>
+					<p>
+						<a id="appview-workflow-link" target="_blank" href="#">View this workflow on tangled.sh</a>
+						&nbsp;&middot;&nbsp;
+						<button id="logs-disconnect-button" class="secondary outline">Disconnect</button>
+					</p>
+					<div id="log-output"></div>
+				</article>
+
+			</section>
+		</main>
+	</div>
+
+	<!-- ── graph tab ── -->
+	<div id="tab-graph">
+		<header id="graph-topbar">
+			<h1>🧮 Market Graph</h1>
+			<span id="graph-status" class="disconnected">● disconnected</span>
+			<span style="font-size:0.7rem;color:var(--pico-muted-color);">
+				<span id="node-count">0</span> nodes ·
+				<span id="edge-count">0</span> edges
+			</span>
+			<div id="nsid-filters"></div>
+			<button id="graph-clear-button" class="secondary outline" style="font-size:0.75rem;padding:0.2rem 0.5rem;">Clear</button>
+			<button id="pause-button" class="secondary outline" style="font-size:0.75rem;padding:0.2rem 0.5rem;">Pause</button>
+			<span id="rec-indicator" style="display:none;">⏺ REC</span>
+			<button id="rec-button" class="secondary outline" style="font-size:0.75rem;padding:0.2rem 0.5rem;">⏺ Record</button>
+			<select id="session-select" style="font-size:0.75rem;padding:0.2rem 0.3rem;max-width:220px;">
+				<option value="">— saved sessions —</option>
+			</select>
+			<button id="session-load-button" class="secondary outline" style="font-size:0.75rem;padding:0.2rem 0.5rem;" disabled>Load</button>
+			<button id="session-download-button" class="secondary outline" style="font-size:0.75rem;padding:0.2rem 0.5rem;" disabled title="Download selected recording">⬇</button>
+			<button id="session-import-button" class="secondary outline" style="font-size:0.75rem;padding:0.2rem 0.5rem;" title="Import recording from file">📂</button>
+			<input type="file" id="import-file-input" accept=".json" style="display:none;">
+		</header>
+
+		<div id="graph-main-area">
+			<div id="graph-pane">
+				<svg></svg>
+				<div id="legend"></div>
+			</div>
+			<aside id="detail-pane">
+				<div id="detail-empty">Hover a node to inspect. Click to open on pdsls.dev.</div>
+				<div id="detail-header" style="display:none;">
+					<div>
+						<strong id="detail-title"></strong>
+						<br><code id="detail-uri"></code>
+						<br><small id="detail-meta"></small>
+					</div>
 				</div>
-
-				<form id="logs-lookup-form">
-					<fieldset role="group">
-						<input name="pipeline" id="pipeline-input" placeholder="pipeline id, e.g. 3lk2x9f7q2c2a" style="font-family: monospace;" required>
-						<input name="workflow" id="workflow-input" placeholder="workflow name, e.g. build" style="font-family: monospace;" required>
-						<button id="logs-lookup-button">View logs</button>
-					</fieldset>
-				</form>
-			</article>
-
-			<!-- log viewer -->
-			<article id="logs-container" style="display: none;">
-				<h3>Logs: <code id="logs-workflow-name"></code></h3>
-				<p>
-					<a id="appview-workflow-link" target="_blank" href="#">View this workflow on tangled.sh</a>
-					&nbsp;&middot;&nbsp;
-					<button id="logs-disconnect-button" class="secondary outline">Disconnect</button>
-				</p>
-				<div id="log-output"></div>
-			</article>
-
-		</section>
-	</main>
+				<div id="detail-yaml" style="display:none;"></div>
+				<div id="detail-actions" style="display:none;">
+					<button id="detail-pdsls-link" class="secondary">Open on pdsls.dev ↗</button>
+					<button id="detail-pin-button" class="secondary outline">Pin node</button>
+				</div>
+			</aside>
+		</div>
+	</div>
 
 	<script type="module" src="./main.js"></script>
 </body>
