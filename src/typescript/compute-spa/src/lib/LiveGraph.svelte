@@ -89,7 +89,12 @@
 
     zoomBehavior = d3.zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.1, 8])
-      .on('zoom', (event) => gZoom.attr('transform', event.transform));
+      .on('zoom', (event) => {
+        const t = event.transform;
+        if (isFinite(t.x) && isFinite(t.y) && isFinite(t.k)) {
+          gZoom.attr('transform', t);
+        }
+      });
     svg.call(zoomBehavior);
 
     linkG = gZoom.append('g').attr('class', 'links');

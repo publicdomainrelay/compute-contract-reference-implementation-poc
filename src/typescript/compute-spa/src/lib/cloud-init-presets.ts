@@ -90,14 +90,17 @@ write_files:
       # Fetch the ttyd password from the browser relay. The relay's Hono handler
       # OIDC-validates \${TOKEN} (full JWKS verify) before returning the record.
       mkdir -p /etc/ttyd
-      chmod 700 /etc/ttyd
+      chown agent:agent /etc/ttyd
+      chmod 750 /etc/ttyd
       PASSWORD=$(curl -sf \\
         -H "Authorization: Bearer \${TOKEN}" \\
         "https://\${XRPC_RELAY_FQDN}/xrpc/com.atproto.repo.getRecord?collection=com.fedproxy.ttydCredentials&rkey=${vmName}" \\
         | jq -r .value.password)
 
       # ttyd -c expects user:password; the SPA shows the user this same password.
+      # ttyd.service runs as User=agent, so the creds file must be agent-readable.
       printf 'agent:%s' "\${PASSWORD}" > /etc/ttyd/credentials
+      chown agent:agent /etc/ttyd/credentials
       chmod 600 /etc/ttyd/credentials
 
 
@@ -123,7 +126,7 @@ write_files:
         -H "Authorization: Bearer \${TOKEN}" \\
         -d@<(jq -n -c \\
           --arg col "com.fedproxy.sshPublicKey" \\
-          --arg svc "${serviceName}" \\
+          --arg svc "${vmName}" \\
           --arg key "\${HOST_PUBKEY}" \\
           '{collection: \$col, rkey: \$svc, record: {"\$type": \$col, service: \$svc, key: \$key, createdAt: (now | todate)}}') \\
         "https://\${XRPC_RELAY_FQDN}/xrpc/com.atproto.repo.createRecord" | jq
@@ -178,7 +181,7 @@ write_files:
       Type=simple
       User=root
       WorkingDirectory=/root
-      Environment="SERVICE=${serviceName}"
+      Environment="SERVICE=${vmName}"
       Environment="PORT=8080"
       Environment="ATPRP_URL=https://${xrpcRelayFqdn}"
       Environment="AUTH_PLUGIN=oidc"

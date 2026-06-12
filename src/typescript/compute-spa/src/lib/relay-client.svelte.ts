@@ -367,7 +367,8 @@ class RelayClient {
     const match = [...this.#ttydRequests.values()].find((r) =>
       r.didPlc === actx &&
       sub.startsWith('actx:') &&
-      sub.endsWith(`:plc:${r.didPlcKey}:role:get-ttyd-password-${r.vmName}`)
+      (sub.endsWith(`:plc:${r.didPlcKey}:role:get-ttyd-password-${r.vmName}`) ||
+       sub.endsWith(`:plc:${r.didPlcKey}:role:${r.vmName}`))
     );
     if (!match) throw new Error('no pending VM request matches token actx/sub');
 
