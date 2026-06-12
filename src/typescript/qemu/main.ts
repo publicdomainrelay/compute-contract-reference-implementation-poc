@@ -29,6 +29,7 @@ import { cors } from "jsr:@hono/hono/cors";
 import { getPublicJwk, getSigningKey, OIDCToken, UnauthorizedException, subMatchesActx } from "./oidc_helper.ts";
 import { raiseIfUnauthorized, raiseIfUnauthorizedServiceAuth, AuthToken } from "./rbac_helper.ts";
 import { ProvisioningData, validate as provisioningValidate } from "./provisioning.ts";
+import { createLogger, runWithLogContext, setLogContext, ON_BEHALF_OF_HEADER } from "../utils/log.ts";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -36,6 +37,9 @@ import { ProvisioningData, validate as provisioningValidate } from "./provisioni
 
 const PORT = Number(Deno.env.get("PORT") ?? 8080);
 const OPERATOR_HANDLE = Deno.env.get("OPERATOR_HANDLE") ?? "";
+// This host's own identity, used as actorDid on lines not tied to a caller
+// (startup, shutdown). Per-request lines override it with the caller DID.
+const SELF_DID = Deno.env.get("QEMU_DID") ?? OPERATOR_HANDLE;
 const VM_IMAGE = Deno.env.get("VM_IMAGE") ?? "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner";
 const CACHE_DIR = `${Deno.env.get("HOME")}/.cache/simple-qemu`;
 
@@ -43,14 +47,10 @@ const CACHE_DIR = `${Deno.env.get("HOME")}/.cache/simple-qemu`;
 // Logging
 // ---------------------------------------------------------------------------
 
-function log(
-  level: "info" | "error" | "warn" | "debug",
-  msg: string,
-  extra?: Record<string, unknown>,
-) {
-  const entry = { ts: new Date().toISOString(), level, msg, ...extra };
-  Deno.stderr.writeSync(new TextEncoder().encode(JSON.stringify(entry) + "\n"));
-}
+// actorDid = the caller DID doing the operation (bound per request from the
+// validated auth token); onBehalfOfDid = the originating principal forwarded by
+// the bidder over ON_BEHALF_OF_HEADER (the market.accept author).
+const log = createLogger({ service: "qemu", selfDid: () => SELF_DID });
 
 // ---------------------------------------------------------------------------
 // Bearer token helpers
@@ -210,10 +210,15 @@ const app = new Hono<{ Variables: { authToken: AuthToken } }>();
 
 app.use('*', cors());
 
-// request logger
-app.use("*", async (c, next) => {
-  log("info", "request", { method: c.req.method, path: c.req.path });
-  await next();
+// request logger — opens a per-request log context so every line emitted while
+// handling this request carries the caller DID (set after auth) and the
+// originating principal forwarded by the caller (the market.accept author).
+app.use("*", (c, next) => {
+  const onBehalfOfDid = c.req.header(ON_BEHALF_OF_HEADER) || undefined;
+  return runWithLogContext({ onBehalfOfDid }, async () => {
+    log("info", "request", { method: c.req.method, path: c.req.path });
+    await next();
+  });
 });
 
 // GET /.well-known/openid-configuration
@@ -253,6 +258,8 @@ app.use("/v1/oidc/issue", async (c, next) => {
     const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
     const authToken = await raiseIfUnauthorized(issuerUrl, "droplets.wid", token, "/v1/oidc/issue", c.req.method);
     c.set("authToken", authToken);
+    // The validated token's actx is the caller DID performing this operation.
+    setLogContext({ actorDid: authToken.actx });
     await next();
   } catch (err) {
     log("warn", "rbac denied /v1/oidc/issue", { error: String(err) });
@@ -266,6 +273,8 @@ app.use("/v2/account", async (c, next) => {
     const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
     const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", OPERATOR_HANDLE, token, "/v2/account", c.req.method);
     c.set("authToken", authToken);
+    // The validated token's actx is the caller DID performing this operation.
+    setLogContext({ actorDid: authToken.actx });
     await next();
   } catch (err) {
     log("warn", "rbac denied /v2/account", { error: String(err) });
@@ -279,6 +288,8 @@ app.use("/v2/droplets", async (c, next) => {
     const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
     const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", OPERATOR_HANDLE, token, c.req.path, c.req.method);
     c.set("authToken", authToken);
+    // The validated token's actx is the caller DID performing this operation.
+    setLogContext({ actorDid: authToken.actx });
     await next();
   } catch (err) {
     log("warn", "rbac denied /v2/droplets", { error: String(err) });
@@ -292,6 +303,8 @@ app.use("/v2/droplets/*", async (c, next) => {
     const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
     const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", OPERATOR_HANDLE, token, c.req.path, c.req.method);
     c.set("authToken", authToken);
+    // The validated token's actx is the caller DID performing this operation.
+    setLogContext({ actorDid: authToken.actx });
     await next();
   } catch (err) {
     log("warn", "rbac denied /v2/droplets/*", { error: String(err) });

@@ -44,6 +44,7 @@ import {
   verifyServiceAuth,
 } from "@publicdomainrelay/market";
 import { loadOrCreateAttestationKeyHex } from "../utils/attestation_key.ts";
+import { createLogger, runWithLogContext } from "../utils/log.ts";
 
 // The spindle's network.attested signing key — stable + file-backed
 // (spindle/attestation.jwk, env override wins). The same key the market workflow
@@ -59,14 +60,10 @@ const spindleAttestationDidKey: string = (await loadOrGenerateKeypair(spindleAtt
 // Structured logger — JSON to stderr
 // ---------------------------------------------------------------------------
 
-type LogLevel = "info" | "warn" | "error" | "debug";
-
-const enc = new TextEncoder();
-
-function log(level: LogLevel, msg: string, fields: Record<string, unknown> = {}): void {
-  const entry = JSON.stringify({ ts: new Date().toISOString(), level, msg, ...fields });
-  Deno.stderr.writeSync(enc.encode(entry + "\n"));
-}
+// actorDid = this spindle's operator DID (OWNER_DID). When the spindle acts on
+// an inbound pipeline trigger it binds onBehalfOfDid to the triggering repo's
+// DID via runWithLogContext so every nested line names whose work it serves.
+const log = createLogger({ service: "spindle", selfDid: () => OWNER_DID });
 
 // ---------------------------------------------------------------------------
 // Config
@@ -701,8 +698,13 @@ function watchKnot(knot: string): void {
         ...(Object.keys(inputs).length ? { inputs } : {}),
       };
 
-      triggerWorkflows(trigger).catch((err) =>
-        log("error", "triggerWorkflows failed", { knot, repoName, ref, err: String(err) })
+      // The workflow run is driven on behalf of the triggering repo's owner —
+      // bind it so every nested log line (incl. market.rfp provisioning) names
+      // whose pipeline this serves.
+      runWithLogContext({ onBehalfOfDid: repoDid }, () =>
+        triggerWorkflows(trigger).catch((err) =>
+          log("error", "triggerWorkflows failed", { knot, repoName, ref, err: String(err) })
+        )
       );
     };
 
@@ -1222,6 +1224,9 @@ async function trackRun(run: Run): Promise<void> {
 // known (i.e. before — possibly minutes-long — submission/provisioning finishes)
 // so the caller can return the run ids and start streaming logs right away.
 async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
+  // Everything this run does (incl. background submit + market.rfp provisioning)
+  // is on behalf of the triggering repo's owner.
+  return await runWithLogContext({ onBehalfOfDid: trigger.repoDid }, async () => {
   const workflows = await fetchWorkflows(trigger.knot, trigger.repoDid, trigger.ref);
   if (workflows.size === 0) {
     log("warn", "no .github/workflows found", { repoDid: trigger.repoDid, ref: trigger.ref, knot: trigger.knot });
@@ -1263,6 +1268,7 @@ async function triggerWorkflows(trigger: TriggerPayload): Promise<string[]> {
   );
 
   return stems;
+  });
 }
 
 // submitWorkflows — submit each fetched workflow to compute and register the

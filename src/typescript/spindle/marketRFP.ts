@@ -56,6 +56,7 @@ import {
   type Bid,
 } from "@publicdomainrelay/market";
 import { loadOrCreateAttestationKeyHex } from "../utils/attestation_key.ts";
+import { currentLogContext, setLogContext } from "../utils/log.ts";
 import { BIDS_X402_NSID, settleX402Payment } from "@publicdomainrelay/market-x402";
 import { BIDS_FREE_NSID } from "@publicdomainrelay/market-free";
 import {
@@ -151,7 +152,13 @@ type RFPLogger = (msg: string, fields?: Record<string, unknown>) => void;
 
 function makeLogger(onLog?: (line: string) => void): RFPLogger {
   return (msg: string, fields: Record<string, unknown> = {}): void => {
-    const entry = JSON.stringify({ ts: new Date().toISOString(), level: "info", component: "market-rfp", msg, ...fields });
+    // Merge the shared DID context: actorDid = this spindle's market identity
+    // (bound after atproto login), onBehalfOfDid = the triggering repo owner.
+    const ctx = currentLogContext();
+    const base: Record<string, unknown> = { ts: new Date().toISOString(), level: "info", component: "market-rfp" };
+    if (ctx.actorDid) base.actorDid = ctx.actorDid;
+    if (ctx.onBehalfOfDid) base.onBehalfOfDid = ctx.onBehalfOfDid;
+    const entry = JSON.stringify({ ...base, msg, ...fields });
     const enc = new TextEncoder();
     Deno.stderr.writeSync(enc.encode(entry + "\n"));
     onLog?.(entry);
@@ -705,6 +712,9 @@ export async function marketRFPSubmitWorkflow(
   const agent = new Agent(session);
   const agentDid = agent.assertDid;
   const agentDidPlcKey = agentDid.split(":")[2];
+  // Bind this spindle's market identity as the actorDid for all subsequent
+  // lines in this provisioning flow (and the records it authors downstream).
+  setLogContext({ actorDid: agentDid });
   log("atproto authenticated", { did: agentDid, handle: config.handle });
 
   // network.attested identity: every market record this spindle authors (rfp,

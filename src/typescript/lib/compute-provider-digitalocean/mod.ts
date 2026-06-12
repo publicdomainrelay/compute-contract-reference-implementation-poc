@@ -10,6 +10,7 @@
 import { Agent } from "@atproto/api";
 import { stringify as yamlStringify, parse as yamlParse } from "npm:yaml@^2.7.0";
 import { COMPUTE_CONFIG_WIF_SIMPLE_NSID } from "@publicdomainrelay/lexicons";
+import { ON_BEHALF_OF_HEADER } from "../../utils/log.ts";
 
 export type StrongRef = { $type: "com.atproto.repo.strongRef"; uri: string; cid: string };
 
@@ -439,17 +440,23 @@ echo "password=\${TOKEN}"
       with_droplet_agent: true,
       tags: [`oidc-sub:plc:${requesterPlc}`, `oidc-sub:role:${vm.role}`],
     };
-    console.error("[do] droplet request:", JSON.stringify(body));
+    log("info", "droplet request", { name, requesterDid, droplet: body });
     const doctx = await makeDoctx();
     const rbacRef = await configureDropletRbac(doctx, vm, requesterDid);
     const token = await getServiceAuthToken();
     const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/droplets`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+        // Forward the originating principal (the market.accept author) so the
+        // compute host (qemu) can log whose request this provision serves.
+        [ON_BEHALF_OF_HEADER]: requesterDid,
+      },
       body: JSON.stringify(body),
     });
     const json = await res.json();
-    console.error("[do] /v2/droplets:", JSON.stringify(json));
+    log("info", "droplet created", { name, requesterDid, status: res.status });
     if (res.status >= 400) throw new Error(`DO /v2/droplets ${res.status}: ${JSON.stringify(json)}`);
     return { json, rbacRef };
   }

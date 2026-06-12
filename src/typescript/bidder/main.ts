@@ -41,6 +41,7 @@ import {
   stripResolved,
 } from "@publicdomainrelay/market";
 import { loadOrCreateAttestationKeyHex } from "../utils/attestation_key.ts";
+import { createLogger, runWithLogContext } from "../utils/log.ts";
 import { createMarketFactory } from "@publicdomainrelay/hono-factory-market";
 import { createMarketBidsFactory } from "@publicdomainrelay/hono-factory-market-bids";
 import { createComputeFactory } from "@publicdomainrelay/hono-factory-compute";
@@ -85,12 +86,11 @@ const activeContracts = new Map<string, ActiveContract>();
 // Structured logger — JSON to stderr
 // ---------------------------------------------------------------------------
 
-const enc = new TextEncoder();
-
-function log(level: LogLevel, msg: string, fields: Record<string, unknown> = {}): void {
-  const entry = JSON.stringify({ ts: new Date().toISOString(), level, msg, ...fields });
-  Deno.stderr.writeSync(enc.encode(entry + "\n"));
-}
+// actorDid resolves to the bidder's own DID (agentDid), assigned once
+// loginAgent() resolves — read lazily so early lines still pick it up. The
+// onBehalfOfDid (the market.accept / RFP author) is bound per request via
+// runWithLogContext in the handlers below.
+const log = createLogger({ service: "bidder", selfDid: () => agentDid });
 
 // local type alias (resolved forms add _uri/_cid via resolveAs<T>)
 type VM = ComputeVM;
@@ -218,20 +218,29 @@ const marketFactory = createMarketFactory(marketDeps, {
     [MARKET_SERVICE_ID]: {
       [VM_NSID]: async ({ rfpUri, rfpCid, rfp, req }) => {
         const { repo: rfpOwnerDid } = parseAtUri(rfpUri);
-        // TODO Vouch checking: the bidder currently bids on any RFP that reaches
-        // it. Verify the RFP author (rfpOwnerDid) is vouched for before bidding —
-        // resolve their PDS, list sh.tangled.graph.vouch records, require a vouch
-        // (kind !== "denounce") from a trusted account. Gate behind
-        // DO_NO_REQUIRE_VOUCH=1 (set => bypass, mirroring spindle/marketRFP.ts).
-        const { bidUri, bidCid } = await createAndSubmitBid(rfpUri, rfpCid, rfp, settlement, req.url);
-        log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
-        return { body: { ok: true, bidUri, bidCid } };
+        // This bid is created on behalf of the RFP author — bind it so every
+        // nested log line names whose request we're serving.
+        return await runWithLogContext({ onBehalfOfDid: rfpOwnerDid }, async () => {
+          // TODO Vouch checking: the bidder currently bids on any RFP that reaches
+          // it. Verify the RFP author (rfpOwnerDid) is vouched for before bidding —
+          // resolve their PDS, list sh.tangled.graph.vouch records, require a vouch
+          // (kind !== "denounce") from a trusted account. Gate behind
+          // DO_NO_REQUIRE_VOUCH=1 (set => bypass, mirroring spindle/marketRFP.ts).
+          const { bidUri, bidCid } = await createAndSubmitBid(rfpUri, rfpCid, rfp, settlement, req.url);
+          log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
+          return { body: { ok: true, bidUri, bidCid } };
+        });
       },
     },
   },
   accept: {
     serviceIds: [MARKET_SERVICE_ID],
     onAccept: async ({ acceptUri, acceptCid, accept, resolve }) => {
+    // The accept's repo authority is the principal we provision on behalf of.
+    // Bind it up front so every nested log line (including the qemu-bound
+    // provisioning calls in createDroplet) names whose accept drove the work.
+    const { repo: requesterDid } = parseAtUri(accept._uri);
+    return await runWithLogContext({ onBehalfOfDid: requesterDid }, async () => {
     log("info", "settling accept", { accept: accept._uri });
 
     // Resolve the full contract record graph (bid, rfp, their payloads/config)
@@ -263,7 +272,6 @@ const marketFactory = createMarketFactory(marketDeps, {
 
     vm.user_data = injectAcceptBundle(vm.user_data, bundle);
 
-    const { repo: requesterDid } = parseAtUri(accept._uri);
     // TODO retry droplet creation on failure
     const { json: dropletJson, rbacRef } = await createDroplet(vm, requesterDid) as { json: { droplet?: { id?: number | string } }; rbacRef: StrongRef };
     const dropletId = dropletJson.droplet?.id;
@@ -308,6 +316,7 @@ const marketFactory = createMarketFactory(marketDeps, {
     }
 
     return { body: { id, uri: receiptRef.uri, cid: receiptRef.cid, submitEvent: submitEventUrl } };
+    });
     },
   },
 });
@@ -333,11 +342,14 @@ const computeFactory = createComputeFactory({
       const receiptKey = refKey(event.receipt);
       const reason = deleteEvent.reason ?? "vm.delete event received";
       const contract = activeContracts.get(receiptKey)!;
-      await deleteDroplet(contract.dropletId, reason);
-      log("info", "submitEvent: deleting rbac record for receipt", { receiptKey, rbacUri: contract.rbacRef.uri });
-      await deleteRbacRecord(contract.rbacRef, reason);
-      activeContracts.delete(receiptKey);
-      return { body: { ok: true } };
+      // Teardown is performed on behalf of the original accept author.
+      return await runWithLogContext({ onBehalfOfDid: contract.acceptAuthor }, async () => {
+        await deleteDroplet(contract.dropletId, reason);
+        log("info", "submitEvent: deleting rbac record for receipt", { receiptKey, rbacUri: contract.rbacRef.uri });
+        await deleteRbacRecord(contract.rbacRef, reason);
+        activeContracts.delete(receiptKey);
+        return { body: { ok: true } };
+      });
     },
   },
 });
