@@ -7,6 +7,7 @@
     "jsr:@hono/hono@^4.12.23": "4.12.23",
     "jsr:@std/assert@0.217": "0.217.0",
     "jsr:@std/assert@^1.0.19": "1.0.19",
+    "jsr:@std/encoding@*": "1.0.10",
     "jsr:@std/encoding@1": "1.0.10",
     "jsr:@std/fmt@1": "1.0.10",
     "jsr:@std/fs@1": "1.0.24",
@@ -22,6 +23,7 @@
     "npm:@atproto/api@*": "0.20.8",
     "npm:@atproto/api@~0.20.8": "0.20.8",
     "npm:@atproto/common-web@0.5": "0.5.0",
+    "npm:@atproto/crypto@*": "0.5.0",
     "npm:@atproto/crypto@~0.4.4": "0.4.5",
     "npm:@atproto/identity@*": "0.5.0",
     "npm:@atproto/identity@0.5": "0.5.0",
@@ -51,7 +53,7 @@
     "@denosaurs/plug@1.1.0": {
       "integrity": "eb2f0b7546c7bca2000d8b0282c54d50d91cf6d75cb26a80df25a6de8c4bc044",
       "dependencies": [
-        "jsr:@std/encoding",
+        "jsr:@std/encoding@1",
         "jsr:@std/fmt",
         "jsr:@std/fs",
         "jsr:@std/path@1"

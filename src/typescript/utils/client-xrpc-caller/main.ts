@@ -4,6 +4,8 @@
 //   deno run --allow-net --allow-env --allow-read --allow-write main.ts \
 //     --submitRfp did:web:example.com#serviceId
 //
+//  deno run -A   main.ts   --submitRfp did:web:bob-bid-0001--johnandersen777-bsky-social.fedproxy.com#pdr_temp_market --submitBid "$(cat ../../xrpc-relay/client.ndjson | grep proxyRef | tail -n 1 | jq -r .proxyRef)#pdr_temp_market" 2>&1 | jq --unbuffered -rR '(fromjson? // .)'
+//
 // Env vars:
 //   ATPROTO_PDS_URL     PDS base URL (default: https://bsky.social)
 //   ATPROTO_HANDLE      ATProto handle  (required)

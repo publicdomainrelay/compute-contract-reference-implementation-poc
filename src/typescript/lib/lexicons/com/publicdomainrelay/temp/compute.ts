@@ -3,5 +3,5 @@
  */
 
 export * as vm from './compute/vm.ts'
-export * as events from './compute/events.ts'
 export * as config from './compute/config.ts'
+export * as events from './compute/events.ts'

@@ -3,4 +3,5 @@
  */
 
 export * as publicdomainrelay from './com/publicdomainrelay.ts'
+export * as fedproxy from './com/fedproxy.ts'
 export * as atproto from './com/atproto.ts'

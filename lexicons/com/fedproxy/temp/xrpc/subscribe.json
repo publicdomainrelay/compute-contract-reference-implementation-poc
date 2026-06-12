@@ -1,0 +1,73 @@
+{
+  "lexicon": 1,
+  "id": "com.fedproxy.temp.xrpc.subscribe",
+  "defs": {
+    "main": {
+      "type": "subscription",
+      "description": "Open a relay channel. The subscriber presents a com.fedproxy.temp.xrpc.registration: a record signed (network.attested.signature) over the nonce previously issued by com.fedproxy.temp.xrpc.getRegistrationNonce. The relay verifies the registration's signatures against the issued nonce and the did:key, then binds the WebSocket to that key. On connect the relay sends a #registered frame with the assigned serviceId/proxyRef; subsequent #request frames carry inbound XRPC calls the subscriber answers with #response frames.",
+      "parameters": {
+        "type": "params",
+        "required": ["registration"],
+        "properties": {
+          "registration": {
+            "type": "string",
+            "description": "The full com.fedproxy.temp.xrpc.registration object as URL-encoded JSON, signing the nonce from getRegistrationNonce. Sent inline (not an AT-URI) so the subscriber needs no PDS to host the record."
+          }
+        }
+      },
+      "message": {
+        "schema": {
+          "type": "union",
+          "refs": [
+            "#registered",
+            "#request",
+            "#response"
+          ]
+        }
+      },
+      "errors": [
+        { "name": "InvalidRequest", "description": "Malformed or missing registration." },
+        { "name": "Unauthorized", "description": "Registration signatures do not verify against the issued nonce or did:key, or the nonce is unknown/expired." }
+      ]
+    },
+    "registered": {
+      "type": "object",
+      "description": "First frame sent by the relay on connect, assigning this subscriber a serviceId.",
+      "required": ["serviceId", "proxyRef"],
+      "properties": {
+        "serviceId": {
+          "type": "string",
+          "description": "Opaque id the relay assigns to this subscriber for the connection lifetime."
+        },
+        "proxyRef": {
+          "type": "string",
+          "description": "did:web:HOST#serviceId value callers pass as the atproto-proxy header to route XRPC calls to this subscriber."
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "description": "An inbound XRPC call relayed to the subscriber to handle.",
+      "required": ["requestId", "method", "nsid", "params", "callerDid"],
+      "properties": {
+        "requestId": { "type": "string" },
+        "method": { "type": "string" },
+        "nsid": { "type": "string", "format": "nsid" },
+        "params": { "type": "unknown", "description": "Query params as a map of string keys to string values." },
+        "body": { "type": "unknown" },
+        "callerDid": { "type": "string", "format": "did" }
+      }
+    },
+    "response": {
+      "type": "object",
+      "description": "The subscriber's reply to a #request, keyed by the same requestId.",
+      "required": ["requestId", "status"],
+      "properties": {
+        "requestId": { "type": "string" },
+        "status": { "type": "integer" },
+        "body": { "type": "unknown" },
+        "contentType": { "type": "string" }
+      }
+    }
+  }
+}

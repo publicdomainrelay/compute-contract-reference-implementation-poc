@@ -1,0 +1,30 @@
+{
+  "lexicon": 1,
+  "id": "com.fedproxy.temp.xrpc.registration",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A subscriber's signed registration. Proves custody of the did:key by carrying badge.blue attestations (network.attested.signature) over the nonce returned from com.fedproxy.temp.xrpc.getRegistrationNonce. Presented as the parameter to com.fedproxy.temp.xrpc.subscribe to open a relay channel bound to this key.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["key", "nonce", "signatures"],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "did:key public-key reference that signed the nonce; must match the key passed to getRegistrationNonce."
+          },
+          "nonce": {
+            "type": "bytes",
+            "description": "The 64-byte nonce issued by com.fedproxy.temp.xrpc.getRegistrationNonce that this registration signs over."
+          },
+          "signatures": {
+            "type": "ref",
+            "ref": "network.attested.signature#signatures",
+            "description": "badge.blue attestations (network.attested.signature) over the issued nonce, proving liveness and custody of the did:key."
+          }
+        }
+      }
+    }
+  }
+}

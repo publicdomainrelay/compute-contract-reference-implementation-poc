@@ -1,0 +1,49 @@
+{
+  "lexicon": 1,
+  "id": "com.fedproxy.temp.xrpc.getRegistrationNonce",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Request a one-time registration nonce from the relay before subscribing. The caller presents its did:key and badge.blue attestations (network.attested.signature) over its own key material; the relay replies with a crypto-secure random nonce and its own attestations over that nonce. The subscriber then signs the returned nonce and presents the resulting com.fedproxy.temp.xrpc.registration record as the parameter to com.fedproxy.temp.xrpc.subscribe, proving liveness and key custody and binding the WebSocket session to the key.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["key", "signatures"],
+          "properties": {
+            "key": {
+              "type": "string",
+              "description": "did:key public-key reference the caller will use to sign the returned nonce."
+            },
+            "signatures": {
+              "type": "ref",
+              "ref": "network.attested.signature#signatures",
+              "description": "badge.blue attestations (network.attested.signature) presented by the caller over its key material."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["nonce", "signatures"],
+          "properties": {
+            "nonce": {
+              "type": "bytes",
+              "description": "Crypto-secure random nonce, 64 bytes, that the caller must sign to complete registration."
+            },
+            "signatures": {
+              "type": "ref",
+              "ref": "network.attested.signature#signatures",
+              "description": "badge.blue attestations (network.attested.signature) from the relay over the issued nonce."
+            }
+          }
+        }
+      },
+      "errors": [
+        { "name": "InvalidRequest", "description": "Malformed body, missing fields, or unverifiable caller signatures." }
+      ]
+    }
+  }
+}
