@@ -25,6 +25,7 @@
     "npm:@atproto/api@~0.20.8": "0.20.14",
     "npm:@atproto/common-web@0.5": "0.5.0",
     "npm:@atproto/crypto@*": "0.5.0",
+    "npm:@atproto/crypto@0.5": "0.5.0",
     "npm:@atproto/crypto@~0.4.4": "0.4.5",
     "npm:@atproto/identity@*": "0.5.0",
     "npm:@atproto/identity@0.5": "0.5.0",
@@ -40,9 +41,10 @@
     "npm:@types/node@^24.12.3": "24.13.2",
     "npm:@x402/core@^2.14.0": "2.14.0",
     "npm:@x402/evm@^2.14.0": "2.14.0_typescript@6.0.3",
-    "npm:@x402/hono@^2.14.0": "2.14.0_hono@4.12.23_typescript@6.0.3",
+    "npm:@x402/hono@^2.14.0": "2.14.0_hono@4.12.25",
     "npm:d3@^7.9.0": "7.9.0",
-    "npm:hono@^4.12.23": "4.12.23",
+    "npm:hono@^4.12.23": "4.12.25",
+    "npm:hono@^4.12.25": "4.12.25",
     "npm:jose@5": "5.10.0",
     "npm:js-yaml@^4.2.0": "4.2.0",
     "npm:main.ts@1": "1.0.0_@types+node@24.13.2",
@@ -1141,7 +1143,7 @@
         "zod"
       ]
     },
-    "@x402/hono@2.14.0_hono@4.12.23_typescript@6.0.3": {
+    "@x402/hono@2.14.0_hono@4.12.25": {
       "integrity": "sha512-0R2gUah8euTR1OfgYwCf+ho3HSKe0Qijb2SBwyVXvO5bgDmy4ncdEv+lUcF+SvX+Fh2/NVAqQFL7JP7STGsPBA==",
       "dependencies": [
         "@x402/core",
@@ -2051,8 +2053,8 @@
     "helmet@8.2.0": {
       "integrity": "sha512-DRgTIUgnWcJ62KyarxxziuqYxKGnR6Rgg19BlbucN/dpmJbl1XOit6qvoOX0ZT+HhWe5OUVhU/a1zpGyc1xA0Q=="
     },
-    "hono@4.12.23": {
-      "integrity": "sha512-eIaZ9qDgu7XV0pxOCrg7/WhnQ6Ivm22UcxhXx/A3dcbqbbYgBEkc6e/J/s7j2tS96zoB0S9VBdLwQNCWwUo4LA=="
+    "hono@4.12.25": {
+      "integrity": "sha512-2NFaIyNVgJmBs/ecmtGzlmluTFs5cHEWGTdu0t1HBwYzoGXOL5nUQBRMXsXWla5i4KkG//QMzVP88m1+I3fdAQ=="
     },
     "http-errors@2.0.1": {
       "integrity": "sha512-4FbRdAX+bSdmo4AUFuS0WNiPz8NgFt+r8ThgNWmlrjQjt1Q7ZR9+zTlce2859x4KSXrwIsaeTqDoKQmtP8pLmQ==",
@@ -3288,12 +3290,15 @@
         "packageJson": {
           "dependencies": [
             "npm:@atproto/api@~0.20.14",
+            "npm:@atproto/crypto@0.5",
+            "npm:@atproto/identity@0.5",
             "npm:@atproto/oauth-client-browser@~0.4.1",
             "npm:@sveltejs/vite-plugin-svelte@^7.1.2",
             "npm:@tsconfig/svelte@^5.0.8",
             "npm:@types/d3@^7.4.3",
             "npm:@types/node@^24.12.3",
             "npm:d3@^7.9.0",
+            "npm:hono@^4.12.25",
             "npm:svelte-check@^4.4.8",
             "npm:svelte@^5.55.5",
             "npm:typescript@~6.0.2",

@@ -185,6 +185,7 @@
   }
 
   function centerOnNode(node: any) {
+    if (!svgEl) return;
     const t = d3.zoomTransform(svgEl);
     const k = t.k;
     svg.transition().duration(600).call(

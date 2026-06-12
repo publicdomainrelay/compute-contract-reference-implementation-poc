@@ -1,11 +1,12 @@
 import { BrowserOAuthClient } from '@atproto/oauth-client-browser';
 import { Agent } from '@atproto/api';
 
-function buildClientId(): string {
+async function buildClientId(): Promise<string> {
   const isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
   if (isLocal) {
+    const meta = await fetch('/oauth-client-metadata.json').then((r) => r.json()) as { scope?: string };
     return `http://localhost?${new URLSearchParams({
-      scope: 'atproto',
+      scope: meta.scope ?? 'atproto',
       redirect_uri: Object.assign(new URL(window.location.origin), { hostname: '127.0.0.1' }).href,
     })}`;
   }
@@ -30,7 +31,7 @@ class AuthState {
   async init() {
     try {
       this.#oac = await BrowserOAuthClient.load({
-        clientId: buildClientId(),
+        clientId: await buildClientId(),
         handleResolver: 'https://bsky.social',
       });
       const result = await this.#oac.init();

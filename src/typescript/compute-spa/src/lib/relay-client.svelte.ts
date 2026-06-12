@@ -7,7 +7,17 @@ const KEYPAIR_STORAGE_KEY = 'relay:keypair';
 const DISPATCHER_HOST = 'xrpc.fedproxy.com';
 const SUBSCRIBE_NSID = 'com.fedproxy.temp.xrpc.subscribe';
 const GET_NONCE_NSID = 'com.fedproxy.temp.xrpc.getRegistrationNonce';
-const DEFAULT_MARKET_SERVICE_ID = 'PDRTempMarket';
+const MARKET_SERVICE_ID = 'pdr_temp_market';
+const COMPUTE_EVENT_SERVICE_ID = 'pdr_temp_compute_event';
+
+export type CollectedBid = {
+  did: string;
+  uri: string;
+  cid: string;
+  record: Record<string, unknown>;
+};
+
+export const pendingBids: Map<string, CollectedBid[]> = new Map();
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -86,8 +96,13 @@ class RelayClient {
         ],
         service: [
           {
-            id: `#${DEFAULT_MARKET_SERVICE_ID}`,
+            id: `#${MARKET_SERVICE_ID}`,
             type: 'PDRTempMarket',
+            serviceEndpoint: `https://${host}`,
+          },
+          {
+            id: `#${COMPUTE_EVENT_SERVICE_ID}`,
+            type: 'PDRTempComputeEvent',
             serviceEndpoint: `https://${host}`,
           },
         ],
@@ -102,12 +117,12 @@ class RelayClient {
       const hostname = `${this.subdomain}.${DISPATCHER_HOST}`;
       const nsid = c.req.path.slice('/xrpc/'.length);
       try {
-        const { verifyServiceAuth } = await import('../../../lib/market/auth.ts');
+        const { verifyServiceAuth } = await import('@publicdomainrelay/market');
         const auth = await verifyServiceAuth({
           authHeader: c.req.header('Authorization'),
           hostname,
           lxm: nsid,
-          serviceIds: [DEFAULT_MARKET_SERVICE_ID],
+          serviceIds: [MARKET_SERVICE_ID, COMPUTE_EVENT_SERVICE_ID],
           idResolver: this.#idResolver,
         });
         c.set('callerDid' as never, auth.issuerDid);
@@ -118,17 +133,35 @@ class RelayClient {
       await next();
     });
 
-    // submitBid stub
     app.post('/xrpc/com.publicdomainrelay.temp.market.submitBid', async (c) => {
-      const callerDid = c.req.header('x-caller-did');
-      let input: { uri?: string; cid?: string; record?: unknown };
+      const callerDid = c.req.header('x-caller-did') ?? '';
+      let input: { uri?: string; cid?: string; record?: Record<string, unknown> };
       try { input = await c.req.json(); } catch {
         return c.json({ error: 'InvalidRequest', message: 'invalid JSON body' }, 400);
       }
       if (!input.uri || !input.cid || !input.record) {
         return c.json({ error: 'InvalidRequest', message: 'uri, cid, and record are required' }, 400);
       }
-      console.log('[relay] submitBid', { callerDid, uri: input.uri, cid: input.cid });
+      const bid = input.record as Record<string, unknown>;
+      const rfpUri = (bid.rfp as Record<string, unknown> | undefined)?.uri as string | undefined;
+      if (!rfpUri) return c.json({ error: 'InvalidRequest', message: 'bid.rfp.uri missing' }, 400);
+      const queue = pendingBids.get(rfpUri) ?? [];
+      queue.push({ did: callerDid, uri: input.uri, cid: input.cid, record: bid });
+      pendingBids.set(rfpUri, queue);
+      console.log('[relay] submitBid queued', { callerDid, uri: input.uri, rfpUri });
+      return c.json({ ok: true });
+    });
+
+    app.post('/xrpc/com.publicdomainrelay.temp.market.submitEvent', async (c) => {
+      const callerDid = c.req.header('x-caller-did') ?? '';
+      let input: { uri?: string; cid?: string; record?: Record<string, unknown> };
+      try { input = await c.req.json(); } catch {
+        return c.json({ error: 'InvalidRequest', message: 'invalid JSON body' }, 400);
+      }
+      if (!input.uri || !input.cid || !input.record) {
+        return c.json({ error: 'InvalidRequest', message: 'uri, cid, and record are required' }, 400);
+      }
+      console.log('[relay] submitEvent received', { callerDid, uri: input.uri });
       return c.json({ ok: true });
     });
 
@@ -195,6 +228,21 @@ class RelayClient {
       try { body = JSON.parse(text); } catch { /* leave as text */ }
     }
     return { status: res.status, body, contentType };
+  }
+
+  getKeypair(): import('@atproto/crypto').Secp256k1Keypair | null {
+    return this.#keypair;
+  }
+
+  getAttestationKeypair(): { did: () => string; privateKey: { type: 'k256'; bytes: Uint8Array } } | null {
+    const stored = localStorage.getItem(KEYPAIR_STORAGE_KEY);
+    if (!stored || !this.#keypair) return null;
+    try {
+      const state = JSON.parse(stored);
+      const bytes = hexToBytes(state.privateKeyHex);
+      const did = this.#keypair.did();
+      return { did: () => did, privateKey: { type: 'k256', bytes } };
+    } catch { return null; }
   }
 
   async start() {

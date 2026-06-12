@@ -12,7 +12,7 @@
   "response_types": [
     "code"
   ],
-  "scope": "atproto",
+  "scope": "atproto rpc:com.atproto.server.getSession?aud=* repo:com.fedproxy.rbac?action=create repo:com.fedproxy.sshPublicKey?action=create repo:com.publicdomainrelay.temp.compute.vm?action=create repo:com.publicdomainrelay.temp.market.rfp?action=create repo:com.publicdomainrelay.temp.market.accept?action=create repo:com.publicdomainrelay.temp.market.event?action=create repo:com.publicdomainrelay.temp.compute.events.vm.delete?action=create rpc:com.publicdomainrelay.temp.market.submitRfp?aud=* rpc:com.publicdomainrelay.temp.market.submitAccept?aud=* rpc:com.publicdomainrelay.temp.market.submitEvent?aud=*",
   "token_endpoint_auth_method": "none",
   "client_name": "Compute Contract Provider",
   "client_uri": "https://compute.publicdomainrelay.com"
