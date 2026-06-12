@@ -14,8 +14,11 @@
     "./lib/market-free",
     "./lib/market-x402",
     "./lib/market-settlement",
+    "./lib/xrpc-relay",
+    "./lib/hono-factory-xrpc-relay",
     "./utils/client-xrpc-caller",
     "./compute-spa",
+    "./web-client-example",
     "./spindle",
     "./bidder",
     "./qemu"

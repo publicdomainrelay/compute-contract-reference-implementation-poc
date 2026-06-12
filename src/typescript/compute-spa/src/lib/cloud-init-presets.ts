@@ -1,3 +1,13 @@
+import oauthClientMetadata from '../../public/oauth-client-metadata.json';
+
+/**
+ * Origin that serves the SPA's `dist/` (and therefore the wootty-web tarball
+ * dropped there by `wootty-web/build-wootty-web.sh`). Derived from the OAuth
+ * client metadata `client_uri` (e.g. `https://ui.fedfork.com`) rather than
+ * hardcoded, so the download URL tracks wherever the SPA is deployed.
+ */
+const SPA_ORIGIN = new URL(oauthClientMetadata.client_uri).origin;
+
 export interface CloudInitPreset {
   id: string;
   label: string;
@@ -30,17 +40,16 @@ const PLACEHOLDER: DefaultUserDataContext = {
 };
 
 /**
- * Build the default cloud-config for a VM: ttyd-over-tmux terminal fronted by
- * fedproxy-client, with the ttyd password fetched from the browser relay over an
- * OIDC-authenticated `getRecord`, and the VM's SSH host key published back to the
- * relay via `createRecord` (which un-gates the "Terminal" button in the SPA).
+ * Build the default cloud-config for a VM: WooTTY-over-tmux terminal fronted by
+ * fedproxy-client, with the WooTTY auth token fetched from the browser relay over
+ * an OIDC-authenticated `getRecord`, and the VM's SSH host key published back to
+ * the relay via `createRecord` (which un-gates the "Terminal" button in the SPA).
  */
 export function buildDefaultUserData(ctx: DefaultUserDataContext): string {
   const { vmName, serviceName, didPlc, didPlcKey, xrpcRelaySubdomain } = ctx;
   const xrpcRelayFqdn = `${xrpcRelaySubdomain}.xrpc.fedproxy.com`;
   return `#cloud-config
 packages:
-  - ttyd
   - tmux
 
 users:
@@ -54,14 +63,14 @@ users:
     no_user_group: false
 
 write_files:
-  - path: /usr/local/bin/setup-ttyd.sh
+  - path: /usr/local/bin/setup-wootty.sh
     owner: root:root
     permissions: '0755'
     content: |
       #!/bin/bash
       set -x
 
-      STAMP=/var/lib/setup-ttyd.done
+      STAMP=/var/lib/setup-wootty.done
       [ -f "\${STAMP}" ] && exit 0
 
       # Identity of the requesting user, wired through from the SPA.
@@ -87,21 +96,24 @@ write_files:
 
       XRPC_RELAY_FQDN="${xrpcRelayFqdn}"
 
-      # Fetch the ttyd password from the browser relay. The relay's Hono handler
-      # OIDC-validates \${TOKEN} (full JWKS verify) before returning the record.
-      mkdir -p /etc/ttyd
-      chown agent:agent /etc/ttyd
-      chmod 750 /etc/ttyd
+      # Fetch the WooTTY auth token from the browser relay. The relay's Hono
+      # handler OIDC-validates \${TOKEN} (full JWKS verify) before returning the
+      # record. The record's \`.value.password\` is the single WooTTY auth token
+      # (WooTTY has no user:password basic auth — one bearer token only).
+      mkdir -p /etc/wootty
+      chown agent:agent /etc/wootty
+      chmod 750 /etc/wootty
       PASSWORD=$(curl -sf \\
         -H "Authorization: Bearer \${TOKEN}" \\
         "https://\${XRPC_RELAY_FQDN}/xrpc/com.atproto.repo.getRecord?collection=com.fedproxy.ttydCredentials&rkey=${vmName}" \\
         | jq -r .value.password)
 
-      # ttyd -c expects user:password; the SPA shows the user this same password.
-      # ttyd.service runs as User=agent, so the creds file must be agent-readable.
-      printf 'agent:%s' "\${PASSWORD}" > /etc/ttyd/credentials
-      chown agent:agent /etc/ttyd/credentials
-      chmod 600 /etc/ttyd/credentials
+      # wootty.service runs as User=agent and reads this as an EnvironmentFile;
+      # the SPA shows the user this same token (and opens the terminal with it in
+      # the URL hash, which WooTTY exchanges once for the wootty_auth cookie).
+      printf 'WOOTTY_AUTH_TOKEN=%s\\n' "\${PASSWORD}" > /etc/wootty/wootty.env
+      chown agent:agent /etc/wootty/wootty.env
+      chmod 600 /etc/wootty/wootty.env
 
 
       retry() {
@@ -116,8 +128,21 @@ write_files:
 
       retry sh -c "curl -sfL 'https://github.com/publicdomainrelay/atproto-reverse-proxy/releases/download/latest/atproto-reverse-proxy_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin"
 
-      systemctl enable ttyd fedproxy-client.service
-      systemctl start --no-block ttyd fedproxy-client.service
+      # Install the woottyd browser-terminal daemon (no apt package; pull the
+      # release binary, mirroring the atproto-reverse-proxy pattern above).
+      retry sh -c "curl -sfL 'https://github.com/icoretech/wootty/releases/download/wootty-v0.2.17/woottyd_0.2.17_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin woottyd"
+      chmod +x /usr/local/bin/woottyd
+
+      # The woottyd release binary (and the GHCR image) ship NO web UI: both embed
+      # an empty placeholder dist and serve {"message":"Web app is not built yet"}.
+      # We build the wootty-web assets ourselves (wootty-web/build-wootty-web.sh)
+      # and serve the tarball from the SPA origin (oauth-client-metadata client_uri).
+      # Extract it and point WOOTTY_STATIC_DIR at it (wootty.service reads that env).
+      mkdir -p /usr/local/share/wootty
+      retry sh -c "curl -sfL '${SPA_ORIGIN}/wootty-web-dist.tar.gz' | tar -xz -C /usr/local/share/wootty"
+
+      systemctl enable wootty fedproxy-client.service
+      systemctl start --no-block wootty fedproxy-client.service
 
       # Publish the SSH host public key back through the relay via createRecord.
       # The SPA watches for this record to un-gate the "Terminal" button.
@@ -133,37 +158,37 @@ write_files:
 
       touch "\${STAMP}"
 
-  - path: /etc/systemd/system/setup-ttyd.service
+  - path: /etc/systemd/system/setup-wootty.service
     owner: root:root
     permissions: '0644'
     content: |
       [Unit]
-      Description=First-boot ttyd setup (fetch credentials, publish SSH key)
+      Description=First-boot WooTTY setup (fetch token, install woottyd, publish SSH key)
       After=network-online.target
       Wants=network-online.target
       ConditionPathExists=/root/secrets/digitalocean.com/serviceaccount/token
-      ConditionPathExists=!/var/lib/setup-ttyd.done
+      ConditionPathExists=!/var/lib/setup-wootty.done
 
       [Service]
       Type=oneshot
       User=root
-      ExecStart=/usr/local/bin/setup-ttyd.sh
+      ExecStart=/usr/local/bin/setup-wootty.sh
       StandardOutput=journal
       StandardError=journal
 
       [Install]
       WantedBy=multi-user.target
 
-  - path: /etc/systemd/system/setup-ttyd.path
+  - path: /etc/systemd/system/setup-wootty.path
     owner: root:root
     permissions: '0644'
     content: |
       [Unit]
-      Description=Watch for DO service-account token then run setup-ttyd
+      Description=Watch for DO service-account token then run setup-wootty
 
       [Path]
       PathExists=/root/secrets/digitalocean.com/serviceaccount/token
-      Unit=setup-ttyd.service
+      Unit=setup-wootty.service
 
       [Install]
       WantedBy=multi-user.target
@@ -196,12 +221,12 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-  - path: /etc/systemd/system/ttyd.service
+  - path: /etc/systemd/system/wootty.service
     owner: root:root
     permissions: '0644'
     content: |
       [Unit]
-      Description=Policy Engine Service
+      Description=Policy Engine Service (WooTTY browser terminal)
       After=network-online.target
       Wants=network-online.target
 
@@ -209,7 +234,16 @@ write_files:
       Type=simple
       User=agent
       Group=agent
-      ExecStart=/bin/bash -c '/usr/bin/ttyd -p 8080 -i 127.0.0.1 -c $(cat /etc/ttyd/credentials) -W $(which tmux)'
+      # Loopback bind; fedproxy-client fronts it. WOOTTY_AUTH_TOKEN comes from the
+      # env file written by setup-wootty.sh. WOOTTY_COMMAND=tmux preserves the
+      # ttyd-over-tmux behavior.
+      EnvironmentFile=/etc/wootty/wootty.env
+      Environment="WOOTTY_HOST=127.0.0.1"
+      Environment="WOOTTY_PORT=8080"
+      Environment="WOOTTY_COMMAND=tmux"
+      # Web UI assets fetched by setup-wootty.sh (release binary embeds none).
+      Environment="WOOTTY_STATIC_DIR=/usr/local/share/wootty/wootty-web"
+      ExecStart=/usr/local/bin/woottyd run
       Restart=always
       RestartSec=5
       TimeoutStopSec=10
@@ -221,16 +255,16 @@ write_files:
 
 runcmd:
   - systemctl daemon-reload
-  - systemctl enable setup-ttyd.path
-  - systemctl start --no-block setup-ttyd.path
+  - systemctl enable setup-wootty.path
+  - systemctl start --no-block setup-wootty.path
 `;
 }
 
 export const CLOUD_INIT_PRESETS: CloudInitPreset[] = [
   {
     id: 'default',
-    label: 'Default (ttyd terminal)',
-    description: 'fedproxy-client + ttyd-over-tmux browser terminal',
+    label: 'Default (WooTTY terminal)',
+    description: 'fedproxy-client + WooTTY-over-tmux browser terminal',
     script: buildDefaultUserData(PLACEHOLDER),
     build: buildDefaultUserData,
   },

@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "subscription",
-      "description": "Open a relay channel. The server immediately sends #registered with a fresh serviceId. Callers who address did:web:HOST#serviceId are relayed here as #request frames; reply on the same socket with #response.",
+      "description": "Open a relay channel. The server immediately sends #registered with a fresh serviceId. Callers who address did:web:HOST#serviceId are relayed here as #request frames; reply on the same socket with #response. Callers opening a WebSocket at a subdomain /xrpc/NSID are relayed as #subscribe frames; reply with #subscriptionEvent frames.",
       "parameters": {
         "type": "params",
         "properties": {}
@@ -12,7 +12,17 @@
       "message": {
         "schema": {
           "type": "union",
-          "refs": ["#registered", "#request", "#error"]
+          "refs": [
+            "#registered",
+            "#request",
+            "#response",
+            "#subscribe",
+            "#subscriptionOpen",
+            "#subscriptionEvent",
+            "#subscriptionClose",
+            "#subscriptionCancel",
+            "#error"
+          ]
         }
       }
     },
@@ -53,6 +63,52 @@
         "status":      { "type": "integer", "description": "HTTP status code to return to the caller." },
         "body":        { "type": "unknown", "description": "Response body (will be JSON-serialised)." },
         "contentType": { "type": "string",  "description": "Content-Type header (default application/json)." }
+      }
+    },
+    "subscribe": {
+      "type": "object",
+      "description": "Server-to-client: a caller opened a WebSocket to the subscriber's subdomain for an XRPC subscription method. The subscriber should open a stream and reply with #subscriptionEvent frames.",
+      "required": ["subscriptionId", "nsid"],
+      "properties": {
+        "subscriptionId": { "type": "string", "description": "Opaque ID; echo on all subscription frames." },
+        "nsid":           { "type": "string", "description": "XRPC subscription NSID the caller requested." },
+        "params":         { "type": "unknown", "description": "Query parameters from the caller's WS URL." }
+      }
+    },
+    "subscriptionOpen": {
+      "type": "object",
+      "description": "Client-to-server: acknowledgement that the subscriber is ready to produce events for the given subscription.",
+      "required": ["subscriptionId"],
+      "properties": {
+        "subscriptionId": { "type": "string" }
+      }
+    },
+    "subscriptionEvent": {
+      "type": "object",
+      "description": "Client-to-server: one event to forward to the caller's WebSocket. The relay passes `message` verbatim as the WS text frame payload.",
+      "required": ["subscriptionId", "message"],
+      "properties": {
+        "subscriptionId": { "type": "string" },
+        "message":        { "type": "unknown", "description": "Arbitrary JSON-serializable event payload." }
+      }
+    },
+    "subscriptionClose": {
+      "type": "object",
+      "description": "Client-to-server: the subscriber is done producing events. The relay closes the caller's WebSocket with the given code and reason.",
+      "required": ["subscriptionId"],
+      "properties": {
+        "subscriptionId": { "type": "string" },
+        "code":           { "type": "integer", "description": "WebSocket close code (default 1000)." },
+        "reason":         { "type": "string",  "description": "Human-readable close reason." }
+      }
+    },
+    "subscriptionCancel": {
+      "type": "object",
+      "description": "Server-to-client: the caller closed their WebSocket. The subscriber should stop producing events for this subscription.",
+      "required": ["subscriptionId"],
+      "properties": {
+        "subscriptionId": { "type": "string" },
+        "reason":         { "type": "string", "description": "Optional reason for cancellation." }
       }
     },
     "error": {

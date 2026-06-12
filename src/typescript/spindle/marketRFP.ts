@@ -417,6 +417,15 @@ async function discoverAndNotifyBidders(
     }),
   );
 
+  // DO_NO_REQUIRE_VOUCH=1 bypasses the vouch gate: the candidate accounts (repo
+  // owner + knot collaborators) are treated as eligible bidders directly, so
+  // submitRfp records are issued to them and their bids are accepted even though
+  // no sh.tangled.graph.vouch record names them.
+  if (Deno.env.get("DO_NO_REQUIRE_VOUCH") === "1") {
+    for (const did of accountsToCheck) vouchedDids.add(did);
+    log("vouch requirement bypassed (DO_NO_REQUIRE_VOUCH=1)", { candidates: vouchedDids.size });
+  }
+
   log("vouched bidder candidates", { count: vouchedDids.size });
 
   await Promise.all(

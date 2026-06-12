@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
+    "build:wootty-web": "./wootty-web/build-wootty-web.sh",
+    "build:full": "vite build && ./wootty-web/build-wootty-web.sh",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json"
   },

@@ -1,0 +1,11 @@
+{
+  "name": "@publicdomainrelay/xrpc-relay",
+  "version": "0.0.0",
+  "exports": "./mod.ts",
+  "imports": {
+    "@std/encoding": "jsr:@std/encoding",
+    "@atproto/crypto": "npm:@atproto/crypto",
+    "@atproto/identity": "npm:@atproto/identity",
+    "@atproto/xrpc-server": "npm:@atproto/xrpc-server"
+  }
+}

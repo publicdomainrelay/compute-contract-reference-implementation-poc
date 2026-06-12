@@ -1,9 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+  import { SvelteMap } from 'svelte/reactivity';
   import * as d3 from 'd3';
   import {
-    WATCHED_NSIDS,
     nsidLabel,
     nsidColor,
     parseJetstreamFrame,
@@ -42,10 +41,6 @@
   const recordNodes: any[] = [];
   const nodeMap = new SvelteMap<string, number>();
   const edgeList: any[] = [];
-  const hiddenNsids = new SvelteSet<string>();
-  const nsidToggles = $state<Record<string, boolean>>(
-    Object.fromEntries(WATCHED_NSIDS.map((n: string) => [n, true]))
-  );
 
   let recordingFrames: any[] = [];
 
@@ -73,15 +68,6 @@
   });
 
   // ── graph helpers ───────────────────────────────────────────────────────────
-
-  function visibleNodes() {
-    return recordNodes.filter((n) => !hiddenNsids.has(n.collection));
-  }
-
-  function visibleEdges() {
-    const uris = new Set(visibleNodes().map((n: any) => n.uri));
-    return edgeList.filter((e) => uris.has(e.from) && uris.has(e.to));
-  }
 
   function initGraph() {
     svg = d3.select(svgEl);
@@ -127,8 +113,8 @@
 
   function restartSimulation() {
     pendingCenterNode = null;
-    const nodes = visibleNodes();
-    const edges = visibleEdges();
+    const nodes = recordNodes;
+    const edges = edgeList;
     nodeCount = nodes.length;
     edgeCount = edges.length;
 
@@ -220,7 +206,6 @@
   function _ingestNode(node: any): boolean {
     if (!node || !node.uri) return false;
     if (nodeMap.has(node.uri)) return false;
-    if (hiddenNsids.has(node.collection)) return false;
     const idx = recordNodes.length;
     recordNodes.push(node);
     nodeMap.set(node.uri, idx);
@@ -266,14 +251,6 @@
     _applyFixUps(node);
     restartSimulation();
     pendingCenterNode = node;
-  }
-
-  // ── NSID toggles ────────────────────────────────────────────────────────────
-
-  function toggleNsid(nsid: string, checked: boolean) {
-    if (checked) hiddenNsids.delete(nsid);
-    else hiddenNsids.add(nsid);
-    restartSimulation();
   }
 
   // ── recording ───────────────────────────────────────────────────────────────
@@ -444,27 +421,6 @@
   </div>
 
   <div class="body">
-    <!-- left sidebar: filters + legend -->
-    <aside class="sidebar">
-      <div class="sidebar-section">
-        <div class="sidebar-title">Filter</div>
-        {#each WATCHED_NSIDS as nsid (nsid)}
-          <label class="nsid-toggle" class:off={hiddenNsids.has(nsid)} title={nsid}>
-            <input
-              type="checkbox"
-              checked={nsidToggles[nsid]}
-              onchange={(e) => {
-                nsidToggles[nsid] = (e.target as HTMLInputElement).checked;
-                toggleNsid(nsid, (e.target as HTMLInputElement).checked);
-              }}
-            />
-            <span class="swatch" style="background:{nsidColor(nsid)}"></span>
-            {nsidLabel(nsid)}
-          </label>
-        {/each}
-      </div>
-    </aside>
-
     <!-- graph canvas -->
     <div class="graph-pane" bind:this={graphPane}>
       <svg bind:this={svgEl} width="100%" height="100%"></svg>
@@ -555,24 +511,6 @@
     flex: 1;
     overflow: hidden;
   }
-
-  .sidebar {
-    width: 180px;
-    flex-shrink: 0;
-    overflow-y: auto;
-    background: #ffffff;
-    border-right: 1px solid #dde3ec;
-    padding: 0.5rem;
-  }
-  .sidebar-title { font-size: 0.75rem; text-transform: uppercase; color: #94a3b8; margin-bottom: 0.5rem; letter-spacing: 0.05em; }
-  .nsid-toggle {
-    display: flex; align-items: center; gap: 0.4rem;
-    font-size: 0.75rem; cursor: pointer; padding: 0.2rem 0;
-    color: #475569;
-  }
-  .nsid-toggle.off { color: #cbd5e1; }
-  .nsid-toggle input { display: none; }
-  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
 
   .graph-pane {
     flex: 1;

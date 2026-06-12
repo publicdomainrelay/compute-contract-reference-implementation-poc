@@ -11,7 +11,8 @@ export const TTYD_CREDS_NSID = 'com.fedproxy.ttydCredentials';
 export const FEDPROXY_HOST  = 'fedproxy.com';
 export const XRPC_DISPATCHER_HOST = 'xrpc.fedproxy.com';
 
-// ttyd login user baked into the VM cloud-init
+// Legacy terminal-creds record username. WooTTY uses a single bearer token (no
+// user:password), so this is retained only for the credential record's shape.
 export const TTYD_USERNAME = 'agent';
 
 /** Sanitize an atproto handle into a DNS label segment (dots/slashes → dashes). */
@@ -29,7 +30,12 @@ export function vmServiceName(vmRole: string, handle: string): string {
   return `${vmRole.trim()}--${handleToLabel(handle)}`;
 }
 
-/** URL the "Terminal" button opens once the VM is ready. */
-export function terminalUrl(vmRole: string, handle: string): string {
-  return `https://${vmServiceName(vmRole, handle)}.${FEDPROXY_HOST}`;
+/**
+ * URL the "Terminal" button opens once the VM is ready. When a WooTTY auth token
+ * is supplied it is placed in the URL hash (`/#token=…`); WooTTY exchanges it once
+ * for the `wootty_auth` cookie and strips it from the address bar.
+ */
+export function terminalUrl(vmRole: string, handle: string, token?: string): string {
+  const base = `https://${vmServiceName(vmRole, handle)}.${FEDPROXY_HOST}`;
+  return token ? `${base}/#token=${encodeURIComponent(token)}` : base;
 }

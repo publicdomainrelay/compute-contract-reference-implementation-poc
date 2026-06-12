@@ -1,0 +1,11 @@
+{
+  "name": "@publicdomainrelay/hono-factory-xrpc-relay",
+  "version": "0.0.0",
+  "exports": "./mod.ts",
+  "imports": {
+    "@hono/hono": "jsr:@hono/hono",
+    "@hono/hono/cors": "jsr:@hono/hono/cors",
+    "@hono/hono/deno": "jsr:@hono/hono/deno",
+    "@hono/hono/factory": "jsr:@hono/hono/factory"
+  }
+}

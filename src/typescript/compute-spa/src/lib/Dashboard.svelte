@@ -149,7 +149,16 @@
         });
         const keypair = relayClient.getAttestationKeypair();
         const proxyRef = relayClient.proxyRef;
-        const mc = createMarketClient(auth.agent, keypair && proxyRef ? { agent: auth.agent, signer: { keypair, issuer: proxyRef } } : { agent: auth.agent });
+        // badge.blue verification binds the event's signing key to the event
+        // author's repo DID (the user), not to proxyRef. proxyRef is only an
+        // optional issuer hint and may be null after a WS reconnect/reload, so
+        // gating the signer on it would silently fall back to an ephemeral key
+        // that isn't published in the user's DID doc → "invalid badge.blue
+        // signature". Sign whenever the persisted attestation keypair exists.
+        if (!keypair) {
+          throw new Error('no attestation keypair; submitEvent would fail badge.blue verification');
+        }
+        const mc = createMarketClient(auth.agent, { agent: auth.agent, signer: { keypair, issuer: proxyRef ?? undefined } });
         await mc.submitEvent(vm.submitEventRef, {
           $type: EVENT_NSID,
           receipt: { $type: 'com.atproto.repo.strongRef', uri: vm.receiptUri, cid: vm.receiptCid },
@@ -161,6 +170,11 @@
       }
     }
     savedVMs = removeVM(savedVMs, vm.vmUri);
+    // Reset the create-VM panel so it's ready for a fresh creation.
+    if (submitResult?.vm?.vmUri === vm.vmUri) {
+      submitResult = null;
+      logs = [];
+    }
   }
 
   async function onsubmit(e: SubmitEvent) {
@@ -330,24 +344,20 @@
           {@const ready = relayClient.isSshReady(vm.serviceName!)}
           <div class="creds">
             <div class="creds-row">
-              <span class="creds-label">ttyd login</span>
-              <code class="creds-val">agent</code>
-            </div>
-            <div class="creds-row">
-              <span class="creds-label">password</span>
+              <span class="creds-label">wootty token</span>
               <code class="creds-val">{vm.ttydPassword}</code>
               <button type="button" class="copy-btn" onclick={() => copyPassword(vm.ttydPassword!)}>
                 {copiedPassword === vm.ttydPassword ? 'Copied!' : 'Copy'}
               </button>
             </div>
             <p class="creds-hint">
-              Copy the password, then open the terminal and log in as <code>agent</code>.
-              The button un-greys once the VM publishes its SSH host key.
+              Open Terminal carries the token in the URL hash and signs you in
+              automatically. The button un-greys once the VM publishes its SSH host key.
             </p>
             <a
               class="terminal-btn"
               class:ready
-              href={ready && auth.handle ? terminalUrl(vm.name, auth.handle) : undefined}
+              href={ready && auth.handle ? terminalUrl(vm.name, auth.handle, vm.ttydPassword) : undefined}
               target="_blank"
               rel="noopener"
               aria-disabled={!ready}
@@ -367,14 +377,14 @@
               <div class="vm-info">
                 <span class="vm-name">{vm.name}</span>
                 <span class="vm-meta">{new Date(vm.createdAt).toLocaleString()}</span>
-                <a class="vm-uri" href={vm.vmUri} target="_blank" rel="noopener">{vm.vmUri}</a>
+                <a class="vm-uri" href={`https://pdsls.dev/${vm.vmUri}`} target="_blank" rel="noopener">{vm.vmUri}</a>
               </div>
               {#if vm.serviceName}
                 {@const ready = relayClient.isSshReady(vm.serviceName)}
                 <a
                   class="terminal-btn sm"
                   class:ready
-                  href={ready && auth.handle ? terminalUrl(vm.name, auth.handle) : undefined}
+                  href={ready && auth.handle ? terminalUrl(vm.name, auth.handle, vm.ttydPassword) : undefined}
                   target="_blank"
                   rel="noopener"
                   aria-disabled={!ready}
@@ -428,15 +438,25 @@
   header {
     display: flex;
     align-items: center;
-    gap: 1.5rem;
+    flex-wrap: wrap;
+    gap: 0.75rem 1.5rem;
     padding: 0.75rem 2rem;
     border-bottom: 1px solid #dde3ec;
     background: #ffffff;
     box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    max-width: 100%;
   }
-  .brand { display: flex; align-items: baseline; gap: 0.75rem; }
+  .brand { display: flex; align-items: baseline; gap: 0.75rem; min-width: 0; }
   .brand h1 { margin: 0; font-size: 1.15rem; color: #1c2333; }
-  .handle { color: #4a9eff; font-size: 0.85rem; }
+  .handle {
+    color: #4a9eff;
+    font-size: 0.85rem;
+    max-width: 40vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
 
   .tabs { display: flex; gap: 0.25rem; margin-left: auto; }
   .tab {
@@ -633,7 +653,6 @@
 
   .graph-wrapper { flex: 1; padding: 1rem 1.5rem; }
 
-  .handle { color: #4a9eff; font-size: 0.85rem; }
   .login-btn {
     padding: 0.4rem 1rem;
     border-radius: 6px;

@@ -1,9 +1,9 @@
 {
-  "client_id": "https://compute.publicdomainrelay.com/oauth-client-metadata.json",
+  "client_id": "https://ui.fedfork.com/oauth-client-metadata.json",
   "dpop_bound_access_tokens": true,
   "application_type": "web",
   "redirect_uris": [
-    "https://compute.publicdomainrelay.com"
+    "https://ui.fedfork.com"
   ],
   "grant_types": [
     "authorization_code",
@@ -12,8 +12,8 @@
   "response_types": [
     "code"
   ],
-  "scope": "atproto rpc:com.atproto.server.getSession?aud=* rpc:com.atproto.server.getServiceAuth?aud=* rpc:com.fedproxy.temp.xrpc.getRegistrationNonce?aud=* rpc:com.fedproxy.temp.xrpc.subscribe?aud=* repo:com.fedproxy.rbac?action=create repo:com.fedproxy.sshPublicKey?action=create repo:com.publicdomainrelay.temp.compute.vm?action=create repo:com.publicdomainrelay.temp.market.rfp?action=create repo:com.publicdomainrelay.temp.market.accept?action=create repo:com.publicdomainrelay.temp.market.event?action=create repo:com.publicdomainrelay.temp.compute.events.vm.delete?action=create rpc:com.publicdomainrelay.temp.market.submitRfp?aud=* rpc:com.publicdomainrelay.temp.market.submitAccept?aud=* rpc:com.publicdomainrelay.temp.market.submitEvent?aud=*",
+  "scope": "atproto rpc:com.atproto.server.getSession?aud=* rpc:com.atproto.server.getServiceAuth?aud=did:web:xrpc.fedproxy.com rpc:com.fedproxy.temp.xrpc.getRegistrationNonce?aud=* rpc:com.fedproxy.temp.xrpc.subscribe?aud=* repo:com.fedproxy.rbac?action=create repo:com.fedproxy.sshPublicKey?action=create repo:com.publicdomainrelay.temp.compute.vm?action=create repo:com.publicdomainrelay.temp.market.rfp?action=create repo:com.publicdomainrelay.temp.market.accept?action=create repo:com.publicdomainrelay.temp.market.event?action=create repo:com.publicdomainrelay.temp.compute.events.vm.delete?action=create rpc:com.publicdomainrelay.temp.market.submitRfp?aud=* rpc:com.publicdomainrelay.temp.market.submitAccept?aud=* rpc:com.publicdomainrelay.temp.market.submitEvent?aud=*",
   "token_endpoint_auth_method": "none",
   "client_name": "Compute Contract Provider",
-  "client_uri": "https://compute.publicdomainrelay.com"
+  "client_uri": "https://ui.fedfork.com"
 }

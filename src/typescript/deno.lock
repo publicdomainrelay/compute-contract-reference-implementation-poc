@@ -7,6 +7,7 @@
     "jsr:@hono/hono@^4.12.23": "4.12.23",
     "jsr:@std/assert@0.217": "0.217.0",
     "jsr:@std/assert@^1.0.19": "1.0.19",
+    "jsr:@std/cli@*": "1.0.29",
     "jsr:@std/encoding@*": "1.0.10",
     "jsr:@std/encoding@1": "1.0.10",
     "jsr:@std/fmt@1": "1.0.10",
@@ -87,6 +88,9 @@
       "dependencies": [
         "jsr:@std/internal@^1.0.12"
       ]
+    },
+    "@std/cli@1.0.29": {
+      "integrity": "fa4ef29130baa834d8a13b7d138240c3a2fcfba740bfb7afa646a360a15ec84f"
     },
     "@std/encoding@1.0.10": {
       "integrity": "8783c6384a2d13abd5e9e87a7ae0520a30e9f56aeeaa3bdf910a3eaaf5c811a1"
@@ -4055,6 +4059,11 @@
           "npm:hono@^4.12.23"
         ]
       },
+      "lib/hono-factory-xrpc-relay": {
+        "dependencies": [
+          "jsr:@hono/hono@*"
+        ]
+      },
       "lib/lexicons": {
         "dependencies": [
           "npm:@atproto/lex@*"
@@ -4102,6 +4111,14 @@
           "npm:@atproto/xrpc@0.7"
         ]
       },
+      "lib/xrpc-relay": {
+        "dependencies": [
+          "jsr:@std/encoding@*",
+          "npm:@atproto/crypto@*",
+          "npm:@atproto/identity@*",
+          "npm:@atproto/xrpc-server@*"
+        ]
+      },
       "qemu": {
         "dependencies": [
           "jsr:@std/assert@^1.0.19",
@@ -4130,6 +4147,23 @@
           "npm:@atproto/crypto@~0.4.4",
           "npm:@atproto/identity@0.5"
         ]
+      },
+      "web-client-example": {
+        "packageJson": {
+          "dependencies": [
+            "npm:@atproto/api@~0.20.14",
+            "npm:@atproto/crypto@0.5",
+            "npm:@atproto/identity@0.5",
+            "npm:@sveltejs/vite-plugin-svelte@^7.1.2",
+            "npm:@tsconfig/svelte@^5.0.8",
+            "npm:@types/node@^24.12.3",
+            "npm:jose@^5.10.0",
+            "npm:svelte-check@^4.4.8",
+            "npm:svelte@^5.55.5",
+            "npm:typescript@~6.0.2",
+            "npm:vite@^8.0.12"
+          ]
+        }
       }
     }
   }
