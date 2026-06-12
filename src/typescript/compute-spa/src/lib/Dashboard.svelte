@@ -43,6 +43,8 @@
   let showLoginModal = $state(false);
   let loginHandle = $state('');
 
+  const VOUCH_NSID = 'sh.tangled.graph.vouch';
+
   let vmName = $state('test-0001');
   let selectedPresetId = $state('minimal');
   let cloudInitScript = $state(CLOUD_INIT_PRESETS[0].script);
@@ -76,10 +78,12 @@
       const proxyRef = relayClient.proxyRef;
       if (!proxyRef) throw new Error('relay not connected — connect to xrpc-relay first');
 
-      const { createRecord, createSignedRecord, createMarketClient } = await import('@publicdomainrelay/market') as {
+      const { createRecord, createSignedRecord, createMarketClient, listRecordsAll, OFFERING_NSID } = await import('@publicdomainrelay/market') as {
         createRecord: (agent: unknown, col: string, rec: Record<string, unknown>) => Promise<{ uri: string; cid: string }>;
         createSignedRecord: (agent: unknown, col: string, rec: Record<string, unknown>, signer: unknown) => Promise<{ uri: string; cid: string }>;
-        createMarketClient: (session: unknown, opts: Record<string, unknown>) => { submitAccept: (target: string, input: Record<string, unknown>) => Promise<{ uri?: string; cid?: string; submitEvent?: string }> };
+        createMarketClient: (session: unknown, opts: Record<string, unknown>) => { submitRfp: (target: string, input: { rfpUri: string; rfpCid: string }) => Promise<{ ok: boolean }>; submitAccept: (target: string, input: Record<string, unknown>) => Promise<{ uri?: string; cid?: string; submitEvent?: string }> };
+        listRecordsAll: (pdsUrl: string, did: string, collection: string) => Promise<Array<{ uri: string; cid: string; value: Record<string, unknown> }>>;
+        OFFERING_NSID: string;
       };
 
       const keypair = relayClient.getAttestationKeypair();
@@ -107,6 +111,60 @@
       };
       const rfpRef = await createSignedRecord(auth.agent, RFP_NSID, rfpRecord, signer);
       addLog(`market.rfp: ${rfpRef.uri}`);
+
+      // 2.5. discover vouched bidders and notify via OFFERING_NSID
+      const { IdResolver } = await import('@atproto/identity');
+      const idResolver = new IdResolver();
+      const mc = createMarketClient(auth.agent, {});
+
+      // resolve logged-in user's PDS to list their vouch records
+      const userDid = (auth.agent as { did?: string }).did ?? '';
+      addLog(`discovering vouched bidders for ${userDid}…`);
+      let vouchedDids: string[] = [];
+      try {
+        const userDoc = await idResolver.did.resolve(userDid);
+        const userPdsSvc = (userDoc?.service ?? []).find((s: { id: string }) => s.id === '#atproto_pds');
+        const userPds = (userPdsSvc as { serviceEndpoint?: string } | undefined)?.serviceEndpoint;
+        if (userPds) {
+          const vouchRecords = await listRecordsAll(userPds, userDid, VOUCH_NSID);
+          vouchedDids = Array.from(new Set(
+            vouchRecords
+              .filter((r) => (r.value.kind as string | undefined) !== 'denounce')
+              .map((r) => r.uri.split('/').pop() ?? '')
+              .filter((rkey) => rkey.startsWith('did:'))
+          ));
+          addLog(`found ${vouchedDids.length} vouched DID(s)`);
+        } else {
+          addLog('could not resolve user PDS — skipping vouch discovery');
+        }
+      } catch (err) {
+        addLog(`vouch discovery error — ${String(err)}`);
+      }
+
+      await Promise.all(vouchedDids.map(async (bidderDid) => {
+        try {
+          const doc = await idResolver.did.resolve(bidderDid);
+          const pdsService = (doc?.service ?? []).find((s: { id: string }) => s.id === '#atproto_pds');
+          const pdsUrl = (pdsService as { serviceEndpoint?: string } | undefined)?.serviceEndpoint;
+          if (!pdsUrl) { addLog(`  ${bidderDid}: no PDS found`); return; }
+          const offerings = await listRecordsAll(pdsUrl, bidderDid, OFFERING_NSID);
+          for (const offering of offerings) {
+            const appliesTo = offering.value.appliesTo as string[] | undefined;
+            const endpointUrl = offering.value.endpointUrl as string | undefined;
+            if (!endpointUrl || !Array.isArray(appliesTo) || !appliesTo.includes(VM_NSID)) continue;
+            addLog(`  ${bidderDid}: submitting RFP to ${endpointUrl}`);
+            try {
+              const res = await mc.submitRfp(endpointUrl, { rfpUri: rfpRef.uri, rfpCid: rfpRef.cid });
+              addLog(`  ${bidderDid}: ${res.ok ? 'ok' : 'no-ok'}`);
+            } catch (err) {
+              addLog(`  ${bidderDid}: submitRfp error — ${String(err)}`);
+            }
+            break;
+          }
+        } catch (err) {
+          addLog(`  ${bidderDid}: offering discovery error — ${String(err)}`);
+        }
+      }));
 
       // 3. collect bids
       const windowMs = bidWindowSec * 1000;
@@ -402,6 +460,7 @@
   .relay-status.relay-ok { color: #16a34a; background: #f0fdf4; border-color: #bbf7d0; }
   .log-box {
     margin-top: 1rem;
+    text-align: left;
     padding: 0.6rem 0.8rem;
     border-radius: 6px;
     background: #0f172a;
