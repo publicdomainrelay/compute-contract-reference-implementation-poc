@@ -73,7 +73,7 @@ export function createReceiptRecord(
       rfp: strongRef(refs.rfp.uri, refs.rfp.cid),
       bid: strongRef(refs.bid.uri, refs.bid.cid),
       accept: strongRef(refs.accept.uri, refs.accept.cid),
-      payload: refs.payload ? strongRef(refs.payload.uri, refs.payload.cid) : undefined,
+      payload: refs.payload ? strongRef(refs.payload.uri, refs.payload.cid) : null,
       submitEvent: refs.submitEvent,
       createdAt: new Date().toISOString(),
     },

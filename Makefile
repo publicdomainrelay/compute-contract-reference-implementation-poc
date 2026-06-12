@@ -22,7 +22,7 @@ lex:
 bump:
 	@deno run --allow-read --allow-write scripts/makefile/bump/main.ts $(TS_LIBS_DIR)
 
-publish-lexicons:
+publish-lex:
 	@echo "Publishing lexicons..."
 	@goat lex publish --update
 

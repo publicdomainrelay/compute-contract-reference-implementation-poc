@@ -1,0 +1,454 @@
+{
+  "id": "mq9n7ear",
+  "name": "Session 4 — 6/11/2026, 8:18:42 AM",
+  "nodeCount": 11,
+  "edgeCount": 11,
+  "createdAt": "2026-06-11T15:18:42.723Z",
+  "events": [
+    {
+      "did": "did:plc:5svqtrhheairglgiiyvutzik",
+      "time_us": 1781190971972576,
+      "kind": "commit",
+      "commit": {
+        "rev": "3mnzjeuvp2c22",
+        "operation": "create",
+        "collection": "com.publicdomainrelay.temp.compute.vm",
+        "rkey": "3mnzjeuvhac22",
+        "record": {
+          "$type": "com.publicdomainrelay.temp.compute.vm",
+          "cpus": 2,
+          "createdAt": "2026-06-11T15:15:46.838Z",
+          "disk": "40G",
+          "location": {
+            "country": "USA",
+            "region": "west"
+          },
+          "mem": "4G",
+          "network": "500G",
+          "role": "policy-engine-d661d3cb13734df8",
+          "user_data": "#cloud-config\n\nusers:\n  - name: agent\n    gecos: Policy Engine Agent\n    primary_group: agent\n    groups: [users]\n    shell: /bin/bash\n    sudo: \"ALL=(ALL) NOPASSWD:ALL\"\n    lock_passwd: true\n    no_user_group: false\n\nwrite_files:\n  - path: /etc/systemd/system/fedproxy-client.service\n    owner: root:root\n    permissions: '0644'\n    content: |\n      [Unit]\n      Description=FedProxy Client Service\n      After=network-online.target\n      Wants=network-online.target\n\n      [Service]\n      Type=simple\n      User=root\n      WorkingDirectory=/root\n      Environment=\"SERVICE=policy-engine-d661d3cb13734df8\"\n      Environment=\"PORT=8080\"\n      Environment=\"ATPRP_URL=https://rp.fedproxy.com\"\n      Environment=\"AUTH_PLUGIN=oidc\"\n      Environment=\"MARKET_ACCEPT_JSON_PATH=/root/secrets/publicdomainrelay.com/market/accept.json\"\n      ExecStart=/usr/local/bin/fedproxy-client\n      Restart=always\n      RestartSec=5\n      TimeoutStopSec=10\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n\n  - path: /etc/systemd/system/policy-engine.service\n    owner: root:root\n    permissions: '0644'\n    content: |\n      [Unit]\n      Description=Policy Engine Service\n      After=network-online.target\n      Wants=network-online.target\n\n      [Service]\n      Type=simple\n      User=agent\n      Group=agent\n      WorkingDirectory=/home/agent\n      Environment=\"BUNDLED_ACTIONS_DIR=/home/agent/bundled-actions\"\n      ExecStart=/usr/local/bin/policy_engine api --bind 127.0.0.1:8080\n      Restart=always\n      RestartSec=5\n      TimeoutStopSec=10\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n\nruncmd:\n  - |\n      set -x\n\n      # Retry a command until it succeeds, backing off between attempts.\n      # Used to ride out transient GitHub download/network failures during boot.\n      retry() {\n        n=0\n        delay=5\n        until \"$@\"; do\n          n=$((n + 1))\n          echo \"command failed (attempt $n): $*; retrying in ${delay}s\" >&2\n          sleep \"$delay\"\n          if [ \"$delay\" -lt 60 ]; then\n            delay=$((delay * 2))\n          fi\n        done\n      }\n\n      retry sh -c \"curl -sfL 'https://github.com/publicdomainrelay/sshai/releases/download/latest/policy_engine_0.0.1-next_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin\"\n      retry sh -c \"curl -sfL 'https://github.com/publicdomainrelay/atproto-reverse-proxy/releases/download/latest/atproto-reverse-proxy_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin\"\n\n      mkdir -pv /home/agent/\n      cd $(mktemp -d)\n      retry sh -c \"curl -fL https://github.com/publicdomainrelay/sshai/archive/main.tar.gz | tar xz --wildcards --no-anchored 'src/policy_engine/bundled-actions/*' --strip-components=1\"\n      mv -v $(find . -name bundled-actions -type d) /home/agent/bundled-actions\n      chown -R agent:agent /home/agent/bundled-actions\n      cd -\n\n      systemctl start --no-block policy-engine.service\n      systemctl enable policy-engine.service\n      systemctl start --no-block fedproxy-client.service\n      systemctl enable fedproxy-client.service\n      systemctl daemon-reload\n"
+        },
+        "cid": "bafyreidsu6amgkxho6uare6qa5bjrk6nghym3onlq4kuywazr45n73v5em"
+      }
+    },
+    {
+      "did": "did:plc:5svqtrhheairglgiiyvutzik",
+      "time_us": 1781190972213859,
+      "kind": "commit",
+      "commit": {
+        "rev": "3mnzjev36fc25",
+        "operation": "create",
+        "collection": "com.publicdomainrelay.temp.market.rfp",
+        "rkey": "3mnzjev32ic25",
+        "record": {
+          "$type": "com.publicdomainrelay.temp.market.rfp",
+          "createdAt": "2026-06-11T15:15:47.151Z",
+          "domain": "compute",
+          "payload": {
+            "$type": "com.atproto.repo.strongRef",
+            "cid": "bafyreidsu6amgkxho6uare6qa5bjrk6nghym3onlq4kuywazr45n73v5em",
+            "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.compute.vm/3mnzjeuvhac22"
+          },
+          "signatures": [
+            {
+              "$type": "network.attested.signature",
+              "cid": "bafyreibxas66tpocz6rkfnnuav7bew3ueqibvgir3ma63pwfvz6vgdmm4q",
+              "issuer": "did:web:did-plc-7nebcphrbnjegrniycnbvyrk.gha.spindle.tangled.fedcicd.com",
+              "key": "did:key:zQ3shbfAYqPbrjBfGRxQyELKSyMeQj5KLEbtmroZ5J5Lympr9",
+              "signature": {
+                "$bytes": "JIdxljW73LTFRToEZ0z7TolVqVztksnzXzbaRlNT3KMTQ1XCChb3eW46kZnVOCG4YZot4PQCDTzd6THrKo/lFg"
+              }
+            }
+          ],
+          "submitBid": "did:web:did-plc-7nebcphrbnjegrniycnbvyrk.gha.spindle.tangled.fedcicd.com#pdr_temp_market"
+        },
+        "cid": "bafyreieoaozgcwv6ct3kvj33i6lq6eg2ejjvwydlfgjofikf4kbfe3ctn4"
+      }
+    },
+    {
+      "did": "did:plc:5svqtrhheairglgiiyvutzik",
+      "time_us": 1781190975318351,
+      "kind": "commit",
+      "commit": {
+        "rev": "3mnzjeygnts25",
+        "operation": "create",
+        "collection": "com.publicdomainrelay.temp.market.bids.free",
+        "rkey": "3mnzjeygjws25",
+        "record": {
+          "$type": "com.publicdomainrelay.temp.market.bids.free",
+          "reason": "provided at no cost",
+          "signatures": [
+            {
+              "$type": "network.attested.signature",
+              "cid": "bafyreic6rahij6kqgkfidfv37tbs5ynhmyjjq5oczauah6qmxwijy6qr74",
+              "issuer": "did:web:bob-bid-0001--johnandersen777-bsky-social.fedproxy.com",
+              "key": "did:key:zQ3shgXXkY3FaAdtnfv3TVaktg3NRm7yCcFTb3wJkWozQ9NqX",
+              "signature": {
+                "$bytes": "aQW95THc7eJ0AE8MxCipUTgWf3XBRMBSY5RZ3Q64Dw4fram2hQVAYi481Fgek8ayNXZ7XbHG+ctKZenWsIRdJw"
+              }
+            }
+          ]
+        },
+        "cid": "bafyreighawihokzgj4hjhn4juf45cpvthvje2f4ufrt4nqff52td4vje6u"
+      }
+    },
+    {
+      "did": "did:plc:5svqtrhheairglgiiyvutzik",
+      "time_us": 1781190975535393,
+      "kind": "commit",
+      "commit": {
+        "rev": "3mnzjeyld4j2p",
+        "operation": "create",
+        "collection": "com.publicdomainrelay.temp.market.bid",
+        "rkey": "3mnzjeyl77j2p",
+        "record": {
+          "$type": "com.publicdomainrelay.temp.market.bid",
+          "config": {
+            "$type": "com.atproto.repo.strongRef",
+            "cid": "bafyreicedtyyfw5nax4kgpbdxnmvv4q2mgzxs37zo6qmnfxwbylacgk5ua",
+            "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.compute.config.wif.simple/3mnzjeydxtb22"
+          },
+          "createdAt": "2026-06-11T15:15:49.087Z",
+          "payload": {
+            "$type": "com.atproto.repo.strongRef",
+            "cid": "bafyreighawihokzgj4hjhn4juf45cpvthvje2f4ufrt4nqff52td4vje6u",
+            "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.bids.free/3mnzjeygjws25"
+          },
+          "rfp": {
+            "$type": "com.atproto.repo.strongRef",
+            "cid": "bafyreieoaozgcwv6ct3kvj33i6lq6eg2ejjvwydlfgjofikf4kbfe3ctn4",
+            "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.rfp/3mnzjev32ic25"
+          },
+          "signatures": [
+            {
+              "$type": "network.attested.signature",
+              "cid": "bafyreihvn2jm6tkefobatn6ik3x2kneqgjoqp4gav7lo26d4oz4rj5evtu",
+              "issuer": "did:web:bob-bid-0001--johnandersen777-bsky-social.fedproxy.com",
+              "key": "did:key:zQ3shgXXkY3FaAdtnfv3TVaktg3NRm7yCcFTb3wJkWozQ9NqX",
+              "signature": {
+                "$bytes": "MvEkX68sZAGiU+LWruvxBCih73+leod+CEfdiaSJIb9o+fBeXBnElJcsFlIRVL8xDPnlR2EHg54MZjX3XmIm3g"
+              }
+            }
+          ],
+          "submitAccept": "did:web:bob-bid-0001--johnandersen777-bsky-social.fedproxy.com#pdr_temp_market"
+        },
+        "cid": "bafyreiguwcfc3nddkv6symrrykfmutvam5fpxspsg432cd5qd7ky3de5ne"
+      }
+    },
+    {
+      "did": "did:plc:5svqtrhheairglgiiyvutzik",
+      "time_us": 1781190979106284,
+      "kind": "commit",
+      "commit": {
+        "rev": "3mnzjf4heh222",
+        "operation": "create",
+        "collection": "com.publicdomainrelay.temp.market.accept",
+        "rkey": "3mnzjf4h4n222",
+        "record": {
+          "$type": "com.publicdomainrelay.temp.market.accept",
+          "bid": {
+            "$type": "com.atproto.repo.strongRef",
+            "cid": "bafyreiguwcfc3nddkv6symrrykfmutvam5fpxspsg432cd5qd7ky3de5ne",
+            "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.bid/3mnzjeyl77j2p"
+          },
+          "createdAt": "2026-06-11T15:15:54.898Z",
+          "rfp": {
+            "$type": "com.atproto.repo.strongRef",
+            "cid": "bafyreieoaozgcwv6ct3kvj33i6lq6eg2ejjvwydlfgjofikf4kbfe3ctn4",
+            "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.rfp/3mnzjev32ic25"
+          },
+          "signatures": [
+            {
+              "$type": "network.attested.signature",
+              "cid": "bafyreidehklrngtufm33y76zle56z2ohhsmsegdz4sl33w2ltjjdbm36ke",
+              "issuer": "did:web:did-plc-7nebcphrbnjegrniycnbvyrk.gha.spindle.tangled.fedcicd.com",
+              "key": "did:key:zQ3shbfAYqPbrjBfGRxQyELKSyMeQj5KLEbtmroZ5J5Lympr9",
+              "signature": {
+                "$bytes": "MvXVAbnhftiWlg8yrDa912T/blcMkjwzs8vbiQiA6EJ8qjDRVBL4a79fg6Rg6zW3TH6SsLfxTgZgOUBGOHUnhg"
+              }
+            }
+          ],
+          "submitEvent": "did:web:did-plc-7nebcphrbnjegrniycnbvyrk.gha.spindle.tangled.fedcicd.com#pdr_temp_compute_event"
+        },
+        "cid": "bafyreigwerkm2exqqrv67ofx6ia6fjcbv2aoaxdjixqqizdqlyn34ecccq"
+      }
+    },
+    {
+      "did": "did:plc:5svqtrhheairglgiiyvutzik",
+      "time_us": 1781190979325011,
+      "kind": "commit",
+      "commit": {
+        "rev": "3mnzjf4n7x222",
+        "operation": "create",
+        "collection": "com.fedproxy.rbac",
+        "rkey": "3mnzjf4n32s22",
+        "record": {
+          "$type": "com.fedproxy.rbac",
+          "createdAt": "2026-06-11T15:15:55.073Z",
+          "custom_claims_roles_index": {
+            "job_workflow_ref": {}
+          },
+          "policies": {
+            "ssh-key-register": {
+              "meta": {
+                "policy": "ssh-key-register"
+              },
+              "schemas": {
+                "/xrpc/com.atproto.repo.createRecord": {
+                  "$schema": "http://json-schema.org/draft-07/schema#",
+                  "properties": {
+                    "body": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "collection": {
+                          "const": "com.fedproxy.sshPublicKey",
+                          "type": "string"
+                        },
+                        "record": {
+                          "properties": {
+                            "service": {
+                              "const": "policy-engine-d661d3cb13734df8",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "service"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "collection",
+                        "record"
+                      ],
+                      "type": "object"
+                    },
+                    "capability": {
+                      "enum": [
+                        "create"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "capability",
+                    "body"
+                  ],
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "roles": {
+            "policy-engine-d661d3cb13734df8": {
+              "definition": {
+                "aud": "api://ATProto?actx=did:plc:5svqtrhheairglgiiyvutzik",
+                "iss": "https://mini-cloud-0001.fedfork.com",
+                "policies": [
+                  "ssh-key-register"
+                ],
+                "sub": "actx:5svqtrhheairglgiiyvutzik:plc:5svqtrhheairglgiiyvutzik:role:policy-engine-d661d3cb13734df8"
+              },
+              "role_name": "policy-engine-d661d3cb13734df8"
+            }
+          }
+        },
+        "cid": "bafyreifc7pdzx4xesr633javkh6hkryezkw7jaihqa6d7mzpnwji6rzzaa"
+      }
+    },
+    {
+      "did": "did:plc:5svqtrhheairglgiiyvutzik",
+      "time_us": 1781190981330120,
+      "kind": "commit",
+      "commit": {
+        "rev": "3mnzjf6piiy24",
+        "operation": "create",
+        "collection": "com.fedproxy.rbac",
+        "rkey": "3mnzjf6paoy24",
+        "record": {
+          "$type": "com.fedproxy.rbac",
+          "createdAt": "2026-06-11T15:15:57.265Z",
+          "custom_claims_roles_index": {
+            "job_workflow_ref": {}
+          },
+          "policies": {
+            "ex-5svqtrhheairglgiiyvutzik-5svqtrhheairglgiiyvutzik-policy-engine-d661d3cb13734df8": {
+              "meta": {
+                "policy": "ex-5svqtrhheairglgiiyvutzik-5svqtrhheairglgiiyvutzik-policy-engine-d661d3cb13734df8"
+              },
+              "schemas": {
+                "/v1/oidc/issue": {
+                  "$schema": "http://json-schema.org/draft-07/schema#",
+                  "properties": {
+                    "allowed_parameters": {
+                      "properties": {
+                        "aud": {
+                          "type": "string"
+                        },
+                        "sub": {
+                          "const": "actx:5svqtrhheairglgiiyvutzik:plc:5svqtrhheairglgiiyvutzik:role:policy-engine-d661d3cb13734df8",
+                          "type": "string"
+                        },
+                        "ttl": {
+                          "const": 3600,
+                          "type": "number"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "capability": {
+                      "enum": [
+                        "create"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "capability",
+                    "allowed_parameters"
+                  ],
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "protects": {
+            "ex-5svqtrhheairglgiiyvutzik-5svqtrhheairglgiiyvutzik-policy-engine-d661d3cb13734df8": {
+              "scope": "droplets.wid",
+              "service": "https://mini-cloud-0001.fedfork.com"
+            }
+          },
+          "roles": {
+            "ex-5svqtrhheairglgiiyvutzik-5svqtrhheairglgiiyvutzik-policy-engine-d661d3cb13734df8": {
+              "definition": {
+                "aud": "api://DigitalOcean?actx=5svqtrhheairglgiiyvutzik",
+                "policies": [
+                  "ex-5svqtrhheairglgiiyvutzik-5svqtrhheairglgiiyvutzik-policy-engine-d661d3cb13734df8"
+                ],
+                "sub": "actx:5svqtrhheairglgiiyvutzik:plc:5svqtrhheairglgiiyvutzik:role:policy-engine-d661d3cb13734df8"
+              },
+              "role_name": "ex-5svqtrhheairglgiiyvutzik-5svqtrhheairglgiiyvutzik-policy-engine-d661d3cb13734df8"
+            }
+          }
+        },
+        "cid": "bafyreielnyxi336ahylhb2g2idno6p4voutv3kxrskqx36o2kssnh5l7ie"
+      }
+    },
+    {
+      "did": "did:plc:5svqtrhheairglgiiyvutzik",
+      "time_us": 1781190983337092,
+      "kind": "commit",
+      "commit": {
+        "rev": "3mnzjfajhup2g",
+        "operation": "create",
+        "collection": "com.publicdomainrelay.temp.market.receipt",
+        "rkey": "3mnzjfajdxp2g",
+        "record": {
+          "$type": "com.publicdomainrelay.temp.market.receipt",
+          "accept": {
+            "$type": "com.atproto.repo.strongRef",
+            "cid": "bafyreigwerkm2exqqrv67ofx6ia6fjcbv2aoaxdjixqqizdqlyn34ecccq",
+            "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.accept/3mnzjf4h4n222"
+          },
+          "bid": {
+            "$type": "com.atproto.repo.strongRef",
+            "cid": "bafyreiguwcfc3nddkv6symrrykfmutvam5fpxspsg432cd5qd7ky3de5ne",
+            "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.bid/3mnzjeyl77j2p"
+          },
+          "cid": "bafyreibyz2xogsmkxtzacl4ltwb6vlpslres43pucy4bjpb34ihortdadi",
+          "createdAt": "2026-06-11T15:15:59.165Z",
+          "payload": null,
+          "rfp": {
+            "$type": "com.atproto.repo.strongRef",
+            "cid": "bafyreieoaozgcwv6ct3kvj33i6lq6eg2ejjvwydlfgjofikf4kbfe3ctn4",
+            "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.rfp/3mnzjev32ic25"
+          },
+          "signatures": [
+            {
+              "$type": "network.attested.signature",
+              "cid": "bafyreifkxnspdgikatr2ccri3ke45xczgg4odm4muoh6hqxnfunjc4o2li",
+              "issuer": "did:web:bob-bid-0001--johnandersen777-bsky-social.fedproxy.com",
+              "key": "did:key:zQ3shgXXkY3FaAdtnfv3TVaktg3NRm7yCcFTb3wJkWozQ9NqX",
+              "signature": {
+                "$bytes": "J4HTNmLr186v7ReGWYLiLxsOkHpga7JwuZsHBaGXdwB/URFmo5zcwXNz4pVepczOJ/4PGFHxanZBIJcwdHUavA"
+              }
+            }
+          ],
+          "submitEvent": "did:web:bob-bid-0001--johnandersen777-bsky-social.fedproxy.com#pdr_temp_compute_event"
+        },
+        "cid": "bafyreih3djpwdxay5ieksvjcvjohuj3pfixjttxoed5vwl7e66vjt7ylsy"
+      }
+    },
+    {
+      "did": "did:plc:5svqtrhheairglgiiyvutzik",
+      "time_us": 1781191018420584,
+      "kind": "commit",
+      "commit": {
+        "rev": "3mnzjgc76az2h",
+        "operation": "create",
+        "collection": "com.fedproxy.sshPublicKey",
+        "rkey": "3mnzjgc73db2h",
+        "record": {
+          "$type": "com.fedproxy.sshPublicKey",
+          "createdAt": "2026-06-11T15:16:32.950Z",
+          "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP+GROYZB0Q/V3SSR4PhHzHTbI2bpFHwiCp6SJUHMDTU",
+          "name": "policy-engine-d661d3cb13734df8",
+          "service": "policy-engine-d661d3cb13734df8"
+        },
+        "cid": "bafyreif63cg6yr4vnmruzwssgh36e47wuon4kkjgc7dvokjmqy35mdzn24"
+      }
+    },
+    {
+      "did": "did:plc:5svqtrhheairglgiiyvutzik",
+      "time_us": 1781191035911527,
+      "kind": "commit",
+      "commit": {
+        "rev": "3mnzjgtitzb2d",
+        "operation": "create",
+        "collection": "com.publicdomainrelay.temp.compute.events.vm.delete",
+        "rkey": "3mnzjgtio5r2d",
+        "record": {
+          "$type": "com.publicdomainrelay.temp.compute.events.vm.delete",
+          "createdAt": "2026-06-11T15:16:52.606Z",
+          "reason": "workflow_complete"
+        },
+        "cid": "bafyreicbnmaloeqruuncej2jntnvzlrpz5nrrl4oioiwiv64v4axwsntza"
+      }
+    },
+    {
+      "did": "did:plc:5svqtrhheairglgiiyvutzik",
+      "time_us": 1781191036123422,
+      "kind": "commit",
+      "commit": {
+        "rev": "3mnzjgtnnop2p",
+        "operation": "create",
+        "collection": "com.publicdomainrelay.temp.market.event",
+        "rkey": "3mnzjgtnjrp2p",
+        "record": {
+          "$type": "com.publicdomainrelay.temp.market.event",
+          "createdAt": "2026-06-11T15:16:52.606Z",
+          "payload": {
+            "$type": "com.atproto.repo.strongRef",
+            "cid": "bafyreicbnmaloeqruuncej2jntnvzlrpz5nrrl4oioiwiv64v4axwsntza",
+            "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.compute.events.vm.delete/3mnzjgtio5r2d"
+          },
+          "receipt": {
+            "$type": "com.atproto.repo.strongRef",
+            "cid": "bafyreih3djpwdxay5ieksvjcvjohuj3pfixjttxoed5vwl7e66vjt7ylsy",
+            "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.receipt/3mnzjfajdxp2g"
+          },
+          "signatures": [
+            {
+              "$type": "network.attested.signature",
+              "cid": "bafyreiccpbv4cnrgm4hvlrbjw7sq6wyrh5qv45pxzf53v5m6c6u4rbecoq",
+              "issuer": "did:web:did-plc-7nebcphrbnjegrniycnbvyrk.gha.spindle.tangled.fedcicd.com",
+              "key": "did:key:zQ3shbfAYqPbrjBfGRxQyELKSyMeQj5KLEbtmroZ5J5Lympr9",
+              "signature": {
+                "$bytes": "3OhYC1Y3NxBQUumEGrlzMq1Vt/mV12ObDdA0tdnaAi856b/bwLG3w2H3/eESK80FayYeQ6BG17q2q9RL6Bi/Ag"
+              }
+            }
+          ]
+        },
+        "cid": "bafyreib66jywi4ikgcqcgyqcka5c25us5mxzkgyfl3jtrezkn2y6hqe3by"
+      }
+    }
+  ]
+}
