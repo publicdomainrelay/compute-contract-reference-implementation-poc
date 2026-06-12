@@ -15,6 +15,7 @@
     "./lib/market-x402",
     "./lib/market-settlement",
     "./utils/client-xrpc-caller",
+    "./compute-spa",
     "./spindle",
     "./bidder",
     "./qemu"

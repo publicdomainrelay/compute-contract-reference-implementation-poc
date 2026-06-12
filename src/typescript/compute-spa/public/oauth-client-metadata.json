@@ -1,0 +1,19 @@
+{
+  "client_id": "https://compute.publicdomainrelay.com/oauth-client-metadata.json",
+  "dpop_bound_access_tokens": true,
+  "application_type": "web",
+  "redirect_uris": [
+    "https://compute.publicdomainrelay.com"
+  ],
+  "grant_types": [
+    "authorization_code",
+    "refresh_token"
+  ],
+  "response_types": [
+    "code"
+  ],
+  "scope": "atproto",
+  "token_endpoint_auth_method": "none",
+  "client_name": "Compute Contract Provider",
+  "client_uri": "https://compute.publicdomainrelay.com"
+}

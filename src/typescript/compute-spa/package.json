@@ -1,0 +1,30 @@
+{
+  "name": "compute-spa",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@tsconfig/svelte": "^5.0.8",
+    "@types/d3": "^7.4.3",
+    "@types/node": "^24.12.3",
+    "svelte": "^5.55.5",
+    "svelte-check": "^4.4.8",
+    "typescript": "~6.0.2",
+    "vite": "^8.0.12"
+  },
+  "dependencies": {
+    "@atproto/api": "^0.20.14",
+    "@atproto/crypto": "^0.5.0",
+    "@atproto/identity": "^0.5.0",
+    "@atproto/oauth-client-browser": "^0.4.1",
+    "d3": "^7.9.0",
+    "hono": "^4.12.25"
+  }
+}
