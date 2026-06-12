@@ -16,6 +16,7 @@
     "./lib/market-settlement",
     "./lib/xrpc-relay",
     "./lib/hono-factory-xrpc-relay",
+    "./lib/hono-factory-xrpc-subscriber",
     "./utils/client-xrpc-caller",
     "./compute-spa",
     "./web-client-example",

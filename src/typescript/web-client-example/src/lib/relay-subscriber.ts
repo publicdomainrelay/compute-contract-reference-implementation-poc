@@ -1,10 +1,15 @@
 import { Secp256k1Keypair } from '@atproto/crypto';
 import { Agent, CredentialSession } from '@atproto/api';
+import { Hono, type Context } from 'hono';
+import { runSubscriber, type SubscriberController } from '../../../lib/xrpc-relay/subscriber.ts';
+import { SUBSCRIBE_NSID, GET_NONCE_NSID } from '../../../lib/xrpc-relay/types.ts';
+import { createSubscriberFactory } from '../../../lib/hono-factory-xrpc-subscriber/mod.ts';
+import { EventBus } from '../../../lib/event-bus/mod.ts';
 
 const KEYPAIR_KEY = 'relay-demo:keypair';
-const DISPATCHER_HOST = 'xrpc.fedproxy.com';
-const SUBSCRIBE_NSID = 'com.fedproxy.temp.xrpc.subscribe';
-const GET_NONCE_NSID = 'com.fedproxy.temp.xrpc.getRegistrationNonce';
+// Defaults to production; override at dev/build time with VITE_DISPATCHER_HOST
+// (e.g. xrpc-test.fedproxy.com).
+const DISPATCHER_HOST = import.meta.env.VITE_DISPATCHER_HOST ?? 'xrpc.fedproxy.com';
 
 export type Status = 'disconnected' | 'connecting' | 'connected' | 'error';
 
@@ -22,18 +27,7 @@ export interface SubscriptionInfo {
   startedAt: string;
 }
 
-// ── helpers ───────────────────────────────────────────────────────
-
-function b64encode(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes));
-}
-
-function b64decode(s: string): Uint8Array {
-  const bin = atob(s);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
+// ── keypair codec helpers ─────────────────────────────────────────
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -45,75 +39,76 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
-// ── frame types ───────────────────────────────────────────────────
+// ── demo Hono app ─────────────────────────────────────────────────
+//
+// Relay #request frames are dispatched into this app by the subscriber
+// factory (createSubscriberFactory). This is a real XRPC server: callers
+// hitting wss/https://<subdomain>.<dispatcher>/xrpc/<nsid> are routed here.
 
-interface RegisteredFrame {
-  $type: `${typeof SUBSCRIBE_NSID}#registered`;
-  subdomain: string;
-  proxyRef: string;
+const startedAt = new Date().toISOString();
+
+function xrpcError(c: Context, status: number, error: string, message: string) {
+  return c.json({ error, message }, status as 400 | 404 | 500);
 }
 
-interface RequestFrame {
-  $type: `${typeof SUBSCRIBE_NSID}#request`;
-  requestId: string;
+// ── event source ──────────────────────────────────────────────────
+//
+// Real event source for subscriptions: the Hono app publishes one event
+// per XRPC request it handles, via the shared @publicdomainrelay/event-bus.
+// Subscribers stream that live activity — no synthetic/fabricated data.
+
+export interface RepoEvent {
+  seq: number;
+  time: string;
+  type: 'request';
   method: string;
   path: string;
-  params: Record<string, string>;
-  body: unknown;
-  headers: Record<string, string>;
+  status: number;
 }
 
-interface SubscribeFrame {
-  $type: `${typeof SUBSCRIBE_NSID}#subscribe`;
-  subscriptionId: string;
-  nsid: string;
-  params: Record<string, string>;
-}
+function buildDemoApp(did: string, bus: EventBus<RepoEvent>): Hono {
+  const app = new Hono();
+  let seq = 0;
 
-// ── demo subscription producer ────────────────────────────────────
-//
-// For each incoming #subscribe frame we produce a demo event stream.
-// Real subscribers would connect to an actual atproto firehose / app-view.
+  // Publish every handled XRPC request as a subscription event.
+  app.use('/xrpc/*', async (c, next) => {
+    await next();
+    bus.publish({
+      seq: ++seq,
+      time: new Date().toISOString(),
+      type: 'request',
+      method: c.req.method,
+      path: new URL(c.req.url).pathname,
+      status: c.res.status,
+    });
+  });
 
-class SubscriptionProducer {
-  #timer: ReturnType<typeof setInterval> | null = null;
-  #seq = 0;
-  #subscriptionId: string;
-  #sendEvent: (subId: string, message: unknown) => void;
-  #onLog: (event: LogEvent) => void;
+  // Liveness probe.
+  app.get('/xrpc/_health', (c) => c.json({ status: 'ok' }));
 
-  constructor(
-    subscriptionId: string,
-    nsid: string,
-    sendEvent: (subId: string, message: unknown) => void,
-    onLog: (event: LogEvent) => void,
-  ) {
-    this.#subscriptionId = subscriptionId;
-    this.#sendEvent = sendEvent;
-    this.#onLog = onLog;
-    this.#start(nsid);
-  }
+  // Identity / status of this subscriber.
+  app.get('/xrpc/com.example.getStatus', (c) =>
+    c.json({ did, startedAt, now: new Date().toISOString() }));
 
-  #start(nsid: string) {
-    this.#onLog({ ts: new Date().toISOString(), severity: 'info', message: `sub:${this.#subscriptionId.slice(0, 8)} open ${nsid}` });
+  // Echo query params back (typed XRPC query).
+  app.get('/xrpc/com.example.echo', (c) => {
+    const msg = c.req.query('msg');
+    if (msg == null) return xrpcError(c, 400, 'InvalidRequest', 'missing "msg" param');
+    return c.json({ msg });
+  });
 
-    this.#timer = setInterval(() => {
-      const seq = this.#seq++;
-      const message = {
-        seq,
-        time: new Date().toISOString(),
-        nsid,
-        event: `demo-event-${seq}`,
-        data: { id: seq, ts: Date.now(), msg: 'subscription event via relay' },
-      };
-      this.#sendEvent(this.#subscriptionId, message);
-      this.#onLog({ ts: message.time, severity: 'event', message: `sub:${this.#subscriptionId.slice(0, 8)} → event #${seq}` });
-    }, 3000);
-  }
+  // Accept a procedure body and acknowledge it.
+  app.post('/xrpc/com.example.ping', async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    return c.json({ pong: true, received: body, at: new Date().toISOString() });
+  });
 
-  stop() {
-    if (this.#timer !== null) clearInterval(this.#timer);
-  }
+  // Unknown XRPC method → proper error shape.
+  app.all('/xrpc/*', (c) =>
+    xrpcError(c, 404, 'MethodNotImplemented', `no route for ${new URL(c.req.url).pathname}`));
+
+  app.all('*', (c) => xrpcError(c, 404, 'NotFound', 'not an XRPC path'));
+  return app;
 }
 
 // ── RelaySubscriber ───────────────────────────────────────────────
@@ -128,22 +123,19 @@ export interface RelaySubscriberCallbacks {
 export class RelaySubscriber {
   #callbacks: RelaySubscriberCallbacks;
   #keypair: Secp256k1Keypair | null = null;
-  #ws: WebSocket | null = null;
-  #subdomain: string | null = null;
-  #proxyRef: string | null = null;
-  #reconnectDelay = 1000;
-  #stopped = false;
   #agent: Agent | null = null;
-
-  // Active subscription producers keyed by subscriptionId
-  #producers = new Map<string, SubscriptionProducer>();
+  #ctrl: SubscriberController | null = null;
 
   constructor(callbacks: RelaySubscriberCallbacks) {
     this.#callbacks = callbacks;
   }
 
-  get subdomain() { return this.#subdomain; }
-  get proxyRef() { return this.#proxyRef; }
+  get subdomain() { return this.#ctrl?.subdomain ?? null; }
+  get proxyRef() { return this.#ctrl?.proxyRef ?? null; }
+
+  #log(severity: LogEvent['severity'], message: string) {
+    this.#callbacks.onLog({ ts: new Date().toISOString(), severity, message });
+  }
 
   // ── keypair ─────────────────────────────────────────────────────
 
@@ -161,227 +153,67 @@ export class RelaySubscriber {
     return kp;
   }
 
-  // ── atproto login ───────────────────────────────────────────────
+  // ── atproto login + service auth ────────────────────────────────
 
   async #login(handle: string, password: string): Promise<void> {
     const pdsSession = new CredentialSession(new URL('https://bsky.social'));
     await pdsSession.login({ identifier: handle, password });
     this.#agent = new Agent(pdsSession);
-    this.#callbacks.onLog({ ts: new Date().toISOString(), severity: 'info', message: `logged in as ${pdsSession.did}` });
+    this.#log('info', `logged in as ${pdsSession.did}`);
   }
 
-  async #serviceAuthToken(lxm: string): Promise<string> {
+  #serviceAuthToken = async (lxm: string): Promise<string> => {
     if (!this.#agent) throw new Error('not logged in');
     const res = await this.#agent.com.atproto.server.getServiceAuth({
       aud: `did:web:${DISPATCHER_HOST}`,
       lxm,
     });
     return res.data.token;
-  }
-
-  // ── registration ────────────────────────────────────────────────
-
-  async #buildRegistration(): Promise<string> {
-    const kp = this.#keypair!;
-    const token = await this.#serviceAuthToken(GET_NONCE_NSID);
-
-    const res = await fetch(`https://${DISPATCHER_HOST}/xrpc/${GET_NONCE_NSID}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-      body: JSON.stringify({ key: kp.did(), signatures: [] }),
-    });
-    if (!res.ok) throw new Error(`getRegistrationNonce: ${res.status} ${await res.text()}`);
-
-    const { nonce } = await res.json() as { nonce: string };
-    const sig = await kp.sign(b64decode(nonce));
-
-    return JSON.stringify({
-      $type: 'com.fedproxy.temp.xrpc.registration',
-      key: kp.did(),
-      nonce,
-      signatures: [{ key: kp.did(), signature: b64encode(sig) }],
-    });
-  }
-
-  // ── frame handlers ──────────────────────────────────────────────
-
-  async #handleRequest(frame: RequestFrame): Promise<void> {
-    // Simple echo handler for demo; real subscriber would dispatch to Hono app
-    this.#callbacks.onLog({ ts: new Date().toISOString(), severity: 'info', message: `request: ${frame.method} ${frame.path}` });
-
-    const response = {
-      $type: `${SUBSCRIBE_NSID}#response` as const,
-      requestId: frame.requestId,
-      status: 200,
-      body: { ok: true, echo: { path: frame.path, params: frame.params } },
-      contentType: 'application/json',
-    };
-    this.#ws?.send(JSON.stringify(response));
-  }
-
-  #handleSubscribe(frame: SubscribeFrame): void {
-    // Start a demo event producer for this subscription
-    const producer = new SubscriptionProducer(
-      frame.subscriptionId,
-      frame.nsid,
-      (subId, message) => {
-        this.#ws?.send(JSON.stringify({
-          $type: `${SUBSCRIBE_NSID}#subscriptionEvent`,
-          subscriptionId: subId,
-          message,
-        }));
-      },
-      (event) => this.#callbacks.onLog(event),
-    );
-
-    this.#producers.set(frame.subscriptionId, producer);
-
-    // Send subscriptionOpen to signal readiness
-    this.#ws?.send(JSON.stringify({
-      $type: `${SUBSCRIBE_NSID}#subscriptionOpen`,
-      subscriptionId: frame.subscriptionId,
-    }));
-
-    this.#callbacks.onSubscription({
-      subscriptionId: frame.subscriptionId,
-      nsid: frame.nsid,
-      params: frame.params,
-      eventCount: 0,
-      startedAt: new Date().toISOString(),
-    });
-  }
-
-  #handleSubscriptionCancel(subscriptionId: string): void {
-    const producer = this.#producers.get(subscriptionId);
-    if (producer) {
-      producer.stop();
-      this.#producers.delete(subscriptionId);
-    }
-    this.#callbacks.onLog({ ts: new Date().toISOString(), severity: 'warn', message: `sub:${subscriptionId.slice(0, 8)} cancelled by relay` });
-  }
+  };
 
   // ── connect ─────────────────────────────────────────────────────
 
   async connect(handle: string, password: string): Promise<void> {
-    this.#stopped = false;
-
     this.#callbacks.onStatus('connecting');
-    this.#callbacks.onLog({ ts: new Date().toISOString(), severity: 'info', message: 'starting relay subscriber' });
+    this.#log('info', 'starting relay subscriber');
 
     try {
       this.#keypair = await this.#loadOrGenerateKeypair();
-      this.#callbacks.onLog({ ts: new Date().toISOString(), severity: 'info', message: `keypair ready: ${this.#keypair.did()}` });
-
+      this.#log('info', `keypair ready: ${this.#keypair.did()}`);
       await this.#login(handle, password);
     } catch (err) {
       this.#callbacks.onStatus('error');
-      this.#callbacks.onLog({ ts: new Date().toISOString(), severity: 'error', message: `init failed: ${err}` });
+      this.#log('error', `init failed: ${err}`);
       return;
     }
 
-    this.#doConnect();
-  }
-
-  async #doConnect(): Promise<void> {
-    if (this.#stopped) return;
-
-    let registration: string;
-    try {
-      registration = await this.#buildRegistration();
-    } catch (err) {
-      this.#callbacks.onStatus('error');
-      this.#callbacks.onLog({ ts: new Date().toISOString(), severity: 'error', message: `registration failed: ${err}` });
-      if (!this.#stopped) setTimeout(() => this.#doConnect(), 5_000);
-      return;
-    }
-
-    let serviceAuthToken: string;
-    try {
-      serviceAuthToken = await this.#serviceAuthToken(SUBSCRIBE_NSID);
-    } catch (err) {
-      this.#callbacks.onStatus('error');
-      this.#callbacks.onLog({ ts: new Date().toISOString(), severity: 'error', message: `service auth failed: ${err}` });
-      if (!this.#stopped) setTimeout(() => this.#doConnect(), 5_000);
-      return;
-    }
-
-    const url = `wss://${DISPATCHER_HOST}/xrpc/${SUBSCRIBE_NSID}?did=${encodeURIComponent(this.#keypair!.did())}&registration=${encodeURIComponent(registration)}&service_auth=${encodeURIComponent(serviceAuthToken)}`;
-    this.#callbacks.onLog({ ts: new Date().toISOString(), severity: 'info', message: `connecting to ${DISPATCHER_HOST}` });
-
-    const ws = new WebSocket(url);
-    this.#ws = ws;
-
-    ws.addEventListener('open', () => {
-      this.#callbacks.onStatus('connected');
-      this.#reconnectDelay = 1_000;
-      this.#callbacks.onLog({ ts: new Date().toISOString(), severity: 'info', message: 'connected to relay' });
-    });
-
-    ws.addEventListener('message', async (evt) => {
-      let msg: Record<string, unknown>;
-      try { msg = JSON.parse(evt.data as string); } catch { return; }
-
-      const $type = msg.$type as string | undefined;
-      if (!$type || !$type.startsWith(`${SUBSCRIBE_NSID}#`)) return;
-
-      const kind = $type.slice($type.indexOf('#') + 1);
-
-      switch (kind) {
-        case 'registered': {
-          const f = msg as unknown as RegisteredFrame;
-          this.#subdomain = f.subdomain;
-          this.#proxyRef = f.proxyRef;
-          this.#callbacks.onLog({ ts: new Date().toISOString(), severity: 'info', message: `registered subdomain=${f.subdomain} proxyRef=${f.proxyRef}` });
-          break;
-        }
-
-        case 'request': {
-          await this.#handleRequest(msg as unknown as RequestFrame);
-          break;
-        }
-
-        case 'subscribe': {
-          this.#handleSubscribe(msg as unknown as SubscribeFrame);
-          break;
-        }
-
-        case 'subscriptionCancel': {
-          this.#handleSubscriptionCancel(msg.subscriptionId as string);
-          break;
-        }
-      }
-    });
-
-    ws.addEventListener('close', () => {
-      this.#callbacks.onStatus('disconnected');
-      this.#subdomain = null;
-      this.#proxyRef = null;
-      if (!this.#stopped) {
-        this.#callbacks.onLog({ ts: new Date().toISOString(), severity: 'warn', message: `disconnected, reconnecting in ${this.#reconnectDelay}ms` });
-        setTimeout(() => this.#doConnect(), this.#reconnectDelay);
-        this.#reconnectDelay = Math.min(this.#reconnectDelay * 2, 30_000);
-      }
-    });
-
-    ws.addEventListener('error', () => {
-      this.#callbacks.onLog({ ts: new Date().toISOString(), severity: 'error', message: 'websocket error' });
+    const bus = new EventBus<RepoEvent>();
+    const factory = createSubscriberFactory({ app: buildDemoApp(this.#keypair.did(), bus) });
+    this.#ctrl = runSubscriber({
+      label: 'relay-demo',
+      keypair: this.#keypair,
+      getServiceAuthToken: this.#serviceAuthToken,
+      dispatcherHost: DISPATCHER_HOST,
+      handleRequest: factory.handleRequest,
+      onStatus: (s) => this.#callbacks.onStatus(s),
+      onLog: (e) => this.#log(e.severity, e.message),
+      onSubscriptionOpen: (sub) => this.#callbacks.onSubscription({
+        subscriptionId: sub.subscriptionId,
+        nsid: sub.nsid,
+        params: sub.params ?? {},
+        eventCount: 0,
+        startedAt: new Date().toISOString(),
+      }),
+      // Real event source: fan out the request-activity bus to each subscriber.
+      subscribe: (sub, emit) => bus.subscribe((msg) => {
+        emit(msg);
+        this.#callbacks.onSubscriptionEvent(sub.subscriptionId, msg);
+      }),
     });
   }
 
   stop(): void {
-    this.#stopped = true;
-
-    // Stop all subscription producers
-    for (const [id, producer] of this.#producers) {
-      producer.stop();
-      this.#callbacks.onLog({ ts: new Date().toISOString(), severity: 'info', message: `sub:${id.slice(0, 8)} stopped` });
-    }
-    this.#producers.clear();
-
-    this.#ws?.close();
-    this.#ws = null;
-    this.#callbacks.onStatus('disconnected');
-    this.#subdomain = null;
-    this.#proxyRef = null;
+    this.#ctrl?.stop();
+    this.#ctrl = null;
   }
 }
