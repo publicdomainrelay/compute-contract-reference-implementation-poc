@@ -26,6 +26,7 @@
     "@atproto/identity": "^0.5.0",
     "@atproto/oauth-client-browser": "^0.4.1",
     "d3": "^7.9.0",
-    "hono": "^4.12.25"
+    "hono": "^4.12.25",
+    "jose": "^5.10.0"
   }
 }

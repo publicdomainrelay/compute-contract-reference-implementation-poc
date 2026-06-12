@@ -25,6 +25,7 @@
  */
 
 import { Hono } from "https://deno.land/x/hono@v4.3.11/mod.ts";
+import { cors } from "jsr:@hono/hono/cors";
 import { getPublicJwk, getSigningKey, OIDCToken, UnauthorizedException, subMatchesActx } from "./oidc_helper.ts";
 import { raiseIfUnauthorized, raiseIfUnauthorizedServiceAuth, AuthToken } from "./rbac_helper.ts";
 import { ProvisioningData, validate as provisioningValidate } from "./provisioning.ts";
@@ -206,6 +207,8 @@ async function spawnVM(droplet: Droplet, userData: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const app = new Hono<{ Variables: { authToken: AuthToken } }>();
+
+app.use('*', cors());
 
 // request logger
 app.use("*", async (c, next) => {

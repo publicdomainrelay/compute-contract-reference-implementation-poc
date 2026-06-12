@@ -2,6 +2,8 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { Secp256k1Keypair } from '@atproto/crypto';
 import { IdResolver } from '@atproto/identity';
+import * as jose from 'jose';
+import { SSH_KEY_NSID, TTYD_CREDS_NSID, TTYD_USERNAME } from './constants.ts';
 
 const KEYPAIR_STORAGE_KEY = 'relay:keypair';
 const DISPATCHER_HOST = 'xrpc.fedproxy.com';
@@ -59,12 +61,32 @@ interface ResponseFrame {
   contentType?: string;
 }
 
+export interface TtydRequest {
+  /** VM name / RBAC role (matches the OIDC sub `…:role:get-ttyd-password-<vmName>`). */
+  vmName: string;
+  /** fedproxy SERVICE name / terminal subdomain. */
+  serviceName: string;
+  /** Requesting user's full DID. */
+  didPlc: string;
+  /** Bare PLC key. */
+  didPlcKey: string;
+  /** ttyd password handed to the VM on an OIDC-validated getRecord. */
+  password: string;
+}
+
 class RelayClient {
   // Minimal reactive state for debugging / consumers that want to observe
   status = $state<'disconnected' | 'connecting' | 'connected'>('disconnected');
   subdomain = $state<string | null>(null);
   proxyRef = $state<string | null>(null);
   keypairDid = $state<string | null>(null);
+  /** SERVICE names whose VM has published its sshPublicKey (un-gates Terminal). */
+  sshReadyServices = $state<string[]>([]);
+
+  // Pending VM ttyd handshakes, keyed by vmName.
+  #ttydRequests = new Map<string, TtydRequest>();
+  // Creates a record in the logged-in user's repo (wired from the SPA).
+  #createRecord: ((collection: string, record: Record<string, unknown>) => Promise<{ uri: string; cid: string }>) | null = null;
 
   #keypair: Secp256k1Keypair | null = null;
   #ws: WebSocket | null = null;
@@ -109,13 +131,28 @@ class RelayClient {
       });
     });
 
-    // Service-auth JWT verification for all /xrpc/* routes
+    // Auth for all /xrpc/* routes. VM ↔ relay calls (getRecord/createRecord)
+    // carry an OIDC bearer (fedproxy-client AUTH_PLUGIN=oidc); market bidder
+    // calls (submitBid/submitEvent) carry an atproto service-auth JWT.
+    const VM_OIDC_NSIDS = ['com.atproto.repo.getRecord', 'com.atproto.repo.createRecord'];
     app.use('/xrpc/*', async (c, next) => {
       if (!this.subdomain) {
         return c.json({ error: 'Unauthorized', message: 'not yet registered' }, 401);
       }
       const hostname = `${this.subdomain}.${DISPATCHER_HOST}`;
       const nsid = c.req.path.slice('/xrpc/'.length);
+
+      if (VM_OIDC_NSIDS.includes(nsid)) {
+        try {
+          const ttydReq = await this.#verifyTtydOidc(c.req.header('Authorization'));
+          c.set('ttydReq' as never, ttydReq);
+        } catch (err) {
+          return c.json({ error: 'Unauthorized', message: String(err) }, 401);
+        }
+        await next();
+        return;
+      }
+
       try {
         const { verifyServiceAuth } = await import('@publicdomainrelay/market');
         const auth = await verifyServiceAuth({
@@ -163,6 +200,49 @@ class RelayClient {
       }
       console.log('[relay] submitEvent received', { callerDid, uri: input.uri });
       return c.json({ ok: true });
+    });
+
+    // VM fetches its ttyd password (OIDC-validated in middleware above).
+    app.get('/xrpc/com.atproto.repo.getRecord', (c) => {
+      const ttydReq = c.get('ttydReq' as never) as TtydRequest | undefined;
+      if (!ttydReq) return c.json({ error: 'Unauthorized' }, 401);
+      const collection = c.req.query('collection');
+      if (collection && collection !== TTYD_CREDS_NSID) {
+        return c.json({ error: 'RecordNotFound', message: `unsupported collection ${collection}` }, 404);
+      }
+      console.log('[relay] ttyd getRecord served', { vmName: ttydReq.vmName });
+      return c.json({
+        uri: `at://${ttydReq.didPlc}/${TTYD_CREDS_NSID}/${ttydReq.vmName}`,
+        value: {
+          $type: TTYD_CREDS_NSID,
+          username: TTYD_USERNAME,
+          password: ttydReq.password,
+        },
+      });
+    });
+
+    // VM publishes its sshPublicKey; persist to the user's repo and un-gate Terminal.
+    app.post('/xrpc/com.atproto.repo.createRecord', async (c) => {
+      const ttydReq = c.get('ttydReq' as never) as TtydRequest | undefined;
+      if (!ttydReq) return c.json({ error: 'Unauthorized' }, 401);
+      let input: { collection?: string; record?: Record<string, unknown> };
+      try { input = await c.req.json(); } catch {
+        return c.json({ error: 'InvalidRequest', message: 'invalid JSON body' }, 400);
+      }
+      if (input.collection !== SSH_KEY_NSID || !input.record) {
+        return c.json({ error: 'InvalidRequest', message: `only ${SSH_KEY_NSID} supported` }, 400);
+      }
+      if (!this.#createRecord) {
+        return c.json({ error: 'NotReady', message: 'createRecord not wired (user not signed in)' }, 503);
+      }
+      try {
+        const out = await this.#createRecord(SSH_KEY_NSID, input.record);
+        this.#markSshReady(ttydReq.serviceName);
+        console.log('[relay] sshPublicKey created', { serviceName: ttydReq.serviceName, uri: out.uri });
+        return c.json(out);
+      } catch (err) {
+        return c.json({ error: 'HandlerError', message: String(err) }, 500);
+      }
     });
 
     app.all('/xrpc/*', (c) =>
@@ -243,6 +323,58 @@ class RelayClient {
       const did = this.#keypair.did();
       return { did: () => did, privateKey: { type: 'k256', bytes } };
     } catch { return null; }
+  }
+
+  // ── VM ttyd handshake wiring ───────────────────────────────────────────────
+
+  /** Register a pending VM request so the relay can serve its ttyd password. */
+  registerTtydRequest(req: TtydRequest) {
+    this.#ttydRequests.set(req.vmName, req);
+  }
+
+  /** Wire the user-repo createRecord used to persist incoming sshPublicKey records. */
+  setCreateRecord(fn: (collection: string, record: Record<string, unknown>) => Promise<{ uri: string; cid: string }>) {
+    this.#createRecord = fn;
+  }
+
+  isSshReady(serviceName: string): boolean {
+    return this.sshReadyServices.includes(serviceName);
+  }
+
+  #markSshReady(serviceName: string) {
+    if (!this.sshReadyServices.includes(serviceName)) {
+      this.sshReadyServices = [...this.sshReadyServices, serviceName];
+    }
+  }
+
+  // Full OIDC validation of a VM's bearer token: match a pending request by
+  // actx(didPlc) + scoped sub, then cryptographically verify against the
+  // issuer's published JWKS (discovered via openid-configuration).
+  async #verifyTtydOidc(authHeader?: string): Promise<TtydRequest> {
+    const token = (authHeader ?? '').replace(/^Bearer\s+/i, '');
+    if (token.split('.').length !== 3) throw new Error('missing or malformed OIDC token');
+
+    const unverified = jose.decodeJwt(token);
+    const rawAud = Array.isArray(unverified.aud) ? unverified.aud[0] : unverified.aud;
+    const sub = unverified.sub ?? '';
+    const iss = unverified.iss;
+    if (!rawAud || !iss) throw new Error('OIDC token missing aud/iss');
+
+    const qIdx = rawAud.indexOf('?');
+    const actx = qIdx >= 0 ? new URLSearchParams(rawAud.slice(qIdx + 1)).get('actx') : null;
+    if (!actx) throw new Error('OIDC aud missing actx');
+
+    const match = [...this.#ttydRequests.values()].find((r) =>
+      r.didPlc === actx &&
+      sub.startsWith('actx:') &&
+      sub.endsWith(`:plc:${r.didPlcKey}:role:get-ttyd-password-${r.vmName}`)
+    );
+    if (!match) throw new Error('no pending VM request matches token actx/sub');
+
+    const oidcCfg = await fetch(`${iss}/.well-known/openid-configuration`).then((r) => r.json()) as { jwks_uri: string };
+    const jwks = jose.createRemoteJWKSet(new URL(oidcCfg.jwks_uri));
+    await jose.jwtVerify(token, jwks, { issuer: iss, audience: rawAud });
+    return match;
   }
 
   async start() {

@@ -201,7 +201,7 @@
   }
 
   function centerOnNode(node: any) {
-    if (!svgEl) return;
+    if (!svgEl || !isFinite(node.x) || !isFinite(node.y)) return;
     const t = d3.zoomTransform(svgEl);
     const k = t.k;
     svg.transition().duration(600).call(
