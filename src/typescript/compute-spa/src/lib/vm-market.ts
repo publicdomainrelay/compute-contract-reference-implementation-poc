@@ -21,6 +21,9 @@ export interface RequestVMResult {
   rfpUri: string;
   acceptUri: string;
   bidUri: string;
+  receiptUri?: string;
+  receiptCid?: string;
+  submitEventRef?: string;
 }
 
 export async function requestVM(params: RequestVMParams): Promise<RequestVMResult> {
@@ -35,7 +38,7 @@ export async function requestVM(params: RequestVMParams): Promise<RequestVMResul
       createSignedRecord: (agent: unknown, col: string, rec: Record<string, unknown>, signer: unknown) => Promise<{ uri: string; cid: string }>;
       createMarketClient: (session: unknown, opts: Record<string, unknown>) => {
         submitRfp: (target: string, input: { rfpUri: string; rfpCid: string }) => Promise<{ ok: boolean }>;
-        submitAccept: (target: string, input: Record<string, unknown>) => Promise<{ uri?: string; cid?: string }>;
+        submitAccept: (target: string, input: Record<string, unknown>) => Promise<{ uri?: string; cid?: string; submitEvent?: string }>;
       };
       listRecordsAll: (pdsUrl: string, did: string, collection: string) => Promise<Array<{ uri: string; cid: string; value: Record<string, unknown> }>>;
       OFFERING_NSID: string;
@@ -149,6 +152,9 @@ export async function requestVM(params: RequestVMParams): Promise<RequestVMResul
 
   // 6. submit accept to bidder
   const submitAcceptTarget = winner.record.submitAccept as string | undefined;
+  let receiptUri: string | undefined;
+  let receiptCid: string | undefined;
+  let submitEventRef: string | undefined;
   if (submitAcceptTarget) {
     onLog('submitting accept to bidder…');
     const mc2 = createMarketClient(agent, {});
@@ -156,10 +162,13 @@ export async function requestVM(params: RequestVMParams): Promise<RequestVMResul
       acceptUri: acceptRef.uri,
       acceptCid: acceptRef.cid,
     });
+    receiptUri = body.uri;
+    receiptCid = body.cid;
+    submitEventRef = body.submitEvent;
     onLog(`receipt: ${body.uri ?? 'n/a'}`);
   } else {
     onLog('no submitAccept endpoint on bid — skipping');
   }
 
-  return { vmUri: vmRef.uri, rfpUri: rfpRef.uri, acceptUri: acceptRef.uri, bidUri: winner.uri };
+  return { vmUri: vmRef.uri, rfpUri: rfpRef.uri, acceptUri: acceptRef.uri, bidUri: winner.uri, receiptUri, receiptCid, submitEventRef };
 }

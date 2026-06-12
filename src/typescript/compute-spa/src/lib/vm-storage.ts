@@ -7,6 +7,9 @@ export interface SavedVM {
   acceptUri: string;
   bidUri: string;
   createdAt: string;
+  receiptUri?: string;
+  receiptCid?: string;
+  submitEventRef?: string;
 }
 
 export function loadSavedVMs(): SavedVM[] {

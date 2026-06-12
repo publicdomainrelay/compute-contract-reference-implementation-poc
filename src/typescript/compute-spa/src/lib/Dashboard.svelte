@@ -50,6 +50,39 @@
     logs = [...logs, `${new Date().toISOString().slice(11, 23)} ${msg}`];
   }
 
+  async function deleteVM(vm: SavedVM) {
+    if (vm.submitEventRef && vm.receiptUri && vm.receiptCid && auth.agent) {
+      try {
+        const { createRecord, createMarketClient } = await import('@publicdomainrelay/market') as {
+          createRecord: (agent: unknown, col: string, rec: Record<string, unknown>) => Promise<{ uri: string; cid: string }>;
+          createMarketClient: (session: unknown, opts: Record<string, unknown>) => {
+            submitEvent: (target: string, event: Record<string, unknown>) => Promise<{ ok: boolean }>;
+          };
+        };
+        const VM_DELETE_NSID = 'com.publicdomainrelay.temp.compute.events.vm.delete';
+        const EVENT_NSID = 'com.publicdomainrelay.temp.market.event';
+        const nowIso = new Date().toISOString();
+        const deleteRef = await createRecord(auth.agent, VM_DELETE_NSID, {
+          $type: VM_DELETE_NSID,
+          reason: 'user_requested',
+          createdAt: nowIso,
+        });
+        const keypair = relayClient.getAttestationKeypair();
+        const proxyRef = relayClient.proxyRef;
+        const mc = createMarketClient(auth.agent, keypair && proxyRef ? { agent: auth.agent, signer: { keypair, issuer: proxyRef } } : { agent: auth.agent });
+        await mc.submitEvent(vm.submitEventRef, {
+          $type: EVENT_NSID,
+          receipt: { $type: 'com.atproto.repo.strongRef', uri: vm.receiptUri, cid: vm.receiptCid },
+          payload: { $type: 'com.atproto.repo.strongRef', uri: deleteRef.uri, cid: deleteRef.cid },
+          createdAt: nowIso,
+        });
+      } catch (err) {
+        console.error('[deleteVM] submitEvent failed:', err);
+      }
+    }
+    savedVMs = removeVM(savedVMs, vm.vmUri);
+  }
+
   async function onsubmit(e: SubmitEvent) {
     e.preventDefault();
     if (!auth.agent) return;
@@ -75,6 +108,9 @@
         acceptUri: result.acceptUri,
         bidUri: result.bidUri,
         createdAt: new Date().toISOString(),
+        receiptUri: result.receiptUri,
+        receiptCid: result.receiptCid,
+        submitEventRef: result.submitEventRef,
       });
       submitResult = { success: true, message: `VM "${vmName}" accepted (bid: ${result.bidUri})` };
     } catch (err) {
@@ -198,7 +234,7 @@
                 <span class="vm-meta">{new Date(vm.createdAt).toLocaleString()}</span>
                 <a class="vm-uri" href={vm.vmUri} target="_blank" rel="noopener">{vm.vmUri}</a>
               </div>
-              <button class="vm-remove" onclick={() => savedVMs = removeVM(savedVMs, vm.vmUri)} title="Remove">✕</button>
+              <button class="vm-remove" onclick={() => deleteVM(vm)} title="Remove">✕</button>
             </div>
           {/each}
         </section>
