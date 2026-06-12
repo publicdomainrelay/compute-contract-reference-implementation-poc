@@ -3,47 +3,31 @@
   import { auth } from './auth.svelte.ts';
   import { CLOUD_INIT_PRESETS } from './cloud-init-presets.ts';
   import LiveGraph from './LiveGraph.svelte';
-  import { relayClient, pendingBids, type CollectedBid } from './relay-client.svelte.ts';
+  import { relayClient } from './relay-client.svelte.ts';
+  import { tabFromHash, navigateToHash, type TabName } from './navigation.ts';
+  import { loadSavedVMs, persistVM, removeVM, type SavedVM } from './vm-storage.ts';
+  import { requestVM } from './vm-market.ts';
 
-  const VM_NSID     = 'com.publicdomainrelay.temp.compute.vm';
-  const RFP_NSID    = 'com.publicdomainrelay.temp.market.rfp';
-  const ACCEPT_NSID = 'com.publicdomainrelay.temp.market.accept';
+  let activeTab = $state<TabName>(tabFromHash());
 
-  const HASH_TO_TAB: Record<string, 'dashboard' | 'live-graph'> = {
-    '#/request-vm': 'dashboard',
-    '#/live-graph': 'live-graph',
-  };
-  const TAB_TO_HASH: Record<string, string> = {
-    'dashboard': '#/request-vm',
-    'live-graph': '#/live-graph',
-  };
-
-  function tabFromHash(): 'dashboard' | 'live-graph' {
-    const hash = window.location.hash || sessionStorage.getItem('activeHash') || '';
-    return HASH_TO_TAB[hash] ?? 'live-graph';
-  }
-
-  let activeTab = $state<'dashboard' | 'live-graph'>(tabFromHash());
-
-  function navigate(tab: 'dashboard' | 'live-graph') {
+  function navigate(tab: TabName) {
     activeTab = tab;
-    const hash = TAB_TO_HASH[tab];
-    window.location.hash = hash;
-    sessionStorage.setItem('activeHash', hash);
+    navigateToHash(tab);
+    if (tab === 'live-graph') setTimeout(() => window.dispatchEvent(new Event('resize')), 0);
   }
 
   onMount(() => {
     const onHashChange = () => {
       sessionStorage.setItem('activeHash', window.location.hash);
       activeTab = tabFromHash();
+      if (activeTab === 'live-graph') setTimeout(() => window.dispatchEvent(new Event('resize')), 0);
     };
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   });
+
   let showLoginModal = $state(false);
   let loginHandle = $state('');
-
-  const VOUCH_NSID = 'sh.tangled.graph.vouch';
 
   let vmName = $state('test-0001');
   let selectedPresetId = $state('minimal');
@@ -52,15 +36,14 @@
   let submitting = $state(false);
   let submitResult = $state<{ success: boolean; message: string } | null>(null);
   let logs = $state<string[]>([]);
+  let savedVMs = $state<SavedVM[]>(loadSavedVMs());
 
   let selectedPreset = $derived(
     CLOUD_INIT_PRESETS.find((p) => p.id === selectedPresetId) ?? CLOUD_INIT_PRESETS[0]
   );
 
   function onPresetChange() {
-    if (selectedPresetId !== 'custom') {
-      cloudInitScript = selectedPreset.script;
-    }
+    if (selectedPresetId !== 'custom') cloudInitScript = selectedPreset.script;
   }
 
   function addLog(msg: string) {
@@ -73,146 +56,27 @@
     submitting = true;
     submitResult = null;
     logs = [];
-
     try {
       const proxyRef = relayClient.proxyRef;
       if (!proxyRef) throw new Error('relay not connected — connect to xrpc-relay first');
-
-      const { createRecord, createSignedRecord, createMarketClient, listRecordsAll, OFFERING_NSID } = await import('@publicdomainrelay/market') as {
-        createRecord: (agent: unknown, col: string, rec: Record<string, unknown>) => Promise<{ uri: string; cid: string }>;
-        createSignedRecord: (agent: unknown, col: string, rec: Record<string, unknown>, signer: unknown) => Promise<{ uri: string; cid: string }>;
-        createMarketClient: (session: unknown, opts: Record<string, unknown>) => { submitRfp: (target: string, input: { rfpUri: string; rfpCid: string }) => Promise<{ ok: boolean }>; submitAccept: (target: string, input: Record<string, unknown>) => Promise<{ uri?: string; cid?: string; submitEvent?: string }> };
-        listRecordsAll: (pdsUrl: string, did: string, collection: string) => Promise<Array<{ uri: string; cid: string; value: Record<string, unknown> }>>;
-        OFFERING_NSID: string;
-      };
-
-      const keypair = relayClient.getAttestationKeypair();
-      if (!keypair) throw new Error('relay keypair not ready');
-      const signer = { keypair, issuer: proxyRef };
-
-      // 1. compute.vm record
-      addLog('creating compute.vm record…');
-      const vmRef = await createRecord(auth.agent, VM_NSID, {
-        $type: VM_NSID,
-        role: vmName.trim() || 'compute',
-        user_data: cloudInitScript,
+      const result = await requestVM({
+        agent: auth.agent,
+        proxyRef,
+        keypair: relayClient.getAttestationKeypair(),
+        vmName,
+        cloudInitScript,
+        bidWindowSec,
+        onLog: addLog,
+      });
+      savedVMs = persistVM(savedVMs, {
+        name: vmName,
+        vmUri: result.vmUri,
+        rfpUri: result.rfpUri,
+        acceptUri: result.acceptUri,
+        bidUri: result.bidUri,
         createdAt: new Date().toISOString(),
       });
-      addLog(`compute.vm: ${vmRef.uri}`);
-
-      // 2. market.rfp
-      addLog('creating market.rfp…');
-      const rfpRecord: Record<string, unknown> = {
-        $type: RFP_NSID,
-        domain: 'compute',
-        payload: { $type: 'com.atproto.repo.strongRef', uri: vmRef.uri, cid: vmRef.cid },
-        submitBid: `${proxyRef}#pdr_temp_market`,
-        createdAt: new Date().toISOString(),
-      };
-      const rfpRef = await createSignedRecord(auth.agent, RFP_NSID, rfpRecord, signer);
-      addLog(`market.rfp: ${rfpRef.uri}`);
-
-      // 2.5. discover vouched bidders and notify via OFFERING_NSID
-      const { IdResolver } = await import('@atproto/identity');
-      const idResolver = new IdResolver();
-      const mc = createMarketClient(auth.agent, {});
-
-      // resolve logged-in user's PDS to list their vouch records
-      const userDid = (auth.agent as { did?: string }).did ?? '';
-      addLog(`discovering vouched bidders for ${userDid}…`);
-      let vouchedDids: string[] = [];
-      try {
-        const userDoc = await idResolver.did.resolve(userDid);
-        const userPdsSvc = (userDoc?.service ?? []).find((s: { id: string }) => s.id === '#atproto_pds');
-        const userPds = (userPdsSvc as { serviceEndpoint?: string } | undefined)?.serviceEndpoint;
-        if (userPds) {
-          const vouchRecords = await listRecordsAll(userPds, userDid, VOUCH_NSID);
-          vouchedDids = Array.from(new Set(
-            vouchRecords
-              .filter((r) => (r.value.kind as string | undefined) !== 'denounce')
-              .map((r) => r.uri.split('/').pop() ?? '')
-              .filter((rkey) => rkey.startsWith('did:'))
-          ));
-          addLog(`found ${vouchedDids.length} vouched DID(s)`);
-        } else {
-          addLog('could not resolve user PDS — skipping vouch discovery');
-        }
-      } catch (err) {
-        addLog(`vouch discovery error — ${String(err)}`);
-      }
-
-      await Promise.all(vouchedDids.map(async (bidderDid) => {
-        try {
-          const doc = await idResolver.did.resolve(bidderDid);
-          const pdsService = (doc?.service ?? []).find((s: { id: string }) => s.id === '#atproto_pds');
-          const pdsUrl = (pdsService as { serviceEndpoint?: string } | undefined)?.serviceEndpoint;
-          if (!pdsUrl) { addLog(`  ${bidderDid}: no PDS found`); return; }
-          const offerings = await listRecordsAll(pdsUrl, bidderDid, OFFERING_NSID);
-          for (const offering of offerings) {
-            const appliesTo = offering.value.appliesTo as string[] | undefined;
-            const endpointUrl = offering.value.endpointUrl as string | undefined;
-            if (!endpointUrl || !Array.isArray(appliesTo) || !appliesTo.includes(VM_NSID)) continue;
-            addLog(`  ${bidderDid}: submitting RFP to ${endpointUrl}`);
-            try {
-              const res = await mc.submitRfp(endpointUrl, { rfpUri: rfpRef.uri, rfpCid: rfpRef.cid });
-              addLog(`  ${bidderDid}: ${res.ok ? 'ok' : 'no-ok'}`);
-            } catch (err) {
-              addLog(`  ${bidderDid}: submitRfp error — ${String(err)}`);
-            }
-            break;
-          }
-        } catch (err) {
-          addLog(`  ${bidderDid}: offering discovery error — ${String(err)}`);
-        }
-      }));
-
-      // 3. collect bids
-      const windowMs = bidWindowSec * 1000;
-      addLog(`waiting ${bidWindowSec}s for bids…`);
-      await new Promise<void>((resolve) => setTimeout(resolve, windowMs));
-
-      const bids = pendingBids.get(rfpRef.uri) ?? [];
-      pendingBids.delete(rfpRef.uri);
-      addLog(`${bids.length} bid(s) received`);
-
-      if (bids.length === 0) throw new Error(`no bids within ${bidWindowSec}s`);
-
-      // 4. pick lowest-cost winner
-      const winner: CollectedBid = bids.reduce((best, b) => {
-        const cost = (n: CollectedBid) => Number((n.record.payload as Record<string, unknown> | undefined)?.cost ?? Infinity);
-        return cost(b) < cost(best) ? b : best;
-      }, bids[0]);
-      addLog(`winner: ${winner.uri} (did: ${winner.did})`);
-
-      const bidRef = { $type: 'com.atproto.repo.strongRef', uri: winner.uri, cid: winner.cid };
-
-      // 5. market.accept
-      addLog('creating market.accept…');
-      const acceptRecord: Record<string, unknown> = {
-        $type: ACCEPT_NSID,
-        rfp: { $type: 'com.atproto.repo.strongRef', uri: rfpRef.uri, cid: rfpRef.cid },
-        bid: bidRef,
-        submitEvent: `${proxyRef}#pdr_temp_compute_event`,
-        createdAt: new Date().toISOString(),
-      };
-      const acceptRef = await createSignedRecord(auth.agent, ACCEPT_NSID, acceptRecord, signer);
-      addLog(`market.accept: ${acceptRef.uri}`);
-
-      // 6. submit accept to bidder
-      const submitAcceptTarget = winner.record.submitAccept as string | undefined;
-      if (submitAcceptTarget) {
-        addLog(`submitting accept to bidder…`);
-        const mc = createMarketClient(auth.agent, {});
-        const body = await mc.submitAccept(submitAcceptTarget, {
-          acceptUri: acceptRef.uri,
-          acceptCid: acceptRef.cid,
-        });
-        addLog(`receipt: ${body.uri ?? 'n/a'}`);
-      } else {
-        addLog('no submitAccept endpoint on bid — skipping');
-      }
-
-      submitResult = { success: true, message: `VM "${vmName}" accepted (bid: ${winner.uri})` };
+      submitResult = { success: true, message: `VM "${vmName}" accepted (bid: ${result.bidUri})` };
     } catch (err) {
       addLog(`error: ${String(err)}`);
       submitResult = { success: false, message: String(err) };
@@ -242,6 +106,10 @@
       <button class="login-btn" onclick={() => showLoginModal = true}>Log In</button>
     {/if}
   </header>
+
+  <div class="graph-wrapper" style:display={activeTab === 'live-graph' ? '' : 'none'}>
+    <LiveGraph />
+  </div>
 
   {#if activeTab === 'dashboard'}
     <main>
@@ -319,11 +187,23 @@
           </p>
         {/if}
       </section>
+
+      {#if savedVMs.length > 0}
+        <section class="card vm-list">
+          <h2>My VMs</h2>
+          {#each savedVMs as vm (vm.vmUri)}
+            <div class="vm-row">
+              <div class="vm-info">
+                <span class="vm-name">{vm.name}</span>
+                <span class="vm-meta">{new Date(vm.createdAt).toLocaleString()}</span>
+                <a class="vm-uri" href={vm.vmUri} target="_blank" rel="noopener">{vm.vmUri}</a>
+              </div>
+              <button class="vm-remove" onclick={() => savedVMs = removeVM(savedVMs, vm.vmUri)} title="Remove">✕</button>
+            </div>
+          {/each}
+        </section>
+      {/if}
     </main>
-  {:else}
-    <div class="graph-wrapper">
-      <LiveGraph />
-    </div>
   {/if}
 </div>
 
@@ -474,6 +354,41 @@
   .result { margin-top: 1rem; padding: 0.7rem 1rem; border-radius: 6px; font-size: 0.88rem; }
   .result.success { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
   .result.error { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+
+  .vm-list { margin-top: 1.5rem; }
+  .vm-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid #f1f5f9;
+  }
+  .vm-row:last-child { border-bottom: none; }
+  .vm-info { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+  .vm-name { font-weight: 600; font-size: 0.9rem; color: #1c2333; }
+  .vm-meta { font-size: 0.75rem; color: #94a3b8; }
+  .vm-uri {
+    font-size: 0.75rem;
+    font-family: monospace;
+    color: #4a9eff;
+    word-break: break-all;
+    text-decoration: none;
+  }
+  .vm-uri:hover { text-decoration: underline; }
+  .vm-remove {
+    flex-shrink: 0;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    border: 1px solid #e2e8f0;
+    background: transparent;
+    color: #94a3b8;
+    cursor: pointer;
+    font-size: 0.75rem;
+    line-height: 1;
+    transition: all 0.15s;
+  }
+  .vm-remove:hover { border-color: #f87171; color: #f87171; }
 
   .graph-wrapper { flex: 1; padding: 1rem 1.5rem; }
 

@@ -13,9 +13,14 @@
     pdslsUrl,
     shortDid,
   } from './graph.js';
-
-  const JETSTREAM_URL = 'wss://jetstream2.us-east.bsky.network/subscribe';
-  const STORAGE_KEY = 'market-graph-recordings';
+  import {
+    getRecordings,
+    setRecordings,
+    downloadStoredSession,
+    parseImportData,
+    type StoredSession,
+  } from './recordings.ts';
+  import { JetstreamClient } from './jetstream-client.ts';
 
   // DOM refs
   let graphPane: HTMLDivElement;
@@ -30,7 +35,7 @@
   let isRecording = $state(false);
   let detailNode = $state<any>(null);
   let pinnedUri = $state<string | null>(null);
-  let sessions = $state<any[]>([]);
+  let sessions = $state<StoredSession[]>([]);
   let selectedSessionIdx = $state('');
 
   // Graph data (not reactive — mutated directly, d3 owns rendering)
@@ -54,7 +59,18 @@
   let nodeSel: any, linkSel: any, labelSel: any, edgeLabelSel: any;
   let zoomBehavior: d3.ZoomBehavior<SVGSVGElement, unknown>;
   let pendingCenterNode: any = null;
-  let jetstreamSocket: WebSocket | undefined;
+
+  const jetstreamClient = new JetstreamClient({
+    onFrame(frame) {
+      if (isRecording) recordingFrames.push(frame);
+      const rec = parseJetstreamFrame(frame);
+      if (rec) addRecord(rec);
+    },
+    onStatusChange(s, cls) { status = s; statusClass = cls; },
+    onClose() {
+      if (!paused) setTimeout(() => jetstreamClient.connect(), 3000);
+    },
+  });
 
   // ── graph helpers ───────────────────────────────────────────────────────────
 
@@ -63,7 +79,7 @@
   }
 
   function visibleEdges() {
-    const uris = new SvelteSet(visibleNodes().map((n: any) => n.uri));
+    const uris = new Set(visibleNodes().map((n: any) => n.uri));
     return edgeList.filter((e) => uris.has(e.from) && uris.has(e.to));
   }
 
@@ -152,7 +168,7 @@
       .text((d: any) => d.label.slice(d.label.indexOf(':') + 1))
       .merge(edgeLabelSel);
 
-    const degree = new SvelteMap(nodes.map((n: any) => [n.uri, 0]));
+    const degree = new Map(nodes.map((n: any) => [n.uri, 0]));
     for (const e of edges) {
       if (degree.has(e.from)) degree.set(e.from, degree.get(e.from)! + 1);
       if (degree.has(e.to))   degree.set(e.to,   degree.get(e.to)!   + 1);
@@ -214,7 +230,7 @@
   }
 
   function _applyFixUps(node: any) {
-    const uriToNode = new SvelteMap(recordNodes.map((n: any) => [n.uri, n]));
+    const uriToNode = new Map(recordNodes.map((n: any) => [n.uri, n]));
     const { nodes: synthNodes, edges: fixEdges } = fixUps(node, uriToNode);
     for (const synth of synthNodes) {
       if (_ingestNode(synth)) _applyFixUps(synth);
@@ -257,14 +273,6 @@
 
   // ── recording ───────────────────────────────────────────────────────────────
 
-  function getRecordings(): any[] {
-    try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch { return []; }
-  }
-
-  function setRecordings(arr: any[]) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
-  }
-
   function refreshSessions() {
     sessions = getRecordings();
   }
@@ -277,11 +285,13 @@
   function stopRecording() {
     isRecording = false;
     if (recordingFrames.length === 0) return;
-    const referencedDids = new SvelteSet<string>();
+    const referencedDids = new Set<string>();
     for (const f of recordingFrames) {
-      if (f.kind === 'commit' && f.commit && f.did) referencedDids.add(f.did);
+      if ((f as any).kind === 'commit' && (f as any).commit && (f as any).did) {
+        referencedDids.add((f as any).did);
+      }
     }
-    const filtered = recordingFrames.filter((f) => {
+    const filtered = recordingFrames.filter((f: any) => {
       if (f.kind === 'identity' || f.kind === 'account') {
         const did = f.kind === 'identity' ? f.identity?.did : f.account?.did;
         return did && referencedDids.has(did);
@@ -306,7 +316,7 @@
     if (isRecording) stopRecording(); else startRecording();
   }
 
-  function replaySession(stored: any) {
+  function replaySession(stored: StoredSession) {
     recordNodes.length = 0; nodeMap.clear(); edgeList.length = 0;
     pinnedUri = null; detailNode = null;
     for (const frame of stored.events) {
@@ -328,13 +338,7 @@
     const idx = parseInt(selectedSessionIdx);
     const recs = getRecordings();
     if (isNaN(idx) || !recs[idx]) return;
-    const stored = recs[idx];
-    const blob = new Blob([JSON.stringify(stored, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `market-graph-${stored.id}.json`;
-    document.body.appendChild(a); a.click();
-    document.body.removeChild(a); URL.revokeObjectURL(url);
+    downloadStoredSession(recs[idx]);
   }
 
   function importFile(e: Event) {
@@ -344,20 +348,16 @@
     reader.onload = () => {
       try {
         const data = JSON.parse(reader.result as string);
-        const items = Array.isArray(data) ? data : [data];
+        const items = parseImportData(data);
+        if (items.length === 0) throw new Error('No valid recording (missing events array).');
         const recs = getRecordings();
-        let added = 0;
-        for (const item of items) {
-          if (!item.events || !Array.isArray(item.events)) continue;
-          item.id = item.id || Date.now().toString(36) + '_' + added;
-          item.importedAt = new Date().toISOString();
-          recs.push(item); added++;
-        }
-        if (added === 0) throw new Error('No valid recording (missing events array).');
+        recs.push(...items);
         setRecordings(recs);
         refreshSessions();
-        status = `📂 imported ${added} recording(s)`;
-        setTimeout(() => { if (status.startsWith('📂')) status = jetstreamSocket?.readyState === WebSocket.OPEN ? '● live' : '● disconnected'; }, 3000);
+        status = `📂 imported ${items.length} recording(s)`;
+        setTimeout(() => {
+          if (status.startsWith('📂')) status = jetstreamClient.isOpen ? '● live' : '● disconnected';
+        }, 3000);
       } catch (err: any) {
         alert(`Import failed: ${err.message}`);
       }
@@ -368,40 +368,13 @@
 
   // ── jetstream ───────────────────────────────────────────────────────────────
 
-  function connectJetstream() {
-    const url = new URL(JETSTREAM_URL);
-    for (const nsid of WATCHED_NSIDS) url.searchParams.append('wantedCollections', nsid);
-    status = '● connecting…'; statusClass = '';
-    let socket: WebSocket;
-    try { socket = new WebSocket(url.toString()); } catch (err: any) {
-      status = `● failed: ${err.message || err}`; statusClass = 'disconnected';
-      setTimeout(connectJetstream, 5000); return;
-    }
-    jetstreamSocket = socket;
-    socket.onopen = () => { status = '● live'; statusClass = 'connected'; };
-    socket.onmessage = (event) => {
-      if (paused) return;
-      let frame: any;
-      try { frame = JSON.parse(event.data); } catch { return; }
-      if (isRecording) recordingFrames.push(frame);
-      const rec = parseJetstreamFrame(frame);
-      if (rec) addRecord(rec);
-    };
-    socket.onerror = () => { status = '● stream error'; statusClass = 'disconnected'; };
-    socket.onclose = (event) => {
-      jetstreamSocket = undefined;
-      status = `● disconnected (code ${event.code})`; statusClass = 'disconnected';
-      if (!paused) setTimeout(connectJetstream, 3000);
-    };
-  }
-
   function togglePause() {
     paused = !paused;
     if (paused) {
-      jetstreamSocket?.close(); jetstreamSocket = undefined;
+      jetstreamClient.close();
       status = '⏸ paused'; statusClass = '';
     } else {
-      connectJetstream();
+      jetstreamClient.connect();
     }
   }
 
@@ -422,12 +395,12 @@
     initGraph();
     refreshSessions();
     startRecording();
-    connectJetstream();
+    jetstreamClient.connect();
     window.addEventListener('resize', resizeGraph);
   });
 
   onDestroy(() => {
-    jetstreamSocket?.close();
+    jetstreamClient.close();
     window.removeEventListener('resize', resizeGraph);
     simulation?.stop();
   });
