@@ -25,6 +25,7 @@
 import { Hono } from "jsr:@hono/hono";
 import { cors } from "jsr:@hono/hono/cors";
 import { Secp256k1Keypair } from "npm:@atproto/crypto";
+import { Agent, CredentialSession } from "npm:@atproto/api";
 import { IdResolver } from "npm:@atproto/identity";
 import { decodeBase64, encodeBase64 } from "jsr:@std/encoding/base64";
 import { verifyServiceAuth } from "../lib/market/auth.ts";
@@ -101,18 +102,42 @@ const keypair = await getKeypair(cli);
 const DISPATCHER_HOST = Deno.env.get("DISPATCHER_HOST") ?? "xrpc.fedproxy.com";
 const SUBSCRIBE_NSID  = "com.fedproxy.temp.xrpc.subscribe";
 const GET_NONCE_NSID  = "com.fedproxy.temp.xrpc.getRegistrationNonce";
+const ATPROTO_PDS     = Deno.env.get("ATPROTO_PDS") ?? "https://bsky.social";
+const ATPROTO_HANDLE  = Deno.env.get("ATPROTO_HANDLE");
+const ATPROTO_PASSWORD = Deno.env.get("ATPROTO_PASSWORD");
+
+if (!ATPROTO_HANDLE || !ATPROTO_PASSWORD) {
+  log("error", { component: "client", event: "missing_env", message: "ATPROTO_HANDLE and ATPROTO_PASSWORD must be set" });
+  Deno.exit(1);
+}
+
+const session = new CredentialSession(new URL(ATPROTO_PDS));
+await session.login({ identifier: ATPROTO_HANDLE, password: ATPROTO_PASSWORD });
+const agent = new Agent(session);
+log("info", { component: "client", event: "session_created", did: session.did });
 
 const idResolver = new IdResolver();
 
 // Set after #registered frame is received; used by auth middleware.
 let registeredSubdomain: string | undefined;
 
+// ── service auth ──────────────────────────────────────────────────────────────
+
+async function getServiceAuthToken(nsid: string): Promise<string> {
+  const res = await agent.com.atproto.server.getServiceAuth({
+    aud: `did:web:${DISPATCHER_HOST}`,
+    lxm: nsid,
+  });
+  return res.data.token;
+}
+
 // ── registration ──────────────────────────────────────────────────────────────
 
 async function buildRegistration(): Promise<string> {
+  const token = await getServiceAuthToken(GET_NONCE_NSID);
   const res = await fetch(`https://${DISPATCHER_HOST}/xrpc/${GET_NONCE_NSID}`, {
     method:  "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "authorization": `Bearer ${token}` },
     body:    JSON.stringify({ key: keypair.did(), signatures: [] }),
   });
   if (!res.ok) throw new Error(`getRegistrationNonce failed: ${res.status} ${await res.text()}`);
@@ -275,7 +300,8 @@ async function connect() {
     return;
   }
 
-  const url = `wss://${DISPATCHER_HOST}/xrpc/${SUBSCRIBE_NSID}?did=${encodeURIComponent(keypair.did())}&registration=${encodeURIComponent(registration)}`;
+  const serviceAuthToken = await getServiceAuthToken(SUBSCRIBE_NSID);
+  const url = `wss://${DISPATCHER_HOST}/xrpc/${SUBSCRIBE_NSID}?did=${encodeURIComponent(keypair.did())}&registration=${encodeURIComponent(registration)}&service_auth=${encodeURIComponent(serviceAuthToken)}`;
   log("info", { component: "client", event: "connecting", host: DISPATCHER_HOST });
 
   const ws = new WebSocket(url);

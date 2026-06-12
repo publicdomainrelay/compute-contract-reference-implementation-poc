@@ -71,6 +71,9 @@ export async function requestVM(params: RequestVMParams): Promise<RequestVMResul
   const idResolver = new IdResolver();
   const mc = createMarketClient(agent, {});
 
+  // Demo: always include these DIDs in addition to any discovered via vouches.
+  const DEFAULT_BIDDER_DIDS = ['did:plc:5svqtrhheairglgiiyvutzik'];
+
   const userDid = (agent as { did?: string }).did ?? '';
   onLog(`discovering vouched bidders for ${userDid}…`);
   let vouchedDids: string[] = [];
@@ -94,7 +97,10 @@ export async function requestVM(params: RequestVMParams): Promise<RequestVMResul
     onLog(`vouch discovery error — ${String(err)}`);
   }
 
-  await Promise.all(vouchedDids.map(async (bidderDid) => {
+  const bidderDids = Array.from(new Set([...DEFAULT_BIDDER_DIDS, ...vouchedDids]));
+  onLog(`checking ${bidderDids.length} bidder DID(s) (incl. ${DEFAULT_BIDDER_DIDS.length} default)`);
+
+  await Promise.all(bidderDids.map(async (bidderDid) => {
     try {
       const doc = await idResolver.did.resolve(bidderDid);
       const pdsService = (doc?.service ?? []).find((s: { id: string }) => s.id === '#atproto_pds');

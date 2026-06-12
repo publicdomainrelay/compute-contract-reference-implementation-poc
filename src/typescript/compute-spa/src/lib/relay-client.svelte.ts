@@ -87,6 +87,10 @@ class RelayClient {
   #ttydRequests = new Map<string, TtydRequest>();
   // Creates a record in the logged-in user's repo (wired from the SPA).
   #createRecord: ((collection: string, record: Record<string, unknown>) => Promise<{ uri: string; cid: string }>) | null = null;
+  // Mints an atproto service-auth JWT (aud=did:web:xrpc.fedproxy.com) for a given
+  // lxm; wired from the SPA once the user is signed in. The dispatcher requires
+  // these on getRegistrationNonce + subscribe.
+  #getServiceAuth: ((lxm: string) => Promise<string>) | null = null;
 
   #keypair: Secp256k1Keypair | null = null;
   #ws: WebSocket | null = null;
@@ -270,9 +274,10 @@ class RelayClient {
 
   async #buildRegistration(): Promise<string> {
     const kp = this.#keypair!;
+    const token = await this.#serviceAuthToken(GET_NONCE_NSID);
     const res = await fetch(`https://${DISPATCHER_HOST}/xrpc/${GET_NONCE_NSID}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       body: JSON.stringify({ key: kp.did(), signatures: [] }),
     });
     if (!res.ok) throw new Error(`getRegistrationNonce failed: ${res.status} ${await res.text()}`);
@@ -337,6 +342,17 @@ class RelayClient {
     this.#createRecord = fn;
   }
 
+  setServiceAuthMinter(fn: (lxm: string) => Promise<string>) {
+    this.#getServiceAuth = fn;
+    // A minter arriving (user signed in) may unblock a stalled registration.
+    if (this.status === 'disconnected' && !this.#stopped) this.#doConnect();
+  }
+
+  async #serviceAuthToken(lxm: string): Promise<string> {
+    if (!this.#getServiceAuth) throw new Error('service auth minter not wired (user not signed in)');
+    return await this.#getServiceAuth(lxm);
+  }
+
   isSshReady(serviceName: string): boolean {
     return this.sshReadyServices.includes(serviceName);
   }
@@ -398,6 +414,14 @@ class RelayClient {
   async #doConnect() {
     if (this.#stopped) return;
 
+    // Dispatcher requires atproto service-auth; can't register until the user
+    // signs in and wires the minter. setServiceAuthMinter() re-kicks us.
+    if (!this.#getServiceAuth) {
+      console.log('[relay] waiting for sign-in before registering');
+      this.status = 'disconnected';
+      return;
+    }
+
     let registration: string;
     try {
       registration = await this.#buildRegistration();
@@ -408,7 +432,8 @@ class RelayClient {
       return;
     }
 
-    const url = `wss://${DISPATCHER_HOST}/xrpc/${SUBSCRIBE_NSID}?did=${encodeURIComponent(this.#keypair!.did())}&registration=${encodeURIComponent(registration)}`;
+    const serviceAuthToken = await this.#serviceAuthToken(SUBSCRIBE_NSID);
+    const url = `wss://${DISPATCHER_HOST}/xrpc/${SUBSCRIBE_NSID}?did=${encodeURIComponent(this.#keypair!.did())}&registration=${encodeURIComponent(registration)}&service_auth=${encodeURIComponent(serviceAuthToken)}`;
     console.log('[relay] connecting to', DISPATCHER_HOST);
     const ws = new WebSocket(url);
     this.#ws = ws;

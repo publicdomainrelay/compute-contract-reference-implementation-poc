@@ -14,6 +14,8 @@ import { upgradeWebSocket } from "jsr:@hono/hono/deno";
 import { cors } from "jsr:@hono/hono/cors";
 import { verifySignature } from "npm:@atproto/crypto";
 import { decodeBase64, encodeBase64 } from "jsr:@std/encoding/base64";
+import { IdResolver } from "npm:@atproto/identity";
+import { verifyJwt } from "npm:@atproto/xrpc-server";
 
 // ── logging ───────────────────────────────────────────────────────────────────
 
@@ -76,6 +78,39 @@ function effectiveHostname(host: string): string {
   return host.split(":")[0];
 }
 
+// ── ATProto service auth ──────────────────────────────────────────────────────
+
+const idResolver = new IdResolver();
+
+function hostnameToDid(hostname: string): string {
+  return `did:web:${hostname}`;
+}
+
+async function verifyServiceAuth(authHeader: string | undefined, aud: string, lxm: string, tokenOverride?: string): Promise<{ iss: string }> {
+  let token = tokenOverride;
+  if (!token) {
+    if (!authHeader) throw new Error("Missing Authorization header");
+    const parts = authHeader.split(" ");
+    token = parts[parts.length - 1];
+  }
+  if (!token) throw new Error("Missing bearer token");
+
+  const payloadJson = JSON.parse(
+    new TextDecoder().decode(
+      Uint8Array.from(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0))
+    )
+  );
+  const iss = payloadJson.iss as string | undefined;
+  if (!iss || !iss.startsWith("did:")) throw new Error("Token iss must be a DID");
+
+  await verifyJwt(token, aud, lxm, async (did) => {
+    if (did.startsWith("did:key:")) return did;
+    return await idResolver.did.resolveAtprotoKey(did);
+  });
+
+  return { iss };
+}
+
 // ── app ───────────────────────────────────────────────────────────────────────
 
 const app = new Hono();
@@ -130,6 +165,14 @@ app.post(`/xrpc/${GET_NONCE_NSID}`, async (c, next) => {
   if (effectiveHostname(c.req.header("host") ?? HOSTNAME) !== HOSTNAME) {
     return next();
   }
+
+  try {
+    await verifyServiceAuth(c.req.header("Authorization"), hostnameToDid(HOSTNAME), GET_NONCE_NSID);
+  } catch (err) {
+    log("warn", { component: "relay", event: "auth_denied", nsid: GET_NONCE_NSID, error: String(err) });
+    return c.json({ error: "AuthenticationRequired", message: String(err) }, 401);
+  }
+
   let input: { key?: string; signatures?: unknown };
   try { input = await c.req.json(); } catch { input = {}; }
 
@@ -280,10 +323,19 @@ const wsSubscribeHandler = upgradeWebSocket((c) => {
     };
   });
 
-app.get(`/xrpc/${SUBSCRIBE_NSID}`, (c, next) => {
+app.get(`/xrpc/${SUBSCRIBE_NSID}`, async (c, next) => {
   if (effectiveHostname(c.req.header("host") ?? HOSTNAME) !== HOSTNAME) {
     return next();
   }
+
+  try {
+    const serviceAuth = c.req.query("service_auth");
+    await verifyServiceAuth(c.req.header("Authorization"), hostnameToDid(HOSTNAME), SUBSCRIBE_NSID, serviceAuth);
+  } catch (err) {
+    log("warn", { component: "relay", event: "auth_denied", nsid: SUBSCRIBE_NSID, error: String(err) });
+    return c.json({ error: "AuthenticationRequired", message: String(err) }, 401);
+  }
+
   return wsSubscribeHandler(c, next);
 });
 

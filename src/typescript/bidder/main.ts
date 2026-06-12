@@ -218,6 +218,11 @@ const marketFactory = createMarketFactory(marketDeps, {
     [MARKET_SERVICE_ID]: {
       [VM_NSID]: async ({ rfpUri, rfpCid, rfp, req }) => {
         const { repo: rfpOwnerDid } = parseAtUri(rfpUri);
+        // TODO Vouch checking: the bidder currently bids on any RFP that reaches
+        // it. Verify the RFP author (rfpOwnerDid) is vouched for before bidding —
+        // resolve their PDS, list sh.tangled.graph.vouch records, require a vouch
+        // (kind !== "denounce") from a trusted account. Gate behind
+        // DO_NO_REQUIRE_VOUCH=1 (set => bypass, mirroring spindle/marketRFP.ts).
         const { bidUri, bidCid } = await createAndSubmitBid(rfpUri, rfpCid, rfp, settlement, req.url);
         log("info", "bid created via submitRfp", { bidUri, rfpUri, rfpOwnerDid });
         return { body: { ok: true, bidUri, bidCid } };

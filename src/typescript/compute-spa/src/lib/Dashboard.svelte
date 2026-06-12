@@ -7,7 +7,7 @@
   import { tabFromHash, navigateToHash, type TabName } from './navigation.ts';
   import { loadSavedVMs, persistVM, removeVM, type SavedVM } from './vm-storage.ts';
   import { requestVM } from './vm-market.ts';
-  import { vmServiceName, didPlcKey, terminalUrl } from './constants.ts';
+  import { vmServiceName, didPlcKey, terminalUrl, XRPC_DISPATCHER_HOST } from './constants.ts';
 
   /** Random URL-safe ttyd password generated client-side per VM. */
   function generatePassword(): string {
@@ -82,6 +82,20 @@
     relayClient.setCreateRecord(async (collection, record) => {
       const res = await agent.com.atproto.repo.createRecord({ repo: did, collection, record });
       return { uri: res.data.uri, cid: res.data.cid };
+    });
+  });
+
+  // Wire the service-auth minter the relay needs for getRegistrationNonce + subscribe
+  // against the dispatcher (did:web:xrpc.fedproxy.com).
+  $effect(() => {
+    const agent = auth.agent;
+    if (!agent) return;
+    relayClient.setServiceAuthMinter(async (lxm) => {
+      const res = await agent.com.atproto.server.getServiceAuth({
+        aud: `did:web:${XRPC_DISPATCHER_HOST}`,
+        lxm,
+      });
+      return res.data.token;
     });
   });
 
