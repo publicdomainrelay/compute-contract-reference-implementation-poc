@@ -1,0 +1,66 @@
+{
+  "lexicon": 1,
+  "id": "com.example.dispatcher.register",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Register an XRPC endpoint with the dispatcher. Returns a cryptographically random serviceId. Share `did:web:HOST#<serviceId>` with callers so they can route to your endpoint via PDS service proxying through this dispatcher.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["actor", "endpoint"],
+          "properties": {
+            "actor":    { "type": "string", "format": "did", "description": "DID of the registrant. Must match the service-auth token issuer." },
+            "endpoint": { "type": "string", "description": "Base URL the dispatcher will forward matched XRPC calls to (e.g. https://my-service.example.com)." },
+            "nsids":    {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Optional allow-list of NSIDs this registration handles. Omit to accept any NSID."
+            },
+            "ttlSeconds": { "type": "integer", "description": "Registration TTL in seconds. Omit for no expiry." }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["serviceId", "proxyRef"],
+          "properties": {
+            "serviceId": { "type": "string", "description": "Cryptographically random service ID fragment." },
+            "proxyRef":  { "type": "string", "description": "Full atproto-proxy header value: did:web:HOST#serviceId." },
+            "expiresAt": { "type": "string", "description": "ISO-8601 expiry timestamp, if ttlSeconds was set." }
+          }
+        }
+      },
+      "errors": [
+        { "name": "Unauthorized", "description": "Missing or invalid inter-service auth token." },
+        { "name": "Forbidden",    "description": "actor does not match token issuer." }
+      ]
+    },
+    "deregister": {
+      "type": "procedure",
+      "description": "Remove a previously registered serviceId. Only the original registrant (matched by DID) may deregister.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["actor", "serviceId"],
+          "properties": {
+            "actor":     { "type": "string", "format": "did" },
+            "serviceId": { "type": "string" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["ok"],
+          "properties": { "ok": { "type": "boolean" } }
+        }
+      }
+    }
+  }
+}

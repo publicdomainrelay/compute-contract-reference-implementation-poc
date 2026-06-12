@@ -1,0 +1,39 @@
+{
+  "lexicon": 1,
+  "id": "com.example.dispatcher.respond",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Submit the result of an XRPC task assigned via com.example.dispatcher.subscribe. Call via PDS proxying so the server can verify the caller's DID.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["taskId", "actor"],
+          "properties": {
+            "taskId": { "type": "string", "description": "taskId from the #task message." },
+            "actor":  { "type": "string", "format": "did", "description": "DID of the caller. Must match the service-auth token issuer." },
+            "result": { "type": "unknown", "description": "Return value from the executed XRPC." },
+            "error":  { "type": "string",  "description": "Error name if the XRPC failed." },
+            "errorMessage": { "type": "string" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["ok"],
+          "properties": {
+            "ok": { "type": "boolean" }
+          }
+        }
+      },
+      "errors": [
+        { "name": "UnknownTask",   "description": "taskId not found or already completed." },
+        { "name": "Unauthorized",  "description": "Missing or invalid inter-service auth token." },
+        { "name": "Forbidden",     "description": "actor does not match the token issuer." }
+      ]
+    }
+  }
+}

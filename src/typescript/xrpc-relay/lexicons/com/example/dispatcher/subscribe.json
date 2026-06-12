@@ -1,0 +1,67 @@
+{
+  "lexicon": 1,
+  "id": "com.example.dispatcher.subscribe",
+  "defs": {
+    "main": {
+      "type": "subscription",
+      "description": "Open a relay channel. The server immediately sends #registered with a fresh serviceId. Callers who address did:web:HOST#serviceId are relayed here as #request frames; reply on the same socket with #response.",
+      "parameters": {
+        "type": "params",
+        "properties": {}
+      },
+      "message": {
+        "schema": {
+          "type": "union",
+          "refs": ["#registered", "#request", "#error"]
+        }
+      }
+    },
+    "registered": {
+      "type": "object",
+      "description": "First frame sent by the server on connect. Contains the serviceId assigned to this connection.",
+      "required": ["serviceId", "proxyRef"],
+      "properties": {
+        "serviceId": {
+          "type": "string",
+          "description": "Cryptographically random service ID fragment for this connection."
+        },
+        "proxyRef": {
+          "type": "string",
+          "description": "Full atproto-proxy header value callers should use: did:web:HOST#serviceId."
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "description": "Inbound XRPC call relayed from a caller. Handle it and send back a #response on the same socket.",
+      "required": ["requestId", "method", "nsid", "callerDid"],
+      "properties": {
+        "requestId": { "type": "string", "description": "Opaque ID; echo in the #response." },
+        "method":    { "type": "string", "description": "HTTP method (GET, POST, …)." },
+        "nsid":      { "type": "string", "description": "XRPC NSID being called." },
+        "params":    { "type": "unknown", "description": "Query parameters as a string→string map." },
+        "body":      { "type": "unknown", "description": "Parsed JSON body, or null." },
+        "callerDid": { "type": "string",  "description": "Verified DID of the original caller." }
+      }
+    },
+    "response": {
+      "type": "object",
+      "description": "Client-to-server reply for a #request frame.",
+      "required": ["requestId", "status", "body"],
+      "properties": {
+        "requestId":   { "type": "string",  "description": "Must match the #request requestId." },
+        "status":      { "type": "integer", "description": "HTTP status code to return to the caller." },
+        "body":        { "type": "unknown", "description": "Response body (will be JSON-serialised)." },
+        "contentType": { "type": "string",  "description": "Content-Type header (default application/json)." }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["error"],
+      "properties": {
+        "error":   { "type": "string" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}
