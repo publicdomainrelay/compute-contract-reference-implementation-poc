@@ -20,6 +20,8 @@
  * Env:
  *   PORT              — listen port (default 8080)
  *   VM_IMAGE          — Docker image for QEMU VMs
+ *   CONTAINER_MODE    — set "true" to use container.ts (cloud-init+sshd) instead of QEMU
+ *   CONTAINER_IMAGE   — Docker image for container runner (default container-runner-ubuntu:latest)
  *   ISSUER_URL / THIS_ENDPOINT — OIDC issuer URL (default http://localhost:PORT)
  *   DATABASE_URI      — sqlite:///path or postgresql://... (default ./app.db)
  */
@@ -30,6 +32,7 @@ import { getPublicJwk, getSigningKey, OIDCToken, UnauthorizedException, subMatch
 import { raiseIfUnauthorized, raiseIfUnauthorizedServiceAuth, AuthToken } from "./rbac_helper.ts";
 import { ProvisioningData, validate as provisioningValidate } from "./provisioning.ts";
 import { createLogger, runWithLogContext, setLogContext, ON_BEHALF_OF_HEADER } from "../utils/log.ts";
+import { runContainer } from "./container.ts";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -41,6 +44,8 @@ const OPERATOR_HANDLE = Deno.env.get("OPERATOR_HANDLE") ?? "";
 // (startup, shutdown). Per-request lines override it with the caller DID.
 const SELF_DID = Deno.env.get("QEMU_DID") ?? OPERATOR_HANDLE;
 const VM_IMAGE = Deno.env.get("VM_IMAGE") ?? "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner";
+const CONTAINER_MODE = Deno.env.get("CONTAINER_MODE") === "true";
+const CONTAINER_IMAGE = Deno.env.get("CONTAINER_IMAGE") ?? "container-runner-ubuntu:latest";
 const CACHE_DIR = `${Deno.env.get("HOME")}/.cache/simple-qemu`;
 
 // ---------------------------------------------------------------------------
@@ -149,6 +154,30 @@ async function pollSsh(host: string, timeoutMs = 300_000): Promise<boolean> {
 async function spawnVM(droplet: Droplet, userData: string): Promise<void> {
   const containerName = `droplet-${droplet.id}`;
 
+  if (CONTAINER_MODE) {
+    // Container path — cloud-init + sshd directly in Docker (no KVM needed)
+    try {
+      const distro = droplet.image?.slug ?? "ubuntu";
+      const info = await runContainer(userData, {
+        distro: distro as "fedora" | "ubuntu",
+        containerName,
+        imageTag: CONTAINER_IMAGE,
+      });
+      droplet.networks.v4 = [{ ip_address: info.ip, type: "public" }];
+      (droplet as unknown as Record<string, unknown>)["containerName"] = info.containerName;
+      droplet.status = "active";
+      log("info", "container droplet ready", {
+        droplet_id: droplet.id,
+        ip: info.ip,
+      });
+    } catch (err) {
+      droplet.status = "off";
+      log("error", "container spawn failed", { droplet_id: droplet.id, error: String(err) });
+    }
+    return;
+  }
+
+  // QEMU path — full VM with kernel/initrd/squashfs overlay
   await Deno.mkdir(CACHE_DIR, { recursive: true });
   const udFile = await Deno.makeTempFile({ dir: CACHE_DIR, prefix: "userdata-", suffix: ".yaml" });
   await Deno.writeTextFile(udFile, userData);
