@@ -5,6 +5,7 @@
     "jsr:@denosaurs/plug@1": "1.1.0",
     "jsr:@hono/hono@*": "4.12.23",
     "jsr:@hono/hono@^4.12.23": "4.12.23",
+    "jsr:@std/assert@*": "1.0.19",
     "jsr:@std/assert@0.217": "0.217.0",
     "jsr:@std/assert@^1.0.19": "1.0.19",
     "jsr:@std/cli@*": "1.0.29",
@@ -4044,6 +4045,14 @@
           "npm:multiformats@13"
         ]
       },
+      "lib/hono-factory-atproto-repo": {
+        "dependencies": [
+          "jsr:@hono/hono@*",
+          "jsr:@std/assert@*",
+          "npm:@atproto/crypto@*",
+          "npm:@atproto/identity@*"
+        ]
+      },
       "lib/hono-factory-compute": {
         "dependencies": [
           "npm:hono@^4.12.23"
@@ -4149,6 +4158,9 @@
         ]
       },
       "web-client-example": {
+        "dependencies": [
+          "npm:@atproto/crypto@*"
+        ],
         "packageJson": {
           "dependencies": [
             "npm:@atproto/api@~0.20.14",

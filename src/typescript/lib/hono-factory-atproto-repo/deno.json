@@ -1,0 +1,18 @@
+{
+  "name": "@publicdomainrelay/hono-factory-atproto-repo",
+  "version": "0.0.0",
+  "exports": "./mod.ts",
+  "tasks": {
+    "check": "deno check mod.ts",
+    "test": "deno test test/",
+    "fmt": "deno fmt"
+  },
+  "imports": {
+    "@hono/hono": "jsr:@hono/hono",
+    "@atproto/crypto": "npm:@atproto/crypto",
+    "@atproto/identity": "npm:@atproto/identity",
+    "@std/assert": "jsr:@std/assert",
+    "@publicdomainrelay/event-bus": "../event-bus/mod.ts",
+    "@publicdomainrelay/xrpc-relay": "../xrpc-relay/mod.ts"
+  }
+}

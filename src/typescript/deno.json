@@ -17,6 +17,7 @@
     "./lib/xrpc-relay",
     "./lib/hono-factory-xrpc-relay",
     "./lib/hono-factory-xrpc-subscriber",
+    "./lib/hono-factory-atproto-repo",
     "./utils/client-xrpc-caller",
     "./compute-spa",
     "./web-client-example",

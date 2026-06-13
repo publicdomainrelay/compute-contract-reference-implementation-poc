@@ -1,0 +1,9 @@
+{
+  "tasks": {
+    "server": "deno run -A --watch server.ts"
+  },
+  "imports": {
+    "@atproto/crypto": "npm:@atproto/crypto",
+    "@publicdomainrelay/hono-factory-atproto-repo": "../lib/hono-factory-atproto-repo/mod.ts"
+  }
+}
