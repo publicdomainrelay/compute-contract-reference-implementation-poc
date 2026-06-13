@@ -10,7 +10,7 @@ set -euo pipefail
 PROD_ROOT="${HOME}/prod-compute-contract-reference-implementation-poc"
 
 do_it() {
-  if [ ! -d "${PROD_ROOD}" ]; then
+  if [ ! -d "${PROD_ROOT}" ]; then
     git clone https://github.com/publicdomainrelay/compute-contract-reference-implementation-poc "${PROD_ROOT}"
   fi
 
@@ -46,6 +46,7 @@ do_it() {
     unit="${entry%%:*}"
     echo "  $unit"
     sudo systemctl enable --now "$unit"
+    sudo systemctl restart "$unit"
   done
 
   echo "==> status"
