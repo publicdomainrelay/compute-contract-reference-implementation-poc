@@ -5,7 +5,7 @@
 
 import { encode as cborEncode } from "@ipld/dag-cbor";
 import { base32 } from "multiformats/bases/base32";
-import type { PlcOp, PlcService } from "./types.ts";
+import type { Operation, PlcOp, PlcService } from "./types.ts";
 
 function toBase64url(bytes: Uint8Array): string {
   let bin = "";
@@ -14,7 +14,7 @@ function toBase64url(bytes: Uint8Array): string {
 }
 
 async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
-  const buf = await crypto.subtle.digest("SHA-256", bytes);
+  const buf = await crypto.subtle.digest("SHA-256", bytes.buffer as ArrayBuffer);
   return new Uint8Array(buf);
 }
 
@@ -35,7 +35,7 @@ export interface GenesisResult {
   /** The derived did:plc identifier. */
   did: string;
   /** The signed genesis operation — ready to POST to the PLC directory. */
-  op: PlcOp;
+  op: Operation;
 }
 
 /**
@@ -65,7 +65,7 @@ export async function createGenesisOp(opts: GenesisOptions): Promise<GenesisResu
   const sigBytes = await opts.sign(unsignedBytes);
   const sig = toBase64url(sigBytes);
 
-  const op: PlcOp = { ...unsigned, sig };
+  const op = { ...unsigned, sig } as Operation;
 
   const signedBytes = cborEncode(op);
   const hash = await sha256(signedBytes);

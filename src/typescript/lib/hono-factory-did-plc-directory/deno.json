@@ -1,0 +1,11 @@
+{
+  "name": "@publicdomainrelay/hono-factory-did-plc-directory",
+  "version": "0.0.0",
+  "exports": "./mod.ts",
+  "imports": {
+    "@hono/hono": "jsr:@hono/hono",
+    "@publicdomainrelay/did-plc": "../did-plc/mod.ts",
+    "@ipld/dag-cbor": "npm:@ipld/dag-cbor",
+    "multiformats": "npm:multiformats"
+  }
+}

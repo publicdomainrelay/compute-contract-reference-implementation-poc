@@ -1,0 +1,9 @@
+{
+  "name": "@publicdomainrelay/did-plc-directory",
+  "version": "0.0.0",
+  "exports": "./main.ts",
+  "imports": {
+    "@hono/hono": "jsr:@hono/hono",
+    "@publicdomainrelay/hono-factory-did-plc-directory": "../lib/hono-factory-did-plc-directory/mod.ts"
+  }
+}

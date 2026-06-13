@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "description": "Node devDeps for @hey-api/openapi-ts codegen. Run `npm install && npm run codegen` to regenerate.",
+  "scripts": {
+    "fixup": "deno run --allow-net --allow-read --allow-write --allow-env fixup-openapi.ts",
+    "codegen": "npm run fixup && openapi-ts"
+  },
+  "devDependencies": {
+    "@hey-api/openapi-ts": "0.98.2"
+  }
+}

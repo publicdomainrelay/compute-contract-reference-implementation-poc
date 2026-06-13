@@ -29,6 +29,8 @@ export { encode as cborEncode, decode as cborDecode, cidLink, isCidLink, cidFrom
 
 // ── crypto ────────────────────────────────────────────────────────
 export { signerFromKeypair, signerFromPrivateKeyHex, createVerifier, verifierFromKeypair } from "./crypto/signer.ts";
+export { signServiceAuth } from "./crypto/service-auth.ts";
+export type { ServiceAuthOptions } from "./crypto/service-auth.ts";
 
 // ── storage ───────────────────────────────────────────────────────
 export { MemoryStorage } from "./storage/memory.ts";

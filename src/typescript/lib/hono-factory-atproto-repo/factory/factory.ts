@@ -18,6 +18,7 @@ import { mountRepoRoutes } from "../handlers/repo.ts";
 import { mountSyncRoutes } from "../handlers/sync.ts";
 import { FirehoseSequencer } from "../firehose/sequencer.ts";
 import { createSubscribeHandler } from "../firehose/subscribe.ts";
+import { signServiceAuth } from "../crypto/service-auth.ts";
 import type { SubscribeHandler } from "@publicdomainrelay/xrpc-relay";
 
 // ── types ─────────────────────────────────────────────────────────
@@ -103,6 +104,23 @@ export function createRepoFactory(opts: RepoFactoryOptions): RepoFactory {
   // ── well-known ─────────────────────────────────────────────────
   app.get("/.well-known/atproto-did", (c) => {
     return c.text(did);
+  });
+
+  // ── getServiceAuth ─────────────────────────────────────────────
+  // Mint an inter-service auth JWT signed by this repo's signing key.
+  app.get("/xrpc/com.atproto.server.getServiceAuth", async (c) => {
+    const aud = c.req.query("aud");
+    if (!aud) {
+      throw new XrpcError("InvalidRequest", 'missing required "aud" param');
+    }
+    const lxm = c.req.query("lxm") ?? undefined;
+    const expQ = c.req.query("exp");
+    const token = await signServiceAuth(signer, {
+      aud,
+      lxm,
+      expiresInSec: expQ ? Math.max(0, parseInt(expQ) - Math.floor(Date.now() / 1000)) : undefined,
+    });
+    return c.json({ token });
   });
 
   // ── wrap repo API to pipe writes into the sequencer ────────────

@@ -25,6 +25,8 @@
     "vite": "^8.0.12"
   },
   "dependencies": {
-    "hono": "^4.12.25"
+    "@ipld/dag-cbor": "^9.2.7",
+    "hono": "^4.12.25",
+    "multiformats": "^13.4.2"
   }
 }
