@@ -265,9 +265,11 @@ export function createPackageRegistryFactory(
           }
         }
 
-        // Fallback: latest semver tag
+        // Fallback: latest semver tag (exclude branch pseudo-semver 0.1.0-*)
         if (!pkgData) {
-          version = [...pkg.versions].reverse().find((v) => SEMVER_RE.test(v)) ?? null;
+          version = [...pkg.versions].reverse().find((v) =>
+            SEMVER_RE.test(v) && !v.startsWith("0.1.0-")
+          ) ?? null;
           if (version) {
             pkgData = await store.get(pkg.name, version);
           }

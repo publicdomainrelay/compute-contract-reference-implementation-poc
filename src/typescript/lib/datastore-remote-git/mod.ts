@@ -473,10 +473,10 @@ export function createRemoteGitStore(opts: RemoteGitStoreOptions): PackageStore 
 
     async get(name: string, version: string): Promise<PackageVersion | null> {
       const repoDir = await ensureClone();
-      const tags = await listTags(repoDir);
+      let tags = await listTags(repoDir);
 
       // Try semver tag first
-      const tag = tags.find((t) =>
+      let tag = tags.find((t) =>
         tagToVersion(t) === version || t === version
       );
 
@@ -484,13 +484,32 @@ export function createRemoteGitStore(opts: RemoteGitStoreOptions): PackageStore 
 
       if (tag) {
         ref = tag;
+      } else if (SEMVER_RE.test(version)) {
+        // Version looks like a semver — could be a real tag we don't have
+        // cached yet, or pseudo-semver (0.1.0-main, 0.0.0-main). Fetch
+        // tags from remote first, then fall back to branch resolution.
+        try { await git(["fetch", "--tags"], repoDir); } catch { /* ok */ }
+        tags = await listTags(repoDir);
+        tag = tags.find((t) =>
+          tagToVersion(t) === version || t === version
+        );
+        if (tag) {
+          // Invalidate discovery cache for this tag so we read fresh files
+          discoveryCache.delete(tag);
+          ref = tag;
+        } else {
+          // Still not a tag — check branch pseudo-semver (0.1.0-main etc.)
+          const pseudoMatch = version.match(/^0\.[01]\.0-(.+)$/);
+          if (pseudoMatch) {
+            ref = await resolveRef(repoDir, `$${pseudoMatch[1]}`);
+          }
+        }
       } else {
-        // Detect pseudo-semver: 0.1.0-<branch> → resolve branch
-        const pseudoMatch = version.match(/^0\.0\.0-(.+)$/);
+        // Non-semver version — detect pseudo-semver or resolve as branch/commit
+        const pseudoMatch = version.match(/^0\.[01]\.0-(.+)$/);
         if (pseudoMatch) {
           ref = await resolveRef(repoDir, `$${pseudoMatch[1]}`);
         } else {
-          // Not a semver tag — try resolving as branch or commit SHA
           ref = await resolveRef(repoDir, version);
         }
       }
