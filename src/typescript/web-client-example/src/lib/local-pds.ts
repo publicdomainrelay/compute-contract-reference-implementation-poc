@@ -34,7 +34,11 @@ const group = (msg: string) => console.group(`${TAG} ${msg}`, STYLE);
 // PLC directory: local ./did-plc-directory by default. Point at the public
 // directory (https://plc.directory) or any custom host via env.
 const PLC_DIRECTORY_URL =
-  import.meta.env.VITE_PLC_DIRECTORY_URL ?? 'http://localhost:2583';
+  import.meta.env.VITE_PLC_DIRECTORY_URL ?? 'https://plc.directory';
+
+// Dispatcher host — override at build time with VITE_DISPATCHER_HOST.
+const DISPATCHER_HOST =
+  import.meta.env.VITE_DISPATCHER_HOST ?? 'xrpc.fedproxy.com';
 
 export interface LocalPds {
   did: string;
@@ -65,6 +69,12 @@ export async function startLocalPds(): Promise<LocalPds> {
   const { did, op } = await createGenesisOp({
     rotationKeys: [signingKeyDid],
     verificationMethods: { atproto: signingKeyDid },
+    services: {
+      atproto_pds: {
+        type: "AtprotoPersonalDataServer",
+        endpoint: `https://${signingKeyDid.replace(/:/g, "-")}.${DISPATCHER_HOST}`,
+      },
+    },
     sign: (bytes) => keypair.sign(bytes),
   });
   log('derived did:plc:', did);

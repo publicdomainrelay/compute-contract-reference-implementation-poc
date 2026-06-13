@@ -1,5 +1,4 @@
 import { Secp256k1Keypair } from '@atproto/crypto';
-import { Agent, CredentialSession } from '@atproto/api';
 import { Hono, type Context } from 'hono';
 import { runSubscriber, type SubscriberController } from '../../../lib/xrpc-relay/subscriber.ts';
 import { SUBSCRIBE_NSID, GET_NONCE_NSID } from '../../../lib/xrpc-relay/types.ts';
@@ -9,7 +8,7 @@ import { EventBus } from '../../../lib/event-bus/mod.ts';
 const KEYPAIR_KEY = 'relay-demo:keypair';
 // Defaults to production; override at dev/build time with VITE_DISPATCHER_HOST
 // (e.g. xrpc-test.fedproxy.com).
-const DISPATCHER_HOST = import.meta.env.VITE_DISPATCHER_HOST ?? 'xrpc.fedproxy.com';
+export const DISPATCHER_HOST = import.meta.env.VITE_DISPATCHER_HOST ?? 'xrpc.fedproxy.com';
 
 export type Status = 'disconnected' | 'connecting' | 'connected' | 'error';
 
@@ -123,7 +122,6 @@ export interface RelaySubscriberCallbacks {
 export class RelaySubscriber {
   #callbacks: RelaySubscriberCallbacks;
   #keypair: Secp256k1Keypair | null = null;
-  #agent: Agent | null = null;
   #ctrl: SubscriberController | null = null;
 
   constructor(callbacks: RelaySubscriberCallbacks) {
@@ -153,34 +151,16 @@ export class RelaySubscriber {
     return kp;
   }
 
-  // ── atproto login + service auth ────────────────────────────────
-
-  async #login(handle: string, password: string): Promise<void> {
-    const pdsSession = new CredentialSession(new URL('https://bsky.social'));
-    await pdsSession.login({ identifier: handle, password });
-    this.#agent = new Agent(pdsSession);
-    this.#log('info', `logged in as ${pdsSession.did}`);
-  }
-
-  #serviceAuthToken = async (lxm: string): Promise<string> => {
-    if (!this.#agent) throw new Error('not logged in');
-    const res = await this.#agent.com.atproto.server.getServiceAuth({
-      aud: `did:web:${DISPATCHER_HOST}`,
-      lxm,
-    });
-    return res.data.token;
-  };
-
   // ── connect ─────────────────────────────────────────────────────
 
-  async connect(handle: string, password: string): Promise<void> {
+  /** @param getServiceAuth — `(lxm: string) => Promise<string>` from the local PDS */
+  async connect(getServiceAuth: (lxm: string) => Promise<string>): Promise<void> {
     this.#callbacks.onStatus('connecting');
     this.#log('info', 'starting relay subscriber');
 
     try {
       this.#keypair = await this.#loadOrGenerateKeypair();
       this.#log('info', `keypair ready: ${this.#keypair.did()}`);
-      await this.#login(handle, password);
     } catch (err) {
       this.#callbacks.onStatus('error');
       this.#log('error', `init failed: ${err}`);
@@ -192,7 +172,7 @@ export class RelaySubscriber {
     this.#ctrl = runSubscriber({
       label: 'relay-demo',
       keypair: this.#keypair,
-      getServiceAuthToken: this.#serviceAuthToken,
+      getServiceAuthToken: getServiceAuth,
       dispatcherHost: DISPATCHER_HOST,
       handleRequest: factory.handleRequest,
       onStatus: (s) => this.#callbacks.onStatus(s),

@@ -1,14 +1,16 @@
 <script lang="ts">
-  import { RelaySubscriber, type Status, type LogEvent, type SubscriptionInfo } from './lib/relay-subscriber.ts';
+  import { onMount } from 'svelte';
+  import { RelaySubscriber, DISPATCHER_HOST, type Status, type LogEvent, type SubscriptionInfo } from './lib/relay-subscriber.ts';
+  import { startLocalPds, type LocalPds } from './lib/local-pds.ts';
 
-  let handle = $state('');
-  let password = $state('');
   let status = $state<Status>('disconnected');
   let logs = $state<LogEvent[]>([]);
   let subscriptions = $state<SubscriptionInfo[]>([]);
   let subscriber: RelaySubscriber | null = $state(null);
   let logContainer = $state<HTMLDivElement | null>(null);
   let autoScroll = $state(true);
+  let pds: LocalPds | null = $state(null);
+  let bootError = $state('');
 
   const MAX_LOGS = 200;
 
@@ -20,8 +22,21 @@
   }
 
   async function connect() {
-    if (!handle || !password) return;
-    disconnect();
+    if (subscriber) return;
+    bootError = '';
+    status = 'connecting';
+
+    try {
+      // Boot the in-browser PDS with did:plc, then wire its service-auth token
+      // provider into the relay subscriber.
+      if (!pds) {
+        pds = await startLocalPds();
+      }
+    } catch (err) {
+      bootError = `PDS boot failed: ${err}`;
+      status = 'error';
+      return;
+    }
 
     subscriber = new RelaySubscriber({
       onStatus(s) { status = s; },
@@ -36,7 +51,7 @@
       },
     });
 
-    await subscriber.connect(handle, password);
+    await subscriber.connect((lxm) => pds!.getServiceAuth(`did:web:${DISPATCHER_HOST}`, lxm));
   }
 
   function disconnect() {
@@ -45,6 +60,11 @@
     status = 'disconnected';
     subscriptions = [];
   }
+
+  onMount(() => {
+    connect();
+    return () => disconnect();
+  });
 
   function statusLabel(s: Status): string {
     switch (s) {
@@ -81,36 +101,23 @@
 <div class="app">
   <header>
     <h1>relay subscriber</h1>
-    <p class="subhead">demo — subscribe to WebSocket events through atproto XRPC relay</p>
+    <p class="subhead">demo — in-browser PDS + WebSocket relay subscription</p>
   </header>
 
   <section class="connect-panel">
-    <div class="row">
-      <input
-        type="text"
-        placeholder="handle (e.g. alice.bsky.social)"
-        bind:value={handle}
-        disabled={status === 'connecting' || status === 'connected'}
-      />
-      <input
-        type="password"
-        placeholder="app password"
-        bind:value={password}
-        disabled={status === 'connecting' || status === 'connected'}
-      />
-      {#if status === 'connected'}
-        <button onclick={disconnect}>disconnect</button>
-      {:else}
-        <button onclick={connect} disabled={!handle || !password}>connect</button>
-      {/if}
-    </div>
     <div class="status-bar">
       <span class={`status-dot ${statusClass(status)}`}></span>
       <span>{statusLabel(status)}</span>
+      {#if pds}
+        <code class="did-badge">{pds.did}</code>
+      {/if}
       {#if subscriber?.subdomain}
         <code class="subdomain-badge">{subscriber.subdomain}</code>
       {/if}
     </div>
+    {#if bootError}
+      <div class="boot-error">{bootError}</div>
+    {/if}
   </section>
 
   <section class="body-panels">
@@ -154,7 +161,7 @@
           </div>
         {/each}
         {#if logs.length === 0}
-          <p class="empty">disconnected. log in above to begin.</p>
+          <p class="empty">booting in-browser PDS on page load…</p>
         {/if}
       </div>
     </div>
@@ -196,16 +203,6 @@
     gap: 8px;
     flex-wrap: wrap;
   }
-  .row input {
-    flex: 1;
-    min-width: 180px;
-    padding: 8px 12px;
-    border: 1px solid var(--border, #ccc);
-    border-radius: 4px;
-    font-size: 14px;
-    background: var(--bg, #fff);
-    color: var(--text, #222);
-  }
   .row button {
     padding: 8px 20px;
     background: var(--accent, #6366f1);
@@ -240,11 +237,30 @@
   .status-off { background: #9ca3af; }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
+  .did-badge {
+    font-size: 11px;
+    padding: 2px 6px;
+    background: var(--accent-bg, rgba(99, 102, 241, 0.1));
+    border-radius: 3px;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .subdomain-badge {
     font-size: 11px;
     padding: 2px 6px;
     background: var(--accent-bg, rgba(99, 102, 241, 0.1));
     border-radius: 3px;
+  }
+  .boot-error {
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: ui-monospace, monospace;
   }
 
   .body-panels {

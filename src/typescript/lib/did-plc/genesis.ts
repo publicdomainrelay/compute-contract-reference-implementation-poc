@@ -25,8 +25,17 @@ export interface GenesisOptions {
   verificationMethods?: Record<string, string>;
   /** Aliases (at:// URIs etc). Defaults to empty. */
   alsoKnownAs?: string[];
-  /** Service endpoints. Defaults to empty. */
-  services?: Record<string, PlcService>;
+  /**
+   * Service endpoints. Defaults to empty.
+   *
+   * Pass a function to derive services from the DID (two-pass: first derives
+   * a preliminary DID with empty services, then rebuilds with the result).
+   * The returned DID will differ slightly from the value passed to the
+   * function — the endpoint URL uses a "close enough" preview DID.
+   */
+  services?:
+    | Record<string, PlcService>
+    | ((preliminaryDid: string) => Record<string, PlcService>);
   /** Sign raw bytes with the rotation key; return compact sig bytes. */
   sign: (bytes: Uint8Array) => Promise<Uint8Array>;
 }
@@ -52,6 +61,17 @@ export interface GenesisResult {
  * ```
  */
 export async function createGenesisOp(opts: GenesisOptions): Promise<GenesisResult> {
+  // Two-pass when services is a function: derive a preliminary DID with
+  // empty services, feed it to the callback, then rebuild with the result.
+  if (typeof opts.services === "function") {
+    const servicesFn = opts.services;
+    const { did: preliminaryDid } = await createGenesisOp({
+      ...opts,
+      services: {},
+    });
+    return createGenesisOp({ ...opts, services: servicesFn(preliminaryDid) });
+  }
+
   const unsigned = {
     type: "plc_operation",
     rotationKeys: opts.rotationKeys,
