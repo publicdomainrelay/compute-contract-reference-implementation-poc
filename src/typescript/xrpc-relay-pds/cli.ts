@@ -113,7 +113,7 @@ async function resumeConsole() {
 // ═══════════════════════════════════════════════════════════════════════
 
 const vmName = (() => { const i = Deno.args.indexOf("--vm-name"); return i >= 0 && Deno.args[i + 1] ? Deno.args[i + 1] : `compute-${randomHex8()}`; })();
-const bidWindowSec = (() => { const i = Deno.args.indexOf("--bid-window-sec"); return i >= 0 ? parseInt(Deno.args[i + 1] ?? "30", 10) : 30; })();
+const bidWindowSec = (() => { const i = Deno.args.indexOf("--bid-window-sec"); return i >= 0 ? parseInt(Deno.args[i + 1] ?? "5", 10) : 5; })();
 const noDelete = Deno.args.includes("--no-delete");
 const execProgram = (() => { const i = Deno.args.indexOf("--exec"); return i >= 0 ? Deno.args[i + 1] ?? "bash" : "bash"; })();
 const vmReadyTimeoutSec = (() => { const i = Deno.args.indexOf("--vm-ready-timeout-sec"); return i >= 0 ? parseInt(Deno.args[i + 1] ?? "300", 10) : 300; })();
