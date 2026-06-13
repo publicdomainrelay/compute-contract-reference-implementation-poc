@@ -93,6 +93,7 @@ interface PackageMeta {
 async function discoverPackages(
   repoDir: string,
   tag: string,
+  defaultOwner?: string,
 ): Promise<Map<string, PackageMeta>> {
   const pkgs = new Map<string, PackageMeta>();
 
@@ -119,11 +120,17 @@ async function discoverPackages(
       continue; // invalid JSON, skip
     }
 
-    const name = typeof parsed.name === "string" ? parsed.name : undefined;
-    if (!name) continue; // no package name, skip
-
     // Subdirectory is the directory containing deno.json
     const subdir = denoPath.replace(/\/?deno\.jsonc?$/, "");
+
+    // Derive package name: prefer explicit "name" field, else fall back to
+    // @<repo-owner>/<last-dir-component> so packages without name fields
+    // are still discoverable at tagged versions.
+    const explicitName = typeof parsed.name === "string" ? parsed.name : undefined;
+    const dirName = subdir.split("/").pop() || subdir;
+    const fallbackPkgName = defaultOwner ? `@${defaultOwner}/${dirName}` : undefined;
+    const name = explicitName ?? fallbackPkgName;
+    if (!name) continue; // no name and no fallback owner
 
     // Ensure exports is a string or record
     let exports: string | Record<string, string> | undefined;
@@ -133,12 +140,19 @@ async function discoverPackages(
       exports = parsed.exports as Record<string, string>;
     }
 
+    // Extract imports map (for npm/jsr passthrough resolution)
+    let imports: Record<string, string> | undefined;
+    if (parsed.imports && typeof parsed.imports === "object") {
+      imports = parsed.imports as Record<string, string>;
+    }
+
     pkgs.set(name, {
       subdir,
       denoJson: {
         name,
         version: typeof parsed.version === "string" ? parsed.version : undefined,
         exports,
+        imports,
         description: typeof parsed.description === "string"
           ? parsed.description
           : undefined,
@@ -162,6 +176,7 @@ export function createRemoteGitStore(opts: RemoteGitStoreOptions): PackageStore 
   const { url } = opts;
   const cacheDir = opts.cacheDir ?? Deno.makeTempDirSync({ prefix: "pkg-git-" });
   const fallbackName = derivePackageName(url);
+  const defaultOwner = fallbackName.replace(/^@/, "").split("/")[0];
 
   let initialized = false;
   // Cache: tag -> Map<packageName, PackageMeta>
@@ -205,14 +220,24 @@ export function createRemoteGitStore(opts: RemoteGitStoreOptions): PackageStore 
     );
   }
 
-  /** Get or populate discovery cache for a tag. */
+  /** List branch names from the bare clone (local branches, since bare clones
+   *  don't have remote-tracking refs by default). */
+  async function listBranches(repoDir: string): Promise<string[]> {
+    const out = await git(["branch"], repoDir);
+    return out.trim().split("\n").filter(Boolean).map((b) =>
+      b.trim().replace(/^\*?\s*/, "")
+    ).filter((b) => b && b !== "HEAD" && !b.includes(" -> "));
+  }
+
+  /** Get or populate discovery cache for a tag or branch. */
   async function getDiscovery(
     repoDir: string,
     tag: string,
+    defaultOwner?: string,
   ): Promise<Map<string, PackageMeta>> {
     const cached = discoveryCache.get(tag);
     if (cached) return cached;
-    const pkgs = await discoverPackages(repoDir, tag);
+    const pkgs = await discoverPackages(repoDir, tag, defaultOwner);
     discoveryCache.set(tag, pkgs);
     return pkgs;
   }
@@ -223,7 +248,7 @@ export function createRemoteGitStore(opts: RemoteGitStoreOptions): PackageStore 
     tag: string,
     packageName: string,
   ): Promise<PackageMeta | null> {
-    const pkgs = await getDiscovery(repoDir, tag);
+    const pkgs = await getDiscovery(repoDir, tag, defaultOwner);
     const found = pkgs.get(packageName);
     if (found) return found;
 
@@ -269,7 +294,13 @@ export function createRemoteGitStore(opts: RemoteGitStoreOptions): PackageStore 
       }
     }
 
-    // Branch name: always fetch latest from origin, then verify
+    // Branch name: try local first, then fetch from origin
+    try {
+      await git(["rev-parse", "--verify", `${ref}^{commit}`], repoDir);
+      return ref; // branch already exists locally
+    } catch {
+      // Not local — try fetching from origin
+    }
     try {
       await git(
         ["fetch", "origin", `refs/heads/${ref}:refs/heads/${ref}`],
@@ -278,7 +309,7 @@ export function createRemoteGitStore(opts: RemoteGitStoreOptions): PackageStore 
       await git(["rev-parse", "--verify", `${ref}^{commit}`], repoDir);
       return ref;
     } catch {
-      return null; // branch doesn't exist on remote
+      return null; // branch doesn't exist
     }
   }
 
@@ -355,13 +386,15 @@ export function createRemoteGitStore(opts: RemoteGitStoreOptions): PackageStore 
     async list(): Promise<PackageEntry[]> {
       const repoDir = await ensureClone();
       const tags = await listTags(repoDir);
+      const branches = await listBranches(repoDir);
 
-      // Accumulate versions per package across all tags
+      // Accumulate versions per package across all tags and branches
       const pkgVersions = new Map<string, { versions: string[]; description?: string }>();
 
+      // Scan semver tags
       for (const tag of tags) {
         const version = tagToVersion(tag);
-        const pkgs = await getDiscovery(repoDir, tag);
+        const pkgs = await getDiscovery(repoDir, tag, defaultOwner);
 
         if (pkgs.size === 0) {
           // Fallback: whole repo = one package
@@ -376,6 +409,49 @@ export function createRemoteGitStore(opts: RemoteGitStoreOptions): PackageStore 
             const existing = pkgVersions.get(name);
             if (existing) {
               existing.versions.push(version);
+              existing.description = existing.description ??
+                meta.denoJson.description;
+            } else {
+              pkgVersions.set(name, {
+                versions: [version],
+                description: meta.denoJson.description,
+              });
+            }
+          }
+        }
+      }
+
+      // Scan branches: add packages using pseudo-semver 0.1.0-<branch>
+      // Only include canonical development branches (main, master) and
+      // branches whose names are already valid semver pre-release identifiers.
+      const DEV_BRANCH_RE = /^(main|master)$/;
+      const SAFE_BRANCH_RE = /^[0-9A-Za-z-]+$/;
+      for (const branch of branches) {
+        if (!DEV_BRANCH_RE.test(branch) && !SAFE_BRANCH_RE.test(branch)) continue;
+        const version = `0.1.0-${branch}`;
+        let pkgs: Map<string, PackageMeta>;
+        try {
+          pkgs = await getDiscovery(repoDir, branch, defaultOwner);
+        } catch {
+          continue;
+        }
+
+        if (pkgs.size === 0) {
+          const existing = pkgVersions.get(fallbackName);
+          if (existing) {
+            if (!existing.versions.includes(version)) {
+              existing.versions.push(version);
+            }
+          } else {
+            pkgVersions.set(fallbackName, { versions: [version] });
+          }
+        } else {
+          for (const [name, meta] of pkgs) {
+            const existing = pkgVersions.get(name);
+            if (existing) {
+              if (!existing.versions.includes(version)) {
+                existing.versions.push(version);
+              }
               existing.description = existing.description ??
                 meta.denoJson.description;
             } else {
@@ -409,8 +485,14 @@ export function createRemoteGitStore(opts: RemoteGitStoreOptions): PackageStore 
       if (tag) {
         ref = tag;
       } else {
-        // Not a semver tag — try resolving as branch or commit SHA
-        ref = await resolveRef(repoDir, version);
+        // Detect pseudo-semver: 0.1.0-<branch> → resolve branch
+        const pseudoMatch = version.match(/^0\.0\.0-(.+)$/);
+        if (pseudoMatch) {
+          ref = await resolveRef(repoDir, `$${pseudoMatch[1]}`);
+        } else {
+          // Not a semver tag — try resolving as branch or commit SHA
+          ref = await resolveRef(repoDir, version);
+        }
       }
 
       if (!ref) return null;

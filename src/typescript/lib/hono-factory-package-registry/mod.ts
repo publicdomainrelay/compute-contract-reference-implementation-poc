@@ -237,6 +237,135 @@ export function createPackageRegistryFactory(
     }
   }
 
+  // ── import map: resolve all bare specifiers to this registry ─────
+
+  /** Semver-like version pattern. */
+  const SEMVER_RE = /^\d+\.\d+\.\d+/;
+
+  app.get("/import-map.json", async (c) => {
+    const imports: Record<string, string> = {};
+    const host = new URL(c.req.url).host;
+    const base = `http://${host}`;
+
+    try {
+      const packages = await store.list();
+      for (const pkg of packages) {
+        // Prefer 0.1.0-main (branch pseudo-semver) since it has the most
+        // up-to-date deno.json with proper jsr: imports. Fall back to latest
+        // semver tag if main branch not available.
+        let version: string | null = null;
+        let pkgData: { name: string; version: string; files: Record<string, string>; metadata?: Record<string, unknown> } | null = null;
+
+        // Try main branch pseudo-semver first
+        for (const branchVer of ["0.1.0-main", "0.1.0-master"]) {
+          if (pkg.versions.includes(branchVer)) {
+            version = branchVer;
+            pkgData = await store.get(pkg.name, version);
+            if (pkgData) break;
+          }
+        }
+
+        // Fallback: latest semver tag
+        if (!pkgData) {
+          version = [...pkg.versions].reverse().find((v) => SEMVER_RE.test(v)) ?? null;
+          if (version) {
+            pkgData = await store.get(pkg.name, version);
+          }
+        }
+
+        // Last resort: try direct branch refs
+        if (!pkgData) {
+          for (const branch of ["main", "master"]) {
+            version = `$${branch}`;
+            pkgData = await store.get(pkg.name, version);
+            if (pkgData) break;
+          }
+        }
+
+        if (!pkgData) continue;
+
+        // Determine entrypoint
+        const exports = pkgData.metadata?.exports as Record<string, string> | undefined;
+        const entry = exports?.["."] ?? autoDetectEntry(pkgData.files);
+
+        // Map bare specifier to registry URL
+        imports[pkg.name] = `${base}/@${pkg.name.replace(/^@/, "")}@${version}/${entry.replace(/^\.\//, "")}`;
+        // Also map with trailing / for subpath imports
+        imports[`${pkg.name}/`] = `${base}/@${pkg.name.replace(/^@/, "")}@${version}/`;
+
+        // Collect npm/jsr passthroughs from deno.json imports.
+        // For jsr: targets that reference packages in this registry,
+        // resolve to local HTTP URLs instead of jsr.io.
+        const denoImports = pkgData.metadata?.denoJson?.imports as Record<string, string> | undefined;
+        if (denoImports) {
+          for (const [specifier, target] of Object.entries(denoImports)) {
+            if (target.startsWith("npm:")) {
+              if (!imports[specifier]) imports[specifier] = target;
+              // Subpath mapping with clean version: pkg/ → npm:pkg@version/
+              // e.g., npm:multiformats@^13.3.0 → npm:multiformats@13.3.0/path
+              const npmClean = target.slice(4); // "multiformats@^13.3.0"
+              if (!imports[`${specifier}/`]) {
+                imports[`${specifier}/`] = `npm:${npmClean}/`;
+              }
+              // Scoped prefix: @scope/ → npm:@scope/
+              const scopeMatch = specifier.match(/^(@[^/]+\/)/);
+              if (scopeMatch && !imports[scopeMatch[1]]) {
+                imports[scopeMatch[1]] = `npm:${scopeMatch[1]}`;
+              }
+            } else if (target.startsWith("jsr:")) {
+              // Check if this JSR package exists in our registry
+              const jsrSpec = target.slice(4); // remove "jsr:"
+              const jsrMatch = jsrSpec.match(/^(@[^/]+\/[^/@]+)(?:@[^/]+)?(?:\/(.*))?$/);
+              if (jsrMatch) {
+                const jsrPkgName = jsrMatch[1];
+                // Try to resolve this package locally
+                let localVersion: string | null = null;
+                const localPkg = packages.find((p) => p.name === jsrPkgName);
+                if (localPkg) {
+                  // Prefer main branch (most up-to-date deno.json), then latest semver
+                  for (const branchVer of ["0.1.0-main", "0.1.0-master"]) {
+                    if (localPkg.versions.includes(branchVer)) {
+                      localVersion = branchVer;
+                      break;
+                    }
+                  }
+                  if (!localVersion) {
+                    localVersion = [...localPkg.versions].reverse().find((v) => SEMVER_RE.test(v)) ?? null;
+                  }
+                }
+                if (localVersion) {
+                  // Map to local registry URL
+                  const subPath = jsrMatch[2] ?? "";
+                  const urlPath = `@${jsrPkgName.replace(/^@/, "")}@${localVersion}/${subPath}`;
+                  if (!imports[specifier]) {
+                    imports[specifier] = `${base}/${urlPath}`;
+                  }
+                  if (!specifier.endsWith("/")) {
+                    const scopeMatch = specifier.match(/^(@[^/]+\/)/);
+                    if (scopeMatch && !imports[scopeMatch[1]]) {
+                      imports[scopeMatch[1]] = `${base}/@${jsrPkgName.replace(/^@/, "")}@${localVersion}/`;
+                    }
+                  }
+                } else {
+                  // Not local — passthrough to jsr.io
+                  if (!imports[specifier]) imports[specifier] = target;
+                  const scopeMatch = specifier.match(/^(@[^/]+\/)/);
+                  if (scopeMatch && !imports[scopeMatch[1]]) {
+                    imports[scopeMatch[1]] = `jsr:${scopeMatch[1]}`;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      log("error", "import-map generation error", { error: String(err) });
+    }
+
+    return c.json({ imports });
+  });
+
   // ── XRPC: resolve by name+version ────────────────────────────────
 
   app.get(`/xrpc/${PACKAGE_REGISTRY_RESOLVE_NSID}`, async (c) => {
@@ -301,14 +430,17 @@ export function createPackageRegistryFactory(
 
       if (!entry) return proxyToJsr(c.req.raw);
 
+      // Filter to only include real semver versions (exclude branch
+      // pseudo-semver like 0.1.0-main which JSR rejects).
+      const jsrVersions = entry.versions.filter((v) => !v.startsWith("0.1.0-"));
+      if (jsrVersions.length === 0) return proxyToJsr(c.req.raw);
+
       const versions: Record<string, Record<string, unknown>> = {};
-      for (const v of entry.versions) {
+      for (const v of jsrVersions) {
         versions[v] = {};
       }
 
-      const latest = entry.versions.length > 0
-        ? entry.versions[entry.versions.length - 1]
-        : "0.0.0";
+      const latest = jsrVersions[jsrVersions.length - 1];
 
       return c.json({ scope, name: pkgName, latest, versions });
     } catch (err) {
@@ -331,14 +463,16 @@ export function createPackageRegistryFactory(
 
       if (!entry) return proxyToJsr(c.req.raw);
 
+      // Filter to only include real semver versions
+      const jsrVersions = entry.versions.filter((v) => !v.startsWith("0.1.0-"));
+      if (jsrVersions.length === 0) return proxyToJsr(c.req.raw);
+
       const versions: Record<string, Record<string, unknown>> = {};
-      for (const v of entry.versions) {
+      for (const v of jsrVersions) {
         versions[v] = {};
       }
 
-      const latest = entry.versions.length > 0
-        ? entry.versions[entry.versions.length - 1]
-        : "0.0.0";
+      const latest = jsrVersions[jsrVersions.length - 1];
 
       return c.json({ name: pkgName, latest, versions });
     } catch (err) {
@@ -366,7 +500,7 @@ export function createPackageRegistryFactory(
     // ── _meta.json: version metadata ───────────────────────────────
     // Match: /@scope/name/<version>_meta.json  or  /name/<version>_meta.json
     const metaVersionMatch = pathname.match(
-      /^\/(?:@([^/]+)\/)?([^/@]+)\/(\d+\.\d+\.\d+[^/_]*)_meta\.json$/,
+      /^\/(?:@([^/]+)\/)?([^/@]+)\/([^/]+)_meta\.json$/,
     );
     if (metaVersionMatch) {
       const [, scope, pkgName, version] = metaVersionMatch;
@@ -406,11 +540,11 @@ export function createPackageRegistryFactory(
         const entry = packages.find((p) => p.name === fqn);
 
         if (entry) {
+          const jsrVersions = entry.versions.filter((v) => !v.startsWith("0.1.0-"));
+          if (jsrVersions.length === 0) return proxyToJsr(c.req.raw);
           const versions: Record<string, Record<string, unknown>> = {};
-          for (const v of entry.versions) versions[v] = {};
-          const latest = entry.versions.length > 0
-            ? entry.versions[entry.versions.length - 1]
-            : "0.0.0";
+          for (const v of jsrVersions) versions[v] = {};
+          const latest = jsrVersions[jsrVersions.length - 1];
           return c.json(
             scope
               ? { scope, name: pkgName, latest, versions }
@@ -445,7 +579,25 @@ export function createPackageRegistryFactory(
           ) ?? "";
       }
 
-      const content = pkg.files[filePath];
+      // Auto-resolve extensionless imports: try common TypeScript/JS extensions
+      const extensions = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".mts", ".cts", "/index.ts", "/index.js", "/mod.ts", "/mod.js"];
+      let resolvedPath: string | null = null;
+      let content: string | undefined;
+
+      if (pkg.files[filePath] !== undefined) {
+        resolvedPath = filePath;
+        content = pkg.files[filePath];
+      } else {
+        for (const ext of extensions) {
+          const candidate = filePath + ext;
+          if (pkg.files[candidate] !== undefined) {
+            resolvedPath = candidate;
+            content = pkg.files[candidate];
+            break;
+          }
+        }
+      }
+
       if (content === undefined) {
         return c.json({
           error: "FileNotFound",
@@ -454,7 +606,7 @@ export function createPackageRegistryFactory(
         }, 404);
       }
 
-      return serveFile(filePath, content);
+      return serveFile(resolvedPath ?? filePath, content);
     } catch (err) {
       log("error", "serve error", { error: String(err) });
       return c.json({ error: "InternalError", message: String(err) }, 500);
