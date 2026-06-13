@@ -98,10 +98,12 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
   Deno.addSignalListener(sig, async () => {
     log("info", `received ${sig}, shutting down`);
     stopRelay();
-    await factory.killAllDroplets();
-    if (sig === "SIGINT") {
-      Deno.exit(0);
+    try {
+      await factory.killAllDroplets();
+    } catch (err) {
+      log("error", "killAllDroplets failed during shutdown", { err: String(err) });
     }
+    Deno.exit(0);
   });
 }
 
