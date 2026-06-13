@@ -690,12 +690,32 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
           const vmResolved = await resolve.resolve({ uri: vmRef.uri, cid: vmRef.cid });
           const vm = vmResolved as Record<string, unknown> | null;
           if (vm) {
+            // Step 3: resolve bid → bidConfig → compute-config record value.
+            // fedproxy-client's oidc plugin requires accept.json to carry
+            // bid_config.value (with url_path); without it it exits fatal.
+            let bidConfigResolved:
+              | { uri: string; cid: string; value: unknown }
+              | null = null;
+            if (bidRef) {
+              try {
+                const bidResolved = await resolve.resolve({ uri: bidRef.uri, cid: bidRef.cid }) as Record<string, unknown> | null;
+                const cfgRef = bidResolved?.bidConfig as { uri: string; cid: string } | undefined;
+                if (cfgRef) {
+                  const cfgValue = await resolve.resolve({ uri: cfgRef.uri, cid: cfgRef.cid });
+                  bidConfigResolved = { uri: cfgRef.uri, cid: cfgRef.cid, value: cfgValue };
+                }
+              } catch (err) {
+                cbLog("warn", "bidder failed to resolve bidConfig", { error: String(err) });
+              }
+            }
+
             // injectAcceptBundle adds contract provenance to the VM's user_data.
             const bundle = {
               $type: "com.publicdomainrelay.temp.market.accept",
               accept: { uri: acceptUri, cid: acceptCid },
               rfp: { uri: rfpRef.uri, cid: rfpRef.cid },
               bid: bidRef ? { uri: bidRef.uri, cid: bidRef.cid } : null,
+              bid_config: bidConfigResolved,
             };
             const vmWithBundle = {
               ...vm,

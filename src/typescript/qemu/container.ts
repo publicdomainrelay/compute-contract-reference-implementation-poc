@@ -72,6 +72,8 @@ export interface ContainerOptions {
   memory?: string;
   imageTag?: string;
   containerName?: string;
+  /** Called as soon as the container IP is known (before SSH poll). */
+  onIp?: (ip: string, containerName: string) => void | Promise<void>;
 }
 
 export interface ContainerInfo {
@@ -194,140 +196,60 @@ async function imageExists(tag: string): Promise<boolean> {
 // Container entrypoint script generation
 // ---------------------------------------------------------------------------
 
-function generateEntrypoint(distro: Distro): string {
-  // No systemd. Cloud-init stages run sequentially, then websocat/fedproxy/sshd.
-  const sshdPath = "/usr/sbin/sshd";
-
+function generateEntrypoint(_distro: Distro): string {
+  // The deno systemctl-shim (mounted at runtime) runs as PID 1.
+  // It generates SSH host keys, starts sshd, runs cloud-init, then monitors.
+  // Cloud-init runcmd calls `systemctl` which is a wrapper that invokes
+  // `deno run -A /usr/local/bin/systemctl-shim.ts <command>`.
   return `#!/bin/bash
 set -e
-echo "[container-entrypoint] Starting cloud-init + services container (${distro})"
+echo "[container-entrypoint] Launching systemctl-shim as PID 1"
 
-# Generate SSH host keys on first boot
-if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
-  echo "[container-entrypoint] Generating SSH host keys..."
-  ssh-keygen -A
+# Create systemctl wrapper so cloud-init runcmd can call it
+if [ -f /usr/local/bin/systemctl-shim.ts ]; then
+  cat > /usr/local/bin/systemctl << 'SHEOF'
+#!/bin/bash
+exec deno run -A /usr/local/bin/systemctl-shim.ts "\$@"
+SHEOF
+  chmod +x /usr/local/bin/systemctl
 fi
 
-# Set up NoCloud seed directory
-SEED_DIR=/var/lib/cloud/seed/nocloud
-mkdir -p "$SEED_DIR"
-
-# Copy user-data from mounted file or use default
-UD_FILE="\${USER_DATA_FILE:-/tmp/user-data}"
-if [ -f "$UD_FILE" ]; then
-  cp "$UD_FILE" "$SEED_DIR/user-data"
-  echo "[container-entrypoint] Using user-data from $UD_FILE"
-else
-  cat > "$SEED_DIR/user-data" << 'UEOF'
-#cloud-config
-users:
-  - name: agent
-    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
-chpasswd:
-  expire: False
-  users:
-  - name: agent
-    password: agent
-    type: text
-ssh_pwauth: true
-UEOF
-  echo "[container-entrypoint] No user-data provided, using default"
-fi
-
-# Minimal meta-data
-cat > "$SEED_DIR/meta-data" << 'MEOF'
-instance-id: container-\$(hostname 2>/dev/null || echo "unknown")
-local-hostname: container
-MEOF
-
-# Run cloud-init in stages (matches systemd unit ordering without systemd)
-echo "[container-entrypoint] Running cloud-init init --local"
-cloud-init init --local || true
-
-echo "[container-entrypoint] Running cloud-init init"
-cloud-init init || true
-
-echo "[container-entrypoint] Running cloud-init modules --mode=config"
-cloud-init modules --mode=config || true
-
-echo "[container-entrypoint] Running cloud-init modules --mode=final"
-cloud-init modules --mode=final || true
-echo "[container-entrypoint] cloud-init complete"
-
-	# Start sshd in foreground (container's main process)
-	echo "[container-entrypoint] Starting sshd on port 22"
-	exec ${sshdPath} -D -p 22
+exec deno run -A /usr/local/bin/systemctl-shim.ts --init
 `;
 }
 
 // ---------------------------------------------------------------------------
-// Dockerfile generation
-// ---------------------------------------------------------------------------
-
-function generateDockerfile(distro: Distro): string {
-  if (distro === "fedora") {
-    return `FROM fedora:latest
-RUN dnf install -y \\
-    cloud-init \\
-    openssh-server \\
-    sudo \\
-    curl \\
-    jq \\
-    util-linux \\
-    rsyslog \\
-    vim \\
-    tmux \\
-    git \\
-    unzip \\
-    python3 \\
-  && dnf clean all
-RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
-COPY systemctl-shim.sh /usr/local/bin/systemctl
-RUN chmod +x /usr/local/bin/systemctl
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-ENTRYPOINT ["/entrypoint.sh"]
-`;
-  } else {
-    return `FROM ubuntu:latest
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y \\
-    cloud-init \\
-    openssh-server \\
-    sudo \\
-    curl \\
-    jq \\
-    util-linux \\
-    rsyslog \\
-    vim \\
-    tmux \\
-    git \\
-    unzip \\
-    ca-certificates \\
-    locales \\
-    python3 \\
-  && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
-COPY systemctl-shim.sh /usr/local/bin/systemctl
-RUN chmod +x /usr/local/bin/systemctl
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-ENTRYPOINT ["/entrypoint.sh"]
-`;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Container image tag helpers
+// Image tag + Dockerfile generation
 // ---------------------------------------------------------------------------
 
 function imageTag(distro: Distro): string {
   return `container-runner-${distro}:latest`;
 }
 
-// ---------------------------------------------------------------------------
-// Build
-// ---------------------------------------------------------------------------
+/**
+ * Dockerfile for the container-runner image. Installs cloud-init + sshd + deno.
+ * The systemctl shim is NOT baked in — it is mounted at runtime (systemctl-shim.ts)
+ * and the entrypoint creates the /usr/local/bin/systemctl wrapper on boot.
+ */
+function generateDockerfile(distro: Distro): string {
+  const base = distro === "fedora"
+    ? `FROM fedora:latest
+RUN dnf install -y \\
+    cloud-init openssh-server sudo curl jq util-linux rsyslog vim tmux git unzip python3 \\
+  && dnf clean all`
+    : `FROM ubuntu:latest
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \\
+    cloud-init openssh-server sudo curl jq util-linux rsyslog vim tmux git unzip ca-certificates locales python3 \\
+  && rm -rf /var/lib/apt/lists/*`;
+
+  return `${base}
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+`;
+}
 
 export async function buildContainerImage(distro: Distro = "ubuntu"): Promise<string> {
   const tag = imageTag(distro);
@@ -343,10 +265,6 @@ export async function buildContainerImage(distro: Distro = "ubuntu"): Promise<st
   // Create ephemeral build context
   const buildDir = await Deno.makeTempDir({ prefix: "container-build-" });
   try {
-    // Copy systemctl shim into build context
-    const shimSrc = new URL("./systemctl-shim.sh", import.meta.url).pathname;
-    await Deno.copyFile(shimSrc, `${buildDir}/systemctl-shim.sh`);
-
     // Write entrypoint.sh
     await Deno.writeTextFile(`${buildDir}/entrypoint.sh`, generateEntrypoint(distro));
     await run("chmod", ["+x", `${buildDir}/entrypoint.sh`]);
@@ -413,10 +331,18 @@ export async function runContainer(
   await Deno.writeTextFile(epFile, entrypointScript);
   await run("chmod", ["+x", epFile]);
 
+  // Mount deno-based systemctl shim (type-checked, handles flags properly).
+  // Replaces the baked-in bash shim; the entrypoint creates a wrapper that
+  // calls this via `deno run -A`.
+  const systemctlShimSrc = new URL("./systemctl-shim.ts", import.meta.url).pathname;
+  const systemctlShimTag = `${CACHE_DIR}/systemctl-shim-${distro}.ts`;
+  // Copy to stable path so Docker can mount it (tempfile paths differ each run)
+  await Deno.copyFile(systemctlShimSrc, systemctlShimTag);
+
   // Clean up any old container with same name
   await new Deno.Command("docker", { args: ["rm", "-f", containerName] }).output().catch(() => {});
 
-  // Run container — entrypoint mounted at runtime overrides baked-in
+  // Run container — entrypoint + systemctl-shim mounted at runtime
   const { code } = await new Deno.Command("docker", {
     args: [
       "run", "-d",
@@ -425,6 +351,7 @@ export async function runContainer(
       "--memory-swap", memory,
       "-v", `${udFile}:/tmp/user-data:ro`,
       "-v", `${epFile}:/entrypoint.sh:ro`,
+      "-v", `${systemctlShimTag}:/usr/local/bin/systemctl-shim.ts:ro`,
       "-e", "USER_DATA_FILE=/tmp/user-data",
       tag,
     ],
@@ -443,6 +370,10 @@ export async function runContainer(
   await new Promise((r) => setTimeout(r, 1_000));
   const ip = await dockerInspectIp(containerName);
   console.log(`==> Container IP: ${ip}`);
+
+  // Notify caller of IP immediately (before SSH poll) so the droplet record
+  // is updated before the provisioning-token prove callback arrives.
+  if (opts.onIp) await opts.onIp(ip, containerName);
 
   // Wait for SSH
   console.log("==> Waiting for SSH...");

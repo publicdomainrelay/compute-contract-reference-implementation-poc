@@ -13,7 +13,6 @@ function log(level: string, msg: string, data?: Record<string, unknown>) {
   console.log(JSON.stringify({ level, msg, ts: new Date().toISOString(), ...data }));
 }
 
-const THIS_ENDPOINT = Deno.env.get("THIS_ENDPOINT") ?? Deno.env.get("ISSUER_URL") ?? "http://localhost:8080";
 
 const DEFAULT_NONCE_LEN = 64;
 const DEFAULT_TTL_SECONDS = 60 * 15;
@@ -42,6 +41,7 @@ export class ProvisioningData {
   static async create(
     teamUuid: string,
     userData: string | null,
+    issuerUrl: string,
     opts: { ttl?: number; nonceLen?: number } = {},
   ): Promise<ProvisioningData> {
     if (userData === null) userData = "";
@@ -74,7 +74,7 @@ export class ProvisioningData {
 set -euo pipefail
 set -x
 TEAM_UUID="${teamUuid}"
-THIS_ENDPOINT="${THIS_ENDPOINT}"
+THIS_ENDPOINT="${issuerUrl}"
 PROVISIONING_TOKEN="${token.asString}"
 PORT=22
 SIG_JSON="$(echo -n "\${PROVISIONING_TOKEN}" \\
@@ -90,6 +90,9 @@ if [ -n "\${TOKEN}" ] && [ "\${TOKEN}" != "null" ]; then
     echo "\${TOKEN}" > /root/secrets/digitalocean.com/serviceaccount/token
     echo "\${TEAM_UUID}" > /root/secrets/digitalocean.com/serviceaccount/team_uuid
     echo "\${THIS_ENDPOINT}" > /root/secrets/digitalocean.com/serviceaccount/base_url
+    # Trigger setup-websocat directly (container mode has no inotify for
+    # .path units; real systemd is idempotent on already-running service).
+    systemctl start --no-block setup-websocat.service 2>/dev/null || true
 fi
 `;
 

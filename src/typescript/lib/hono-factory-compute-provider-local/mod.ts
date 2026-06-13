@@ -173,7 +173,14 @@ async function spawnVM(
         distro: distro as "fedora" | "ubuntu",
         containerName,
         imageTag: containerImage,
+        onIp(ip: string, name: string) {
+          // Set IP immediately — before SSH poll — so the prove endpoint
+          // can ssh-keyscan the container during cloud-init provisioning.
+          droplet.networks.v4 = [{ ip_address: ip, type: "public" }];
+          (droplet as unknown as Record<string, unknown>)["containerName"] = name;
+        },
       });
+      // Update in case onIp set them already (idempotent)
       droplet.networks.v4 = [{ ip_address: info.ip, type: "public" }];
       (droplet as unknown as Record<string, unknown>)["containerName"] = info.containerName;
       droplet.status = "active";
@@ -469,7 +476,7 @@ export function createComputeProviderLocalFactory(
           const droplet = makeDroplet(body);
           getDropletsMap(actx).set(droplet.id, droplet);
 
-          const provisioningData = await ProvisioningData.create(actx, body.user_data ?? null);
+          const provisioningData = await ProvisioningData.create(actx, body.user_data ?? null, getIssuerUrl());
           body.user_data = provisioningData.userData;
           provisioningData.associateWithDroplet(droplet.id);
 
