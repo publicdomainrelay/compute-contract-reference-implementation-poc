@@ -4346,6 +4346,11 @@
           "npm:hono@^4.12.23"
         ]
       },
+      "lib/hono-factory-compute-provider-local": {
+        "dependencies": [
+          "npm:hono@^4.12.23"
+        ]
+      },
       "lib/hono-factory-did-plc-directory": {
         "dependencies": [
           "jsr:@hono/hono@*",

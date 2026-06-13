@@ -21,6 +21,8 @@
     "./lib/hono-factory-xrpc-relay",
     "./lib/hono-factory-xrpc-subscriber",
     "./lib/hono-factory-atproto-repo",
+    "./lib/hono-factory-compute-provider-local",
+    "./lib/hono-factory-did-plc-directory",
     "./did-plc-directory",
     "./utils/client-xrpc-caller",
     "./compute-spa",
