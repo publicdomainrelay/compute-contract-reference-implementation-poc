@@ -1,6 +1,7 @@
 {
   "nodeModulesDir": "auto",
   "workspace": [
+    "./lib/atproto-attestation-port",
     "./lib/atproto-helpers",
     "./lib/compute",
     "./lib/compute-provider-digitalocean",

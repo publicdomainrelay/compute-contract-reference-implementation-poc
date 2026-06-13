@@ -1,0 +1,17 @@
+{
+  "name": "@publicdomainrelay/atproto-attestation-port",
+  "version": "0.1.0",
+  "description": "Deno TypeScript bindings for AT Protocol attestation (mirrors atproto-attestation Rust crate v0.14.5)",
+  "license": "MIT",
+  "exports": "./mod.ts",
+  "imports": {
+    "@ipld/dag-cbor": "npm:@ipld/dag-cbor@^9.2.0",
+    "@noble/curves": "npm:@noble/curves@^1.9.7",
+    "@noble/hashes": "npm:@noble/hashes@^1.8.0",
+    "multiformats": "npm:multiformats@^13.3.0"
+  },
+  "compilerOptions": {
+    "lib": ["deno.ns", "dom", "esnext"],
+    "strict": true
+  }
+}

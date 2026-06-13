@@ -1,0 +1,29 @@
+{
+  "version": "5",
+  "specifiers": {
+    "npm:@ipld/dag-cbor@^9.2.0": "9.2.7",
+    "npm:multiformats@^13.3.0": "13.4.2"
+  },
+  "npm": {
+    "@ipld/dag-cbor@9.2.7": {
+      "integrity": "sha512-ZmfXmElRWATr+hoUTSAOr6HUcjVhOcNHDqgczc76qte2DHHFEK0ZhNzUcdTDQhF/VSIvf2ioaRTRLWwLc83sNw==",
+      "dependencies": [
+        "cborg",
+        "multiformats"
+      ]
+    },
+    "cborg@5.1.1": {
+      "integrity": "sha512-BDbSRIp6XrQXkTc7g+DN0RB9RrDPTUfals2ecWUlt3juPLjbAvy/V72mJcXY0Ehu0Dq/3WpNCOCT68HUTbW+lw==",
+      "bin": true
+    },
+    "multiformats@13.4.2": {
+      "integrity": "sha512-eh6eHCrRi1+POZ3dA+Dq1C6jhP1GNtr9CRINMb67OKzqW9I5DUuZM/3jLPlzhgpGeiNUlEGEbkCYChXMCc/8DQ=="
+    }
+  },
+  "workspace": {
+    "dependencies": [
+      "npm:@ipld/dag-cbor@^9.2.0",
+      "npm:multiformats@^13.3.0"
+    ]
+  }
+}
