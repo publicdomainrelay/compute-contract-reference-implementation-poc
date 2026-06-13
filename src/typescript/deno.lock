@@ -25,7 +25,9 @@
     "npm:@atproto/api@*": "0.20.14",
     "npm:@atproto/api@~0.20.14": "0.20.14",
     "npm:@atproto/api@~0.20.8": "0.20.14",
+    "npm:@atproto/common-web@*": "0.5.0",
     "npm:@atproto/common-web@0.5": "0.5.0",
+    "npm:@atproto/common@*": "0.6.1",
     "npm:@atproto/crypto@*": "0.5.0",
     "npm:@atproto/crypto@0.5": "0.5.0",
     "npm:@atproto/crypto@~0.4.4": "0.4.5",
@@ -35,6 +37,7 @@
     "npm:@atproto/oauth-client-browser@~0.4.1": "0.4.1",
     "npm:@atproto/xrpc-server@*": "0.11.1",
     "npm:@atproto/xrpc-server@~0.11.1": "0.11.1",
+    "npm:@atproto/xrpc@*": "0.8.0",
     "npm:@atproto/xrpc@0.7": "0.7.7",
     "npm:@hey-api/openapi-ts@0.98.2": "0.98.2_typescript@6.0.3",
     "npm:@ipld/dag-cbor@*": "9.2.7",
@@ -4455,7 +4458,11 @@
       },
       "xrpc-relay-pds": {
         "dependencies": [
-          "npm:@atproto/crypto@*"
+          "npm:@atproto/common-web@*",
+          "npm:@atproto/common@*",
+          "npm:@atproto/crypto@*",
+          "npm:@atproto/identity@*",
+          "npm:@atproto/xrpc@*"
         ]
       }
     }
