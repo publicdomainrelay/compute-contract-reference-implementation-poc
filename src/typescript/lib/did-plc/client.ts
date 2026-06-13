@@ -1,5 +1,17 @@
 // PLC Directory API client — thin wrapper around the @hey-api/openapi-ts
-// generated SDK that preserves the existing PlcClient class API.
+// generated HTTP client.
+//
+// In browsers the generated SDK functions (resolveDid, createPlcOp, etc.)
+// work fine — the browser's Request constructor silently ignores unknown
+// RequestInit fields.
+//
+// In Deno the generated functions break: they spread the `client` option
+// into every request, and Deno's Request constructor rejects `client`
+// because it expects a Deno.HttpClient, not an OpenAPI client object.
+//
+// We detect the runtime at module load and take the right path:
+//   Deno    → call this._client.{get,post}() directly (no client leak)
+//   Browser → use the generated SDK functions (full type safety)
 
 import { createClient, createConfig } from "./generated/client/index.ts";
 import type { Client } from "./generated/client/index.ts";
@@ -21,6 +33,9 @@ import type {
 } from "./types.ts";
 
 export const PLC_DIRECTORY_URL = "https://plc.directory";
+
+// Deno exposes a global `Deno` namespace; browsers do not.
+const _isDeno = typeof (globalThis as Record<string, unknown>).Deno !== "undefined";
 
 // ── Error classes ─────────────────────────────────────────────────────
 
@@ -55,7 +70,10 @@ export class PlcInvalidOperationError extends PlcError {
   }
 }
 
+/** Helper: given a client result, throw the right PlcError subclass. */
 async function checkResponse(res: Response, did?: string): Promise<void> {
+  // If the fetch itself failed (network error), res is undefined.
+  if (!res) throw new PlcError(0, "PLC directory unreachable (fetch failed)");
   if (res.ok) return;
   let msg = res.statusText;
   try {
@@ -104,8 +122,37 @@ export class PlcClient {
     return this.timeout ? AbortSignal.timeout(this.timeout) : undefined;
   }
 
+  // ── Deno helpers (bypass generated SDK — see module doc) ──────────
+
+  /** GET a path, parse JSON, throw on error. */
+  private async _denoGet<T>(path: string, did?: string): Promise<T> {
+    const result = await this._client.get({
+      url: path,
+      signal: this.signal(),
+      throwOnError: false,
+    });
+    if (result.error) await checkResponse(result.response!, did);
+    return (result as { data: T }).data;
+  }
+
+  /** POST to a path with a JSON body, throw on error. */
+  private async _denoPost(path: string, body: unknown, did?: string): Promise<void> {
+    const result = await this._client.post({
+      url: path,
+      body,
+      headers: { "Content-Type": "application/json" },
+      signal: this.signal(),
+      throwOnError: false,
+    });
+    if (result.error) await checkResponse(result.response!, did);
+  }
+
+  // ── public API ────────────────────────────────────────────────────
+
   /** Resolve DID Document for a did:plc identifier. */
   async resolve(did: string): Promise<DidDocument> {
+    if (_isDeno) return this._denoGet<DidDocument>(`/${did}`, did);
+
     const result = await resolveDid({
       client: this._client,
       path: { did },
@@ -118,6 +165,8 @@ export class PlcClient {
 
   /** Fetch the current (non-nullified) operation chain for a DID. */
   async getLog(did: string): Promise<Operation[]> {
+    if (_isDeno) return this._denoGet<Operation[]>(`/${did}/log`, did);
+
     const result = await getPlcOpLog({
       client: this._client,
       path: { did },
@@ -130,6 +179,8 @@ export class PlcClient {
 
   /** Fetch the full audit log, including nullified (forked) operations. */
   async getAuditLog(did: string): Promise<LogEntry[]> {
+    if (_isDeno) return this._denoGet<LogEntry[]>(`/${did}/log/audit`, did);
+
     const result = await getPlcAuditLog({
       client: this._client,
       path: { did },
@@ -142,6 +193,8 @@ export class PlcClient {
 
   /** Fetch the latest operation for a DID (without walking the chain). */
   async getLastOp(did: string): Promise<Operation> {
+    if (_isDeno) return this._denoGet<Operation>(`/${did}/log/last`, did);
+
     const result = await getLastOp({
       client: this._client,
       path: { did },
@@ -154,6 +207,8 @@ export class PlcClient {
 
   /** Fetch current PLC data for a DID. */
   async getData(did: string): Promise<unknown> {
+    if (_isDeno) return this._denoGet<unknown>(`/${did}/data`, did);
+
     const result = await getPlcData({
       client: this._client,
       path: { did },
@@ -166,6 +221,11 @@ export class PlcClient {
 
   /** Submit a signed PLC operation. Throws on invalid signature or bad prev. */
   async submitOp(did: string, op: Operation): Promise<void> {
+    if (_isDeno) {
+      await this._denoPost(`/${did}`, op, did);
+      return;
+    }
+
     const result = await createPlcOp({
       client: this._client,
       body: op,
@@ -176,7 +236,7 @@ export class PlcClient {
     if (result.error) await checkResponse(result.response!, did);
   }
 
-  /** Get server health / version. (Not in OpenAPI spec — manual fetch.) */
+  /** Get server health / version. (Manual fetch — no generated type.) */
   async health(): Promise<HealthResponse> {
     const url = this.baseUrl + "/health";
     const res = await this._fetch(url, { signal: this.signal() });
@@ -192,6 +252,25 @@ export class PlcClient {
    * only the first line. For full access use `exportPages()`.
    */
   async export(opts: ExportOptions = {}): Promise<LogEntry[]> {
+    if (_isDeno) {
+      let url = "/export";
+      const qs: string[] = [];
+      if (opts.after) qs.push(`after=${encodeURIComponent(opts.after)}`);
+      if (opts.count != null) qs.push(`count=${opts.count}`);
+      if (qs.length) url += `?${qs.join("&")}`;
+
+      const result = await this._client.get({
+        url,
+        signal: this.signal(),
+        throwOnError: false,
+      });
+      if (result.error) await checkResponse(result.response!);
+      const data = result.data as unknown;
+      if (Array.isArray(data)) return data as LogEntry[];
+      if (data && typeof data === "object") return [data as LogEntry];
+      return [];
+    }
+
     const query: { count?: number; after?: string } = {};
     if (opts.after) query.after = opts.after;
     if (opts.count != null) query.count = opts.count;

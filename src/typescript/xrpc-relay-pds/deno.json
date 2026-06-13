@@ -1,9 +1,12 @@
 {
   "tasks": {
-    "server": "deno run -A --watch server.ts"
+    "server": "sh -ec 'deno run -A --watch server.ts | jq --unbuffered -rR \"(fromjson? // .)\"'"
   },
   "imports": {
     "@atproto/crypto": "npm:@atproto/crypto",
-    "@publicdomainrelay/hono-factory-atproto-repo": "../lib/hono-factory-atproto-repo/mod.ts"
+    "@publicdomainrelay/did-plc": "../lib/did-plc/mod.ts",
+    "@publicdomainrelay/hono-factory-atproto-repo": "../lib/hono-factory-atproto-repo/mod.ts",
+    "@publicdomainrelay/hono-factory-xrpc-subscriber": "../lib/hono-factory-xrpc-subscriber/mod.ts",
+    "@publicdomainrelay/xrpc-relay": "../lib/xrpc-relay/mod.ts"
   }
 }
