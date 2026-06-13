@@ -27,6 +27,8 @@
     "./xrpc-relay-pds",
     "./spindle",
     "./bidder",
+    "./market-registry",
+    "./ephemeral-bidder",
     "./qemu"
   ],
   "allowScripts": ["npm:core-js@3.49.0"]

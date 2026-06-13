@@ -34,6 +34,7 @@ import {
   verifyRemoteProof,
   stripResolved,
   atUriAuthority,
+  discoverBiddersFromRegistries,
   type AttestationKeypair,
   type InlineAttestation,
   type SubmitBidCallback,
@@ -52,6 +53,7 @@ import {
   SUBMIT_EVENT_LXM,
   EVENT_NSID,
   COMPUTE_EVENTS_VM_DELETE_NSID,
+  LIST_BIDDERS_NSID,
 } from "@publicdomainrelay/lexicons";
 
 const VOUCH_NSID = "sh.tangled.graph.vouch";
@@ -580,7 +582,54 @@ runcmd:
   } catch (err) {
     log("vouch_discovery_error", { error: String(err) });
   }
-  const bidderDids = Array.from(new Set([...DEFAULT_BIDDER_DIDS, ...vouchedDids, ...extraBidderDids]));
+
+  // ── registry-based discovery ───────────────────────────────────────
+  let registryDids: string[] = [];
+  try {
+    const idResolverForReg = new IdResolver();
+    const registryResult = await discoverBiddersFromRegistries({
+      payloadNsid: COMPUTE_VM_NSID,
+      callListBidders: async (endpointUrl, payloadNsid) => {
+        // Resolve the registry endpoint: did:web:HOST#pdr_temp_market → https://HOST/xrpc
+        let targetBase: string;
+        let audDid: string;
+        if (endpointUrl.startsWith("http://") || endpointUrl.startsWith("https://")) {
+          targetBase = `${endpointUrl.replace(/\/+$/, "")}/xrpc`;
+          audDid = `did:web:${new URL(endpointUrl).host}`;
+        } else if (endpointUrl.startsWith("did:")) {
+          const didPart = endpointUrl.split("#")[0];
+          const svcDoc = await idResolverForReg.did.resolve(didPart);
+          const svcId = endpointUrl.includes("#") ? endpointUrl.split("#")[1] : "pdr_temp_market";
+          const svc = (svcDoc?.service ?? []).find((s: { id: string }) => s.id === `#${svcId}`);
+          if (!svc) throw new Error(`service ${svcId} not found in DID doc`);
+          const ep = (svc as { serviceEndpoint: string }).serviceEndpoint.replace(/\/+$/, "");
+          targetBase = `${ep}/xrpc`;
+          audDid = `did:web:${new URL(ep).host}`;
+        } else {
+          throw new Error(`unresolvable endpoint: ${endpointUrl}`);
+        }
+        const token = await signServiceAuth(pds.signer, { aud: audDid, lxm: LIST_BIDDERS_NSID });
+        const url = `${targetBase}/${LIST_BIDDERS_NSID}?payloadNsid=${encodeURIComponent(payloadNsid)}`;
+        const res = await fetch(url, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json() as { bidders?: Array<{ bidderDid?: string; appliesTo?: string[] }> };
+        return (data.bidders ?? []).map((b) => ({
+          bidderDid: b.bidderDid ?? "",
+          appliesTo: b.appliesTo ?? [],
+        }));
+      },
+      log: (severity: string, msg: string, extra?: Record<string, unknown>) =>
+        log(msg.replace(/: /g, "_"), extra),
+    });
+    registryDids = Array.from(registryResult);
+    if (registryDids.length > 0) log("registry_discovery", { count: registryDids.length });
+  } catch (err) {
+    log("registry_discovery_error", { error: String(err) });
+  }
+
+  const bidderDids = Array.from(new Set([...DEFAULT_BIDDER_DIDS, ...vouchedDids, ...registryDids, ...extraBidderDids]));
   const deniedSet = new Set(denyBidderDids);
   const filteredBidderDids = bidderDids.filter(d => !deniedSet.has(d));
   log("bidder_discovery", { total: filteredBidderDids.length, denied: bidderDids.length - filteredBidderDids.length });

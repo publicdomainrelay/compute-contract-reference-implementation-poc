@@ -1,0 +1,46 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.registerBidder",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Register a bidder with the market registry. Called by bidders after they publish a bidderDiscovery record in their own repo and connect to the relay. The registry verifies the caller's service-auth JWT issuer matches the bidderDid, then indexes the bidder so it appears in listBidders queries. Liveness is determined by the registry polling the bidder's bidderDiscovery record — there is no separate heartbeat procedure.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["bidderDid", "appliesTo"],
+          "properties": {
+            "bidderDid": {
+              "type": "string",
+              "format": "did",
+              "description": "DID of the bidder registering. Must match the service-auth JWT issuer."
+            },
+            "appliesTo": {
+              "type": "array",
+              "items": { "type": "string", "format": "nsid" },
+              "minLength": 1,
+              "description": "Payload NSIDs this bidder handles."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["ok", "registrationUri", "registrationCid"],
+          "properties": {
+            "ok": { "type": "boolean" },
+            "registrationUri": { "type": "string" },
+            "registrationCid": { "type": "string" }
+          }
+        }
+      },
+      "errors": [
+        { "name": "InvalidRequest" },
+        { "name": "Forbidden" }
+      ]
+    }
+  }
+}

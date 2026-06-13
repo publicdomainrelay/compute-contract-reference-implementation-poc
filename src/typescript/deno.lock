@@ -4275,6 +4275,14 @@
           "jsr:@hono/hono@*"
         ]
       },
+      "ephemeral-bidder": {
+        "dependencies": [
+          "npm:@atproto/common@*",
+          "npm:@atproto/crypto@*",
+          "npm:@atproto/identity@*",
+          "npm:hono@^4.12.23"
+        ]
+      },
       "lib/atproto-attestation-port": {
         "dependencies": [
           "npm:@ipld/dag-cbor@^9.2.0",
@@ -4412,6 +4420,16 @@
           "npm:@atproto/crypto@*",
           "npm:@atproto/identity@*",
           "npm:@atproto/xrpc-server@*"
+        ]
+      },
+      "market-registry": {
+        "dependencies": [
+          "npm:@atproto/api@*",
+          "npm:@atproto/common-web@*",
+          "npm:@atproto/common@*",
+          "npm:@atproto/crypto@*",
+          "npm:@atproto/identity@*",
+          "npm:hono@^4.12.23"
         ]
       },
       "qemu": {

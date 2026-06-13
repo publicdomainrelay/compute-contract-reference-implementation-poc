@@ -1,0 +1,15 @@
+{
+  "name": "@publicdomainrelay/ephemeral-bidder",
+  "imports": {
+    "@atproto/common": "npm:@atproto/common",
+    "@atproto/crypto": "npm:@atproto/crypto",
+    "@atproto/identity": "npm:@atproto/identity",
+    "@publicdomainrelay/did-plc": "../lib/did-plc/mod.ts",
+    "@publicdomainrelay/hono-factory-atproto-repo": "../lib/hono-factory-atproto-repo/mod.ts",
+    "@publicdomainrelay/hono-factory-xrpc-subscriber": "../lib/hono-factory-xrpc-subscriber/mod.ts",
+    "@publicdomainrelay/lexicons": "../lib/lexicons/mod.ts",
+    "@publicdomainrelay/market": "../lib/market/mod.ts",
+    "@publicdomainrelay/xrpc-relay": "../lib/xrpc-relay/mod.ts",
+    "hono": "npm:hono@^4.12.23"
+  }
+}

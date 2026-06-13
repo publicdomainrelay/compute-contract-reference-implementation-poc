@@ -38,6 +38,7 @@ import {
   createRecord as atprotoCreateRecord,
   createSignedRecord,
   deleteRecord as atprotoDeleteRecord,
+  discoverBiddersFromRegistries,
   listRecordsAll,
   loadOrGenerateKeypair,
   type MarketClient,
@@ -434,6 +435,22 @@ async function discoverAndNotifyBidders(
   }
 
   log("vouched bidder candidates", { count: vouchedDids.size });
+
+  // ── registry-based discovery ───────────────────────────────────────
+  // Augment vouch discovery with bidders from configured market registries.
+  try {
+    const registryDids = await discoverBiddersFromRegistries({
+      marketClient,
+      payloadNsid,
+      log: (severity, msg, extra) => log(msg, extra as Record<string, unknown> ?? {}),
+    });
+    for (const did of registryDids) vouchedDids.add(did);
+    if (registryDids.size > 0) {
+      log("registry bidders added", { count: registryDids.size, total: vouchedDids.size });
+    }
+  } catch (err) {
+    log("registry discovery failed, continuing with vouch-only", { err: String(err) });
+  }
 
   await Promise.all(
     Array.from(vouchedDids).map((did) =>

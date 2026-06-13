@@ -1,0 +1,33 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.temp.market.bidderRegistration",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "An index entry in the market registry's repo tracking a registered bidder. The registry creates one entry per (bidderDid, payloadNsid) pair when a bidder calls registerBidder. Liveness is determined by polling the bidder's own bidderDiscovery record — this index entry carries no heartbeat timestamps. When a bidder goes stale the registry deletes its index entries.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["bidderDid", "appliesTo", "indexedAt"],
+        "properties": {
+          "bidderDid": {
+            "type": "string",
+            "format": "did",
+            "description": "DID of the registered bidder."
+          },
+          "appliesTo": {
+            "type": "array",
+            "description": "Payload NSIDs this bidder handles. Matches the appliesTo from the bidder's bidderDiscovery record at registration time.",
+            "items": { "type": "string", "format": "nsid" },
+            "minLength": 1
+          },
+          "indexedAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "When the registry created this index entry."
+          }
+        }
+      }
+    }
+  }
+}

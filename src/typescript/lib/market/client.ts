@@ -18,6 +18,8 @@ import type { Agent } from "@atproto/api";
 import {
   BID_NSID,
   EVENT_NSID,
+  LIST_BIDDERS_NSID,
+  REGISTER_BIDDER_NSID,
   SUBMIT_ACCEPT_NSID,
   SUBMIT_BID_NSID,
   SUBMIT_EVENT_NSID,
@@ -27,19 +29,29 @@ import { loadOrGenerateKeypair } from "./attest.ts";
 import { noopLogger, type Logger, type StrongRef } from "./types.ts";
 import { createSignedRecord, type RecordSigner, type SignedRecord } from "./signing.ts";
 
-// Minimal LexiconDoc stubs for the four market submit procedures.
+// Minimal LexiconDoc stubs for market/registry XRPC procedures and queries.
 // XrpcClient.call() requires a registered lexicon to determine HTTP method
 // and build the request URL; without these it throws "Lexicon not found".
-const MARKET_PROCEDURE_LEXICONS = [
+const MARKET_LEXICON_STUBS: Array<{
+  lexicon: 1;
+  id: string;
+  defs: { main: { type: "procedure" | "query" } };
+}> = [
   SUBMIT_RFP_NSID,
   SUBMIT_BID_NSID,
   SUBMIT_ACCEPT_NSID,
   SUBMIT_EVENT_NSID,
+  REGISTER_BIDDER_NSID,
 ].map((id) => ({
   lexicon: 1 as const,
   id,
   defs: { main: { type: "procedure" as const } },
 }));
+MARKET_LEXICON_STUBS.push({
+  lexicon: 1 as const,
+  id: LIST_BIDDERS_NSID,
+  defs: { main: { type: "query" as const } },
+});
 
 /**
  * What @atproto/xrpc accepts as its first constructor argument: a service URL,
@@ -120,7 +132,7 @@ export class MarketClient {
   readonly #log: Logger;
 
   constructor(service: XrpcService, opts: MarketClientOptions = {}) {
-    this.xrpc = new XrpcClient(service, MARKET_PROCEDURE_LEXICONS);
+    this.xrpc = new XrpcClient(service, MARKET_LEXICON_STUBS as any);
     this.#agent = opts.agent;
     this.#signer = opts.signer;
     this.#privateKeyHex = opts.privateKeyHex;
@@ -195,6 +207,23 @@ export class MarketClient {
   async submitAccept(target: string, input: { acceptUri: string; acceptCid: string }): Promise<SubmitAcceptResult> {
     const res = await this.xrpc.call(SUBMIT_ACCEPT_NSID, {}, input, { headers: proxyHeaders(target) });
     return res.data as SubmitAcceptResult;
+  }
+
+  /**
+   * List registered bidders from a registry service.
+   * @param target service DID ref to proxy to, e.g. `did:web:HOST#pdr_temp_market`.
+   */
+  async listBidders(
+    target: string,
+    params: { payloadNsid?: string; maxResults?: number; cursor?: string } = {},
+  ): Promise<{
+    bidders: Array<{ bidderDid: string; offeringEndpointUrl: string; appliesTo: string[]; lastHeartbeat: string }>;
+    cursor?: string;
+  }> {
+    const res = await this.xrpc.call(LIST_BIDDERS_NSID, params, undefined, {
+      headers: proxyHeaders(target),
+    });
+    return res.data as any;
   }
 
   /**

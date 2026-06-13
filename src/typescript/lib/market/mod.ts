@@ -21,4 +21,6 @@ export * from "./auth.ts";
 export * from "./egress.ts";
 export * from "./server.ts";
 export * from "./client.ts";
+export * from "./registry.ts";
+export * from "./discovery.ts";
 export * from "./bid.ts";
