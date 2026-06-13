@@ -5,11 +5,16 @@
     "@atproto/common": "npm:@atproto/common",
     "@atproto/crypto": "npm:@atproto/crypto",
     "@atproto/identity": "npm:@atproto/identity",
+    "@publicdomainrelay/compute-provider": "../lib/compute-provider/mod.ts",
+    "@publicdomainrelay/compute-provider-local": "../lib/compute-provider-local/mod.ts",
+    "@publicdomainrelay/compute-provider-digitalocean": "../lib/compute-provider-digitalocean/mod.ts",
     "@publicdomainrelay/did-plc": "../lib/did-plc/mod.ts",
     "@publicdomainrelay/hono-factory-atproto-repo": "../lib/hono-factory-atproto-repo/mod.ts",
+    "@publicdomainrelay/hono-factory-ephemeral-compute-bidder": "../lib/hono-factory-ephemeral-compute-bidder/mod.ts",
     "@publicdomainrelay/hono-factory-xrpc-subscriber": "../lib/hono-factory-xrpc-subscriber/mod.ts",
     "@publicdomainrelay/lexicons": "../lib/lexicons/mod.ts",
     "@publicdomainrelay/market": "../lib/market/mod.ts",
+    "@publicdomainrelay/utils-log": "../lib/utils-log/mod.ts",
     "@publicdomainrelay/xrpc-relay": "../lib/xrpc-relay/mod.ts",
     "hono": "npm:hono@^4.12.23"
   }

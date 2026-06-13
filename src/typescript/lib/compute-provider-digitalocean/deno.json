@@ -1,10 +1,10 @@
 {
   "name": "@publicdomainrelay/compute-provider-digitalocean",
   "version": "0.0.0",
+  "license": "Unlicense",
   "exports": "./mod.ts",
   "imports": {
-    "@atproto/lex": "npm:@atproto/lex",
-    "@atproto/api": "npm:@atproto/api@^0.20.8",
-    "npm:yaml@^2.7.0": "npm:yaml@^2.7.0"
+    "@publicdomainrelay/compute-provider": "../compute-provider/mod.ts",
+    "yaml": "npm:yaml@^2.7.0"
   }
 }

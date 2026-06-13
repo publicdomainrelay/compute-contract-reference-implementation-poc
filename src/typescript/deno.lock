@@ -27,6 +27,7 @@
     "npm:@atproto/common-web@*": "0.5.0",
     "npm:@atproto/common-web@0.5": "0.5.0",
     "npm:@atproto/common@*": "0.6.1",
+    "npm:@atproto/common@0.5": "0.5.16",
     "npm:@atproto/crypto@*": "0.5.0",
     "npm:@atproto/crypto@0.5": "0.5.0",
     "npm:@atproto/crypto@~0.4.4": "0.4.5",
@@ -246,11 +247,21 @@
         "zod"
       ]
     },
+    "@atproto/common@0.5.16": {
+      "integrity": "sha512-DTWgaVlDJN3zDxJ3agZK3pbiSZc+z8QQe9iy15sIuorLrceIp4kHXMO/QqjWBXnmLVTd6+/5BVDzex5amYc0rg==",
+      "dependencies": [
+        "@atproto/common-web@0.4.21",
+        "@atproto/lex-cbor@0.0.16",
+        "@atproto/lex-data@0.0.15",
+        "multiformats@9.9.0",
+        "pino"
+      ]
+    },
     "@atproto/common@0.6.1": {
       "integrity": "sha512-mXR4R8nYFgs4gncFXNyIcxMcjuvpeCn3spu4pIlfWsri+MxXPr4jHWkjyv+b2JIvI+nns3L3ElFKWPEO4GlZdA==",
       "dependencies": [
         "@atproto/common-web@0.5.0",
-        "@atproto/lex-cbor",
+        "@atproto/lex-cbor@0.1.0",
         "@atproto/lex-data@0.1.1",
         "multiformats@13.4.2",
         "pino"
@@ -317,6 +328,13 @@
         "tslib"
       ]
     },
+    "@atproto/lex-cbor@0.0.16": {
+      "integrity": "sha512-x3NTvOX5/4Wh7uk8RNJpUJqZjcWRSUYDYRJ6VZPLmp/CAnsMySmBAinBu/dva/1hqS3C1oiYz258x6bRYpKJ4w==",
+      "dependencies": [
+        "@atproto/lex-data@0.0.15",
+        "tslib"
+      ]
+    },
     "@atproto/lex-cbor@0.1.0": {
       "integrity": "sha512-SGL7BHPYN0OmvtnVixieYWyh2ghxI7iHADTLfz52Xp5zR+BZY3QggIKJ32KfyYN9Ss2tduaqsY5aclEki2Aq0A==",
       "dependencies": [
@@ -364,7 +382,7 @@
       "integrity": "sha512-NXrJNe2qY4YreC82VgPE7stXnzSnI+xMeNXvgJDiMZj4MeSQeQn5ElFVd1yzRRV9sZREf6Y/HE+y1ffb2uewXA==",
       "dependencies": [
         "@atproto/lex-builder",
-        "@atproto/lex-cbor",
+        "@atproto/lex-cbor@0.1.0",
         "@atproto/lex-data@0.1.1",
         "@atproto/lex-document",
         "@atproto/lex-resolver",
@@ -486,10 +504,10 @@
     "@atproto/repo@0.10.0": {
       "integrity": "sha512-dGnU3R+geXepOZFIn3YUu6WaXLuT1NxqNvusR/JmAqPjjT6dT4tjouZeDPrumSnZm2f5Z8xMeDfVxpMWQ4stFw==",
       "dependencies": [
-        "@atproto/common",
+        "@atproto/common@0.6.1",
         "@atproto/common-web@0.5.0",
         "@atproto/crypto@0.5.0",
-        "@atproto/lex-cbor",
+        "@atproto/lex-cbor@0.1.0",
         "@atproto/lex-data@0.1.1",
         "@atproto/syntax@0.6.1",
         "varint",
@@ -512,16 +530,16 @@
     "@atproto/ws-client@0.1.0": {
       "integrity": "sha512-8qG+A+htxEHpDJRgtYNUExUOejDwU4nE2SEJCFLiTc1G+s0GbFaeg7Fk5drQA9tLMHQWoU9uqIr1YQpJyvJs8w==",
       "dependencies": [
-        "@atproto/common",
+        "@atproto/common@0.6.1",
         "ws"
       ]
     },
     "@atproto/xrpc-server@0.11.1": {
       "integrity": "sha512-h68Mb+Aa1R4tMF/F1BTV5EeBA31wK+Fsn9LoNrNkfeFh5Bxj4U2ZnnTZTodqtJlbZzXbhUAAKtws3XpN7tdX5w==",
       "dependencies": [
-        "@atproto/common",
+        "@atproto/common@0.6.1",
         "@atproto/crypto@0.5.0",
-        "@atproto/lex-cbor",
+        "@atproto/lex-cbor@0.1.0",
         "@atproto/lex-client",
         "@atproto/lex-data@0.1.1",
         "@atproto/lex-json@0.1.0",
@@ -4312,8 +4330,6 @@
       },
       "lib/compute-provider-digitalocean": {
         "dependencies": [
-          "npm:@atproto/api@~0.20.8",
-          "npm:@atproto/lex@*",
           "npm:yaml@^2.7.0"
         ]
       },
@@ -4360,9 +4376,16 @@
       },
       "lib/hono-factory-ephemeral-compute-bidder": {
         "dependencies": [
-          "npm:@atproto/common@*",
-          "npm:@atproto/crypto@*",
-          "npm:@atproto/identity@*",
+          "jsr:@publicdomainrelay/atproto-attestation-port@0.1",
+          "jsr:@publicdomainrelay/did-plc@0",
+          "jsr:@publicdomainrelay/hono-factory-atproto-repo@0",
+          "jsr:@publicdomainrelay/hono-factory-xrpc-subscriber@0",
+          "jsr:@publicdomainrelay/lexicons@0",
+          "jsr:@publicdomainrelay/market@0",
+          "jsr:@publicdomainrelay/xrpc-relay@0",
+          "npm:@atproto/common@0.5",
+          "npm:@atproto/crypto@0.5",
+          "npm:@atproto/identity@0.5",
           "npm:hono@^4.12.23"
         ]
       },

@@ -9,6 +9,9 @@
     "@x402/core": "npm:@x402/core@^2.14.0",
     "@x402/evm": "npm:@x402/evm@^2.14.0",
     "@x402/hono": "npm:@x402/hono@^2.14.0",
-    "hono": "npm:hono@^4.12.23"
+    "hono": "npm:hono@^4.12.23",
+    "@publicdomainrelay/compute-provider": "../lib/compute-provider/mod.ts",
+    "@publicdomainrelay/compute-provider-local": "../lib/compute-provider-local/mod.ts",
+    "@publicdomainrelay/compute-provider-digitalocean": "../lib/compute-provider-digitalocean/mod.ts"
   }
 }
