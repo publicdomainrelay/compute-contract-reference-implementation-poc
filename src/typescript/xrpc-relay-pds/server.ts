@@ -34,6 +34,7 @@ import { runSubscriber } from "@publicdomainrelay/xrpc-relay";
 import { createSubscriberFactory } from "@publicdomainrelay/hono-factory-xrpc-subscriber";
 import { IdResolver } from "@atproto/identity";
 import { getPdsEndpoint } from "@atproto/common-web";
+import { XrpcClient, XRPCError } from "@atproto/xrpc";
 import {
   loadOrGenerateKeypair,
   attestationFor,
@@ -406,13 +407,28 @@ async function createSignedRepoRecord(
 
 // ── helpers: submit to bidder endpoints ──────────────────────────────
 
-/** Resolve a DID ref or HTTP URL to a POSTable target URL and service-auth aud. */
+// Minimal procedure lexicon stubs so XrpcClient.call() can resolve the HTTP
+// method (POST) and build the `/xrpc/<nsid>` request URL for each submit*;
+// without a registered lexicon it throws "Lexicon not found". Mirrors
+// lib/market's MARKET_PROCEDURE_LEXICONS — we only send these three (submitBid
+// is received, not sent, by this server).
+const SUBMIT_PROCEDURE_LEXICONS = [
+  SUBMIT_RFP_NSID,
+  SUBMIT_ACCEPT_NSID,
+  SUBMIT_EVENT_NSID,
+].map((id) => ({
+  lexicon: 1 as const,
+  id,
+  defs: { main: { type: "procedure" as const } },
+})) as ConstructorParameters<typeof XrpcClient>[1];
+
+/** Resolve a DID ref or HTTP URL to a service origin and service-auth aud. */
 async function resolveBidderEndpoint(
   endpointUrl: string,
-): Promise<{ targetUrl: string; audDid: string } | null> {
+): Promise<{ service: string; audDid: string } | null> {
   if (endpointUrl.startsWith("http://") || endpointUrl.startsWith("https://")) {
     return {
-      targetUrl: `${endpointUrl.replace(/\/+$/, "")}/xrpc`,
+      service: endpointUrl.replace(/\/+$/, ""),
       audDid: `did:web:${new URL(endpointUrl).host}`,
     };
   }
@@ -424,30 +440,45 @@ async function resolveBidderEndpoint(
     const svcEndpoint = (svc as { serviceEndpoint?: string } | undefined)?.serviceEndpoint;
     if (!svcEndpoint) return null;
     return {
-      targetUrl: `${svcEndpoint.replace(/\/+$/, "")}/xrpc`,
+      service: svcEndpoint.replace(/\/+$/, ""),
       audDid: didPart,
     };
   }
   return null;
 }
 
-/** POST an XRPC call to a bidder with a service-auth JWT. */
+/**
+ * POST an XRPC procedure to a bidder via the official @atproto/xrpc client.
+ * XrpcClient builds the `/xrpc/<nsid>` URL, lexicon-encodes the JSON body, and
+ * parses/validates the response. We attach the inter-service service-auth JWT
+ * (aud = bidder DID, lxm = method NSID) as a bearer token: this server is its
+ * own repo PDS, so it mints the token directly rather than routing through an
+ * upstream PDS via the `atproto-proxy` header (the path MarketClient uses).
+ * Non-2xx responses surface as a thrown XRPCError, which we fold back into the
+ * { status, ok, body } shape the callers expect.
+ */
 async function callBidder(
-  targetBase: string,
+  service: string,
   nsid: string,
   lxm: string,
   audDid: string,
   body: Record<string, unknown>,
 ): Promise<{ status: number; ok: boolean; body: unknown }> {
   const token = await signServiceAuth(signer, { aud: audDid, lxm });
-  const res = await fetch(`${targetBase}/${nsid}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify(body),
-  });
-  let resBody: unknown;
-  try { resBody = await res.json(); } catch { resBody = await res.text(); }
-  return { status: res.status, ok: res.ok, body: resBody };
+  const client = new XrpcClient(service, SUBMIT_PROCEDURE_LEXICONS);
+  try {
+    const res = await client.call(nsid, {}, body, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    return { status: 200, ok: true, body: res.data };
+  } catch (err) {
+    const xe = XRPCError.from(err);
+    return {
+      status: typeof xe.status === "number" ? xe.status : 0,
+      ok: false,
+      body: { error: xe.error, message: xe.message },
+    };
+  }
 }
 
 // ── compute contract request flow ────────────────────────────────────
@@ -561,7 +592,7 @@ async function callBidder(
           continue;
         }
         console.log(JSON.stringify({ event: "submitting_rfp", bidderDid, endpointUrl }));
-        const r = await callBidder(target.targetUrl, SUBMIT_RFP_NSID, SUBMIT_RFP_LXM, target.audDid, { rfpUri, rfpCid });
+        const r = await callBidder(target.service, SUBMIT_RFP_NSID, SUBMIT_RFP_LXM, target.audDid, { rfpUri, rfpCid });
         console.log(JSON.stringify({ event: "submitRfp_result", bidderDid, status: r.status, ok: r.ok }));
       }
     } catch (err) {
@@ -607,7 +638,7 @@ async function callBidder(
       const target = await resolveBidderEndpoint(submitAcceptTarget);
       if (target) {
         console.log(JSON.stringify({ event: "submitting_accept", target: submitAcceptTarget }));
-        const r = await callBidder(target.targetUrl, SUBMIT_ACCEPT_NSID, SUBMIT_ACCEPT_LXM, target.audDid, { acceptUri, acceptCid });
+        const r = await callBidder(target.service, SUBMIT_ACCEPT_NSID, SUBMIT_ACCEPT_LXM, target.audDid, { acceptUri, acceptCid });
         const body = r.body as { id?: string; uri?: string; cid?: string; submitEvent?: string };
         receiptUri = body.uri;
         receiptCid = body.cid;
@@ -677,7 +708,7 @@ async function callBidder(
           log("vm_delete_target_unresolvable", { submitEventRef });
         } else {
           log("submitting_vm_delete", { submitEventRef, eventUri });
-          const r = await callBidder(target.targetUrl, SUBMIT_EVENT_NSID, SUBMIT_EVENT_LXM, target.audDid, {
+          const r = await callBidder(target.service, SUBMIT_EVENT_NSID, SUBMIT_EVENT_LXM, target.audDid, {
             uri: eventUri,
             cid: eventCid,
             record: eventRecord,
