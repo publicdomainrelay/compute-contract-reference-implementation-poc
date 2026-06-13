@@ -9,6 +9,7 @@
     "@atproto/crypto": "npm:@atproto/crypto",
     "@atproto/identity": "npm:@atproto/identity",
     "@atproto/xrpc": "npm:@atproto/xrpc",
+    "@atiproto/atproto-attestation": "../lib/atproto-attestation-port/mod.ts",
     "@publicdomainrelay/did-plc": "../lib/did-plc/mod.ts",
     "@publicdomainrelay/hono-factory-atproto-repo": "../lib/hono-factory-atproto-repo/mod.ts",
     "@publicdomainrelay/hono-factory-xrpc-subscriber": "../lib/hono-factory-xrpc-subscriber/mod.ts",

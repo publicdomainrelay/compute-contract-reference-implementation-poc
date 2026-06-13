@@ -71,6 +71,7 @@ import {
 import { TID } from "@atproto/common";
 import { createComputeProviderDigitalOcean } from "@publicdomainrelay/compute-provider-digitalocean";
 import type { StrongRef as ComputeProviderStrongRef } from "@publicdomainrelay/compute-provider-digitalocean";
+import { createAttestationCid, type RecordMap } from "@atiproto/atproto-attestation";
 
 // ── options ──────────────────────────────────────────────────────────
 
@@ -548,15 +549,28 @@ export async function createBidderPDS(opts: BidderPDSOptions = {}): Promise<Bidd
     }
 
     // Create a signed receipt in the bidder's repo.
-    const receiptRecord = {
+    // Build a remote attestation proof: the receipt's top-level `cid` binds
+    // the accept record (in the requester's repo) to this receipt, so the
+    // requester's verifyRemoteProof can confirm the provider committed.
+    const acceptBare: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(accept)) {
+      if (k !== "_uri" && k !== "_cid") acceptBare[k] = v;
+    }
+    const receiptMetadata: Record<string, unknown> = {
       $type: RECEIPT_NSID,
       rfp: rfpRef ? strongRef(rfpRef.uri, rfpRef.cid) : null,
       bid: bidRef ? strongRef(bidRef.uri, bidRef.cid) : null,
       accept: strongRef(acceptUri, acceptCid),
-      payload: null as unknown,  // no settlement payload for test
+      payload: null,  // no settlement payload for test
       submitEvent: `${did}#pdr_temp_compute_event`,
       createdAt: nowIso,
     };
+    const bindCid = createAttestationCid(
+      acceptBare as RecordMap,
+      receiptMetadata as RecordMap,
+      issuerDid,
+    );
+    const receiptRecord = { ...receiptMetadata, cid: bindCid.toString() };
     const { uri: receiptUri, cid: receiptCid } = await createSignedRepoRecord(
       RECEIPT_NSID, receiptRecord, relayProxyRef,
     );
