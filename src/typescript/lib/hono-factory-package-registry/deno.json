@@ -1,0 +1,11 @@
+{
+  "name": "@publicdomainrelay/hono-factory-package-registry",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "@publicdomainrelay/datastore-package": "../datastore-package/mod.ts",
+    "@publicdomainrelay/lexicons": "../lexicons/mod.ts",
+    "hono": "npm:hono@^4.12.23"
+  }
+}

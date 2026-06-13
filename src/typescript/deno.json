@@ -36,7 +36,16 @@
     "./bidder",
     "./market-registry",
     "./ephemeral-bidder",
-    "./qemu"
+    "./qemu",
+    "./lib/datastore-package",
+    "./lib/datastore-local-fs",
+    "./lib/datastore-remote-git",
+    "./lib/datastore-pds",
+    "./lib/hono-factory-package-registry",
+    "./ephemeral-package-registry"
   ],
-  "allowScripts": ["npm:@parcel/watcher@2.5.6", "npm:core-js@3.49.0", "npm:node-pty@1.1.0"]
+  "allowScripts": ["npm:@parcel/watcher@2.5.6", "npm:core-js@3.49.0", "npm:node-pty@1.1.0"],
+  "imports": {
+    "@std/assert": "jsr:@std/assert@^1.0.19"
+  }
 }

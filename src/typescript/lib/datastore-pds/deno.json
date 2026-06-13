@@ -1,0 +1,12 @@
+{
+  "name": "@publicdomainrelay/datastore-pds",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "@atproto/common": "npm:@atproto/common",
+    "@publicdomainrelay/datastore-package": "../datastore-package/mod.ts",
+    "@publicdomainrelay/hono-factory-atproto-repo": "../hono-factory-atproto-repo/mod.ts",
+    "@publicdomainrelay/lexicons": "../lexicons/mod.ts"
+  }
+}

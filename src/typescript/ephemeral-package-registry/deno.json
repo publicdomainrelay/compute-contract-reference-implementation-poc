@@ -1,0 +1,28 @@
+{
+  "name": "@publicdomainrelay/ephemeral-package-registry",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "tasks": {
+    "start": "deno run -A main.ts --store git --git-url https://github.com/publicdomainrelay/compute-contract-reference-implementation-poc.git",
+    "xrpc": "deno task start --write-proxy-ref-http-to-path registry-https-url.txt",
+    "start:pretty": "sh -ec 'deno task start --write-proxy-ref-http-to-path registry-https-url.txt \"$@\" | jq --unbuffered -rR \"(fromjson? // .)\"' --",
+    "start:xrpc-pretty": "sh -ec 'deno task xrpc --write-proxy-ref-http-to-path registry-https-url.txt \"$@\" | jq --unbuffered -rR \"(fromjson? // .)\"' --"
+  },
+  "imports": {
+    "@atproto/common": "npm:@atproto/common",
+    "@atproto/crypto": "npm:@atproto/crypto",
+    "@atproto/identity": "npm:@atproto/identity",
+    "@cliffy/command": "jsr:@cliffy/command@^1.2.1",
+    "@publicdomainrelay/datastore-package": "../lib/datastore-package/mod.ts",
+    "@publicdomainrelay/datastore-remote-git": "../lib/datastore-remote-git/mod.ts",
+    "@publicdomainrelay/datastore-local-fs": "../lib/datastore-local-fs/mod.ts",
+    "@publicdomainrelay/datastore-pds": "../lib/datastore-pds/mod.ts",
+    "@publicdomainrelay/did-plc": "../lib/did-plc/mod.ts",
+    "@publicdomainrelay/hono-factory-atproto-repo": "../lib/hono-factory-atproto-repo/mod.ts",
+    "@publicdomainrelay/hono-factory-package-registry": "../lib/hono-factory-package-registry/mod.ts",
+    "@publicdomainrelay/hono-factory-xrpc-subscriber": "../lib/hono-factory-xrpc-subscriber/mod.ts",
+    "@publicdomainrelay/xrpc-relay": "../lib/xrpc-relay/mod.ts",
+    "hono": "npm:hono@^4.12.23"
+  }
+}

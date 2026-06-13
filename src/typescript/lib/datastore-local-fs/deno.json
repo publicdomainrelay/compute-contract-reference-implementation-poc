@@ -1,0 +1,9 @@
+{
+  "name": "@publicdomainrelay/datastore-local-fs",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "@publicdomainrelay/datastore-package": "../datastore-package/mod.ts"
+  }
+}
