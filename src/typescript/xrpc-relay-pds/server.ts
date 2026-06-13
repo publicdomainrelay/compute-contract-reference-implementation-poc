@@ -198,6 +198,10 @@ export interface ContractFlowOptions {
   noDelete?: boolean;
   /** How long to wait for sshd to answer through the tunnel. */
   vmReadyTimeoutSec?: number;
+  /** Called just before the interactive SSH session starts. */
+  onSshStart?: () => void;
+  /** Called just after the interactive SSH session ends. */
+  onSshEnd?: () => void | Promise<void>;
 }
 
 // ── createRequesterPDS ───────────────────────────────────────────────
@@ -717,7 +721,9 @@ runcmd:
     if (!ready) {
       log("vm_ssh_unavailable", { vmFqdn });
     } else {
+      opts.onSshStart?.();
       const code = await runSshSession(privateKeyPath, vmFqdn, execProgram);
+      await opts.onSshEnd?.();
       log("vm_ssh_session_exit", { vmFqdn, code });
     }
   }
