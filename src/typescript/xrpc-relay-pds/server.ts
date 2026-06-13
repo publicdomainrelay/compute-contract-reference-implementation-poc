@@ -190,6 +190,8 @@ export interface ContractFlowOptions {
   bidWindowSec?: number;
   /** Additional bidder DIDs beyond the defaults. */
   extraBidderDids?: string[];
+  /** DIDs to exclude from bidding, even if in defaults or vouched. */
+  denyBidderDids?: string[];
   /** Skip SSH wait+session + cloud-init generation. */
   skipSsh?: boolean;
   /** For non-TTY sessions: program to run in the VM. */
@@ -494,6 +496,7 @@ export async function runComputeContract(
   const noDelete = opts.noDelete ?? false;
   const vmReadyTimeoutSec = opts.vmReadyTimeoutSec ?? 300;
   const extraBidderDids = opts.extraBidderDids ?? [];
+  const denyBidderDids = opts.denyBidderDids ?? [];
 
   const { proxyRef, subdomain: relaySubdomain } = await pds.relayReady;
   pds.proxyRef = proxyRef;
@@ -578,10 +581,12 @@ runcmd:
     log("vouch_discovery_error", { error: String(err) });
   }
   const bidderDids = Array.from(new Set([...DEFAULT_BIDDER_DIDS, ...vouchedDids, ...extraBidderDids]));
-  log("bidder_discovery", { total: bidderDids.length });
+  const deniedSet = new Set(denyBidderDids);
+  const filteredBidderDids = bidderDids.filter(d => !deniedSet.has(d));
+  log("bidder_discovery", { total: filteredBidderDids.length, denied: bidderDids.length - filteredBidderDids.length });
 
   const idResolver = new IdResolver();
-  for (const bidderDid of bidderDids) {
+  for (const bidderDid of filteredBidderDids) {
     try {
       const doc = await idResolver.did.resolve(bidderDid);
       if (!doc) continue;

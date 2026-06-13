@@ -33,6 +33,11 @@ import { raiseIfUnauthorized, raiseIfUnauthorizedServiceAuth, AuthToken } from "
 import { ProvisioningData, validate as provisioningValidate } from "./provisioning.ts";
 import { createLogger, runWithLogContext, setLogContext, ON_BEHALF_OF_HEADER } from "../utils/log.ts";
 import { runContainer } from "./container.ts";
+import { Secp256k1Keypair } from "@atproto/crypto";
+import { signServiceAuth } from "@publicdomainrelay/hono-factory-atproto-repo";
+import type { Signer } from "@publicdomainrelay/hono-factory-atproto-repo";
+import { runSubscriber } from "@publicdomainrelay/xrpc-relay";
+import { createSubscriberFactory } from "@publicdomainrelay/hono-factory-xrpc-subscriber";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -47,6 +52,15 @@ const VM_IMAGE = Deno.env.get("VM_IMAGE") ?? "atcr.io/johnandersen777.bsky.socia
 const CONTAINER_MODE = Deno.env.get("CONTAINER_MODE") === "true";
 const CONTAINER_IMAGE = Deno.env.get("CONTAINER_IMAGE") ?? "container-runner-ubuntu:latest";
 const CACHE_DIR = `${Deno.env.get("HOME")}/.cache/simple-qemu`;
+
+// ── CLI flags ─────────────────────────────────────────────────────
+function cliFlag(name: string): string | undefined {
+  const i = Deno.args.indexOf(name);
+  return i >= 0 && Deno.args[i + 1] ? Deno.args[i + 1] : undefined;
+}
+const XRPC_RELAY_ISSUER_PATH = cliFlag("--write-xrpc-relay-generated-issuer-to");
+const XRPC_RELAY_ENABLED = XRPC_RELAY_ISSUER_PATH !== undefined;
+const DISPATCHER_HOST = Deno.env.get("DISPATCHER_HOST") ?? "xrpc.fedproxy.com";
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -494,9 +508,14 @@ async function killAllDroplets(): Promise<void> {
   );
 }
 
+function stopRelay(): void {
+  try { relayController?.stop(); } catch { /* ignore */ }
+}
+
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   Deno.addSignalListener(sig, async () => {
     log("info", `received ${sig}, shutting down`);
+    stopRelay();
     await killAllDroplets();
     if (sig === "SIGINT") {
       Deno.exit(0);
@@ -509,4 +528,58 @@ await getSigningKey();
 const jwk = await getPublicJwk();
 const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
 log("info", "miniCloud listening", { port: PORT, issuer: issuerUrl, kid: jwk.kid });
+
+// ── XRPC relay (optional) ─────────────────────────────────────────
+// Enabled when --write-xrpc-relay-generated-issuer-to <path> is passed.
+// Connects to the fedproxy relay, registers a did:web identity, and writes
+// it to the given path once live. Requests proxied through the relay are
+// dispatched into the existing Hono app via createSubscriberFactory.
+let relayController: ReturnType<typeof runSubscriber> | undefined;
+if (XRPC_RELAY_ENABLED) {
+  const PRIVATE_KEY_HEX = Deno.env.get("REPO_PRIVATE_KEY_HEX") ?? "";
+  const relayKeypair = PRIVATE_KEY_HEX
+    ? await Secp256k1Keypair.import(PRIVATE_KEY_HEX)
+    : await Secp256k1Keypair.create({ exportable: true });
+
+  const relaySigner: Signer = {
+    did: () => relayKeypair.did(),
+    sign: (bytes) => relayKeypair.sign(bytes),
+  };
+
+  // Use the existing Hono app for relay request dispatch. The relay
+  // registration mints a did:web identity; requests proxied through the
+  // relay arrive as #request frames and are dispatched via app.fetch().
+
+  const { handleRequest } = createSubscriberFactory({ app });
+
+  const dispatcherDid = `did:web:${DISPATCHER_HOST}`;
+  async function getServiceAuthToken(lxm: string): Promise<string> {
+    return await signServiceAuth(relaySigner, { aud: dispatcherDid, lxm });
+  }
+
+  relayController = runSubscriber({
+    label: "qemu",
+    keypair: relayKeypair,
+    getServiceAuthToken,
+    dispatcherHost: DISPATCHER_HOST,
+    handleRequest,
+    subscribe: undefined,
+    onLog: (e) => log("info", `xrpc-relay: ${e.message}`, { severity: e.severity }),
+    onRegistered: async (info) => {
+      log("info", "xrpc-relay registered", { subdomain: info.subdomain, proxyRef: info.proxyRef });
+      // Write did:web to the requested path so external tooling can discover it.
+      try {
+        await Deno.writeTextFile(XRPC_RELAY_ISSUER_PATH!, `${info.proxyRef}\n`);
+        log("info", "xrpc-relay issuer written", { path: XRPC_RELAY_ISSUER_PATH, proxyRef: info.proxyRef });
+      } catch (err) {
+        log("error", "xrpc-relay failed to write issuer", { path: XRPC_RELAY_ISSUER_PATH, error: String(err) });
+      }
+    },
+    onSubscriptionOpen: (sub) => log("info", "xrpc-relay subscription open", { subscriptionId: sub.subscriptionId, nsid: sub.nsid }),
+    onStatus: (status) => log("info", "xrpc-relay status", { status }),
+  });
+
+  log("info", "xrpc-relay connecting", { dispatcherHost: DISPATCHER_HOST });
+}
+
 Deno.serve({ port: PORT }, app.fetch);
