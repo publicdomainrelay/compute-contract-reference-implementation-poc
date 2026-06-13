@@ -20,6 +20,6 @@ export type {
 if (import.meta.main) {
   const { createEphemeralBidder } = await import("@publicdomainrelay/hono-factory-ephemeral-compute-bidder");
   const bidder = await createEphemeralBidder();
-  await bidder.ready;
-  console.log(JSON.stringify({ event: "bidder_ready", did: bidder.did, proxyRef: bidder.proxyRef }));
+  const info = await bidder.ready;
+  console.log(JSON.stringify({ event: "bidder_ready", did: bidder.did, proxyRef: info.proxyRef }));
 }

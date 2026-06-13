@@ -394,22 +394,6 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
   let relaySubdomain = "";
   let relayProxyRef = "";
 
-  const ready = relayReady.then(async (info) => {
-    // Ensure account-auth RBAC record exists before handling contracts.
-    await _cpReady;
-    // Let the bidder authorize itself to call the compute provider's
-    // /v2/account + /v2/droplets endpoints.  The operator allowlist check
-    // in raiseIfUnauthorizedServiceAuth fetches this record from our repo.
-    await ensureOperatorAllowlist(api, did, DO_BASE_URL);
-    // Create the offering record once relay is registered.
-    await ensureOffering(api, did);
-    // Create initial discovery record in own repo.
-    await ensureDiscoveryRecord();
-    // Register with the registry after offering is in place.
-    await registerWithRegistry();
-    return info;
-  });
-
   // ── contract tracking ───────────────────────────────────────────
 
   const activeContracts = new Map<string, ActiveContract>();
@@ -427,6 +411,43 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
       { id: "pdr_temp_compute_event", type: "PDRTempComputeEvent" },
     ],
   });
+
+  const bidder = {
+    did,
+    signer,
+    keypair,
+    api,
+    app,
+    proxyRef: relayProxyRef,
+    relaySubdomain,
+    ready: null as unknown as Promise<{ subdomain: string; proxyRef: string }>,
+    stop: () => {
+      stopDiscoveryUpdater();
+      relayController.stop();
+    },
+    attestationKp,
+    activeContracts,
+  };
+
+  const ready: Promise<{ subdomain: string; proxyRef: string }> = relayReady.then(async (info) => {
+    // Ensure account-auth RBAC record exists before handling contracts.
+    await _cpReady;
+    // Let the bidder authorize itself to call the compute provider's
+    // /v2/account + /v2/droplets endpoints.  The operator allowlist check
+    // in raiseIfUnauthorizedServiceAuth fetches this record from our repo.
+    await ensureOperatorAllowlist(api, did, DO_BASE_URL);
+    // Create the offering record once relay is registered.
+    await ensureOffering(api, did);
+    // Create initial discovery record in own repo.
+    await ensureDiscoveryRecord();
+    // Register with the registry after offering is in place.
+    await registerWithRegistry();
+    // Update the returned object's properties now that relay registration is complete.
+    bidder.proxyRef = info.proxyRef;
+    bidder.relaySubdomain = info.subdomain;
+    return info;
+  });
+  bidder.ready = ready;
 
   // ── compute provider (DigitalOcean + RBAC) ──────────────────────
   // When DIGITALOCEAN_TOKEN + RBAC_REPO_ROOT are set, provision real
@@ -958,22 +979,7 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
 
   logInfo({ event: "bidder_relay_connecting", dispatcherHost: DISPATCHER_HOST });
 
-  return {
-    did,
-    signer,
-    keypair,
-    api,
-    app,
-    proxyRef: relayProxyRef,
-    relaySubdomain,
-    ready,
-    stop: () => {
-      stopDiscoveryUpdater();
-      relayController.stop();
-    },
-    attestationKp,
-    activeContracts,
-  };
+  return bidder;
 }
 
 // ── operator allowlist helper ──────────────────────────────────────────
@@ -1072,11 +1078,9 @@ if (import.meta.main) {
 
   // Wait for relay registration + offering creation so the requester
   // doesn't discover us and submit RFPs before we're ready to receive.
-  const bidInfo = await bidder.ready; // waits for relay + offering creation
-  bidder.proxyRef = bidInfo.proxyRef;
-  bidder.relaySubdomain = bidInfo.subdomain;
+  await bidder.ready; // waits for relay + offering creation
   console.log(`    Bidder DID: ${bidder.did}`);
-  console.log(`    Relay subdomain: ${bidInfo.subdomain}`);
+  console.log(`    Relay subdomain: ${bidder.relaySubdomain}`);
   console.log(`    Bidder proxyRef: ${bidder.proxyRef}`);
 
   // Write DID to file AFTER full readiness so the requester's
