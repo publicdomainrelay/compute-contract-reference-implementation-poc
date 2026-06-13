@@ -17,7 +17,7 @@ import {
   signServiceAuth,
 } from "@publicdomainrelay/hono-factory-atproto-repo";
 import type { Signer } from "@publicdomainrelay/hono-factory-atproto-repo";
-import { PlcClient, createGenesisOp } from "@publicdomainrelay/did-plc";
+import { PlcClient, PlcNotFoundError, createGenesisOp } from "@publicdomainrelay/did-plc";
 import { runSubscriber } from "@publicdomainrelay/xrpc-relay";
 import { createSubscriberFactory } from "@publicdomainrelay/hono-factory-xrpc-subscriber";
 import { IdResolver } from "@atproto/identity";
@@ -122,8 +122,16 @@ export async function createMarketRegistry(opts: MarketRegistryOptions = {}): Pr
   });
 
   logInfo({ event: "registry_did_plc_registering", did });
-  await plc.submitOp(did, op);
-  logInfo({ event: "registry_did_plc_registered", did });
+  const alreadyExists = await plc.resolve(did).then(() => true).catch((e) => {
+    if (e instanceof PlcNotFoundError) return false;
+    throw e;
+  });
+  if (!alreadyExists) {
+    await plc.submitOp(did, op);
+    logInfo({ event: "registry_did_plc_registered", did });
+  } else {
+    logInfo({ event: "registry_did_plc_already_exists", did });
+  }
 
   // ── signer ─────────────────────────────────────────────────────
 
