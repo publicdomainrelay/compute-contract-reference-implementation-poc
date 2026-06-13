@@ -1,17 +1,53 @@
+# The Caddyfile is an easy way to configure your Caddy web server.
+#
+# Unless the file starts with a global options block, the first
+# uncommented line is always the address of your site.
+#
+# To use your own domain name (with automatic HTTPS), first make
+# sure your domain's A/AAAA DNS records are properly pointed to
+# this machine's public IP, then replace ":80" below with your
+# domain name.
+#
+# Refer to the Caddy docs for more information:
+# https://caddyserver.com/docs/caddyfile
+
 knot1.fedfork.com {
 	reverse_proxy http://127.0.0.1:5555
 }
+
 
 mini-cloud-0001.fedfork.com {
 	reverse_proxy http://127.0.0.1:9000
 }
 
+# *.gha.spindle.tangled.fedcicd.com → spindle main.ts via Unix socket
+# Each leftmost subdomain encodes the owner DID: did-plc-aaa.gha.spindle.tangled.fedcicd.com
+# main.ts derives SPINDLE_OWNER_DID from the Host header when env var is unset.
+# Wildcard cert via Cloudflare DNS-01 challenge — requires xcaddy + caddy-dns/cloudflare.
+# Set CF_API_TOKEN in environment before starting Caddy.
+
+tangled.fedcicd.com {
+	# reverse_proxy unix//opt/spindle/spindle.sock
+	reverse_proxy http://127.0.0.1:3000
+}
+
 https://*.gha.spindle.tangled.fedcicd.com {
 	tls {
-		dns cloudflare {
-			api_token {env.CF_API_TOKEN}
-		}
+                dns cloudflare {
+                        api_token {env.CF_API_TOKEN}
+                }
 	}
 	# reverse_proxy unix//opt/spindle/spindle.sock
-	reverse_proxy http://127.0.0.1:9090
+	reverse_proxy http://127.0.0.1:7777
+}
+
+https://gha.spindle.tangled.fedcicd.com {
+	root /var/www/gha-spindle-tangled-fedcicd
+	file_server
+}
+
+
+https://ui.fedfork.com {
+	root /var/www/graph-viewer-0001-fedfork
+	file_server
 }
