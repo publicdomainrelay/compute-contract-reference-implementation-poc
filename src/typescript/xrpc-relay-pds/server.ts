@@ -30,6 +30,10 @@ import {
   listRecordsAll,
   createSubmitBidHandler,
   createRecordResolver,
+  verifyRecordSignatures,
+  verifyRemoteProof,
+  stripResolved,
+  atUriAuthority,
   type AttestationKeypair,
   type InlineAttestation,
   type SubmitBidCallback,
@@ -219,7 +223,7 @@ export async function createRequesterPDS(opts: PDSOptions = {}): Promise<Request
     console.log(JSON.stringify({
       event: "keypair_generated",
       hint: "set REPO_PRIVATE_KEY_HEX to reuse this identity",
-      private_key_hex: privateKeyHex,
+      // private_key_hex: privateKeyHex,
       did_key: keypair.did(),
     }));
   }
@@ -317,6 +321,11 @@ export async function createRequesterPDS(opts: PDSOptions = {}): Promise<Request
       },
       idResolver,
       resolve: createRecordResolver(idResolver),
+      // RFPs advertise submitBid as `${did:plc}#pdr_temp_market` (the did:plc
+      // PLC doc publishes the service; the relay subdomain did:web does not), so
+      // a bidder's PDS proxies to the did:plc and mints `aud: did:plc[#svc]`.
+      // Accept our own did:plc as an audience alongside the host did:web.
+      audienceDids: [did],
     },
     serviceIds: ["pdr_temp_market"],
     onBid,
@@ -541,7 +550,12 @@ runcmd:
     // at the relay subdomain serves only atproto_pds via the factory default.
     submitBid: `${pds.did}#pdr_temp_market`,
     createdAt: new Date().toISOString(),
-  }, pds.attestationKp, proxyRef);
+    // Bind the inline attestation's issuer to the did:plc — its PLC document
+    // publishes the #attestation verificationMethod, and it is also the RFP's
+    // repository. The did:web proxyRef subdomain serves only atproto_pds and
+    // does NOT publish the attestation key, so a bindKeys verifier (e.g. the
+    // bidder) rejects an issuer=did:web signature as unbindable.
+  }, pds.attestationKp, pds.did);
   log("rfp_created", { uri: rfpUri, cid: rfpCid });
 
   // 3. Discover bidder DIDs and submit RFP.
@@ -619,7 +633,9 @@ runcmd:
     bid: { $type: "com.atproto.repo.strongRef", uri: winner.uri, cid: winner.cid },
     submitEvent: `${pds.did}#pdr_temp_compute_event`,
     createdAt: new Date().toISOString(),
-  }, pds.attestationKp, proxyRef);
+    // issuer = did:plc (publishes #attestation); did:web proxyRef does not, so a
+    // bindKeys verifier rejects it. Same binding as the RFP signature above.
+  }, pds.attestationKp, pds.did);
   log("accept_created", { uri: acceptUri, cid: acceptCid });
 
   // 7. Submit accept to winning bidder.
@@ -645,6 +661,37 @@ runcmd:
     }
   }
 
+  // 7b. Verify the receipt before trusting the VM. The receipt is a badge.blue
+  // remote-attestation proof minted by the bidder: it must (a) carry a valid
+  // inline signature in the bidder's repo, and (b) bind to *our* accept record —
+  // its `cid` recomputes over the accept (in our repo) + the receipt's metadata.
+  // No receipt, or either check failing, means the provider never durably
+  // committed to this contract; we must not poll/use the VM.
+  let receiptOk = false;
+  if (receiptUri && receiptCid) {
+    try {
+      const resolver = createRecordResolver(new IdResolver());
+      const receipt = await resolver.resolve({ uri: receiptUri, cid: receiptCid });
+      const accept = await resolver.resolve({ uri: acceptUri, cid: acceptCid });
+      const receiptBare = stripResolved(receipt) as Record<string, unknown>;
+      const sigOk = await verifyRecordSignatures({
+        record: receiptBare,
+        repositoryDid: atUriAuthority(receiptUri),
+      });
+      const bindOk = verifyRemoteProof({
+        subjectRecord: stripResolved(accept) as Record<string, unknown>,
+        subjectRepositoryDid: pds.did,
+        proofRecord: receiptBare,
+      });
+      receiptOk = sigOk && bindOk;
+      log("receipt_verified", { receiptUri, sigOk, bindOk, ok: receiptOk });
+    } catch (err) {
+      log("receipt_verify_error", { receiptUri, error: String(err) });
+    }
+  } else {
+    log("receipt_missing", { receiptUri, receiptCid });
+  }
+
   const result: Record<string, unknown> = {
     event: "compute_request_complete",
     vmUri, vmCid,
@@ -652,12 +699,19 @@ runcmd:
     acceptUri, acceptCid,
     bidUri: winner.uri, bidCid: winner.cid, winnerDid: winner.did,
     receiptUri, receiptCid, submitEventRef,
+    receiptOk,
     bids: bids.length,
   };
   log("compute_request_complete", result);
 
-  // 8. SSH (skip for tests).
-  if (!skipSsh) {
+  // 8. SSH (skip for tests). Gated on a verified receipt: without a valid
+  // provider commitment we bail out of using the VM and fall straight through to
+  // teardown so we don't leave a resource we can't trust running.
+  if (skipSsh) {
+    // tests / headless: skip SSH regardless.
+  } else if (!receiptOk) {
+    log("vm_poll_bailed", { reason: "no valid receipt", receiptUri, receiptCid });
+  } else {
     log("vm_ssh_waiting", { vmFqdn, timeoutSec: vmReadyTimeoutSec });
     const ready = await pollSshReady(privateKeyPath, vmFqdn, vmReadyTimeoutSec * 1000, log);
     if (!ready) {
@@ -679,7 +733,7 @@ runcmd:
       const { uri: delUri, cid: delCid } = await pds.createSignedRepoRecord(
         COMPUTE_EVENTS_VM_DELETE_NSID,
         { $type: COMPUTE_EVENTS_VM_DELETE_NSID, reason: "session_ended", createdAt: nowIso },
-        pds.attestationKp, proxyRef,
+        pds.attestationKp, pds.did,
       );
       const eventRecord = {
         $type: EVENT_NSID,
@@ -688,7 +742,7 @@ runcmd:
         createdAt: nowIso,
       };
       const { uri: eventUri, cid: eventCid } = await pds.createSignedRepoRecord(
-        EVENT_NSID, eventRecord, pds.attestationKp, proxyRef,
+        EVENT_NSID, eventRecord, pds.attestationKp, pds.did,
       );
       const target = await pds.resolveBidderEndpoint(submitEventRef);
       if (!target) {
@@ -720,7 +774,15 @@ if (import.meta.main) {
   pds.relaySubdomain = subdomain;
 
   await runComputeContract(pds, {
-    vmName: (() => { const i = Deno.args.indexOf("--vm-name"); return i >= 0 ? Deno.args[i + 1] ?? "compute" : "compute"; })(),
+    // Default `compute-<8 hex>` when --vm-name is absent (distinct per run);
+    // an explicit --vm-name is used verbatim.
+    vmName: (() => {
+      const i = Deno.args.indexOf("--vm-name");
+      if (i >= 0 && Deno.args[i + 1]) return Deno.args[i + 1];
+      const b = new Uint8Array(4);
+      crypto.getRandomValues(b);
+      return `compute-${Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("")}`;
+    })(),
     bidWindowSec: (() => { const i = Deno.args.indexOf("--bid-window-sec"); return i >= 0 ? parseInt(Deno.args[i + 1] ?? "30", 10) : 30; })(),
     skipSsh: false,
     noDelete: Deno.args.includes("--no-delete"),

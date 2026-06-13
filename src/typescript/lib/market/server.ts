@@ -45,6 +45,14 @@ export interface MarketServerDeps {
    * derives `did:web:<owner-subdomain>` from the inbound `Host` header.
    */
   hostname: string | ((req: Request) => string);
+  /**
+   * Extra DIDs (beyond the host-derived `did:web:HOST`) inbound tokens may target
+   * in their `aud`. Set when this endpoint is advertised under a second identity
+   * — e.g. a relay whose submit* service is referenced in records as a
+   * `did:plc#service`, so the caller's PDS proxies to that did:plc and mints
+   * `aud: did:plc`. Forwarded to {@link verifyMarketServiceAuth}.
+   */
+  audienceDids?: string[];
   /** Identity resolver used to look up issuer signing keys for JWT verification. */
   idResolver: IdResolver;
   /** Strong-ref resolver used to fetch referenced records. */
@@ -128,6 +136,7 @@ async function authorize(
       hostname: typeof deps.hostname === "function" ? deps.hostname(req) : deps.hostname,
       lxm,
       serviceIds,
+      extraAudienceDids: deps.audienceDids,
       idResolver: deps.idResolver,
     });
   } catch (err) {

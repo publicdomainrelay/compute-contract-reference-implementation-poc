@@ -43,6 +43,15 @@ export type VerifyMarketServiceAuthOptions = {
   lxm: string;
   /** Service-id fragments this endpoint will accept in the token `aud`. */
   serviceIds: string[];
+  /**
+   * Extra DIDs (beyond the host-derived `did:web:HOST`) this endpoint answers
+   * for. Use when the service is reachable under a second identity — e.g. a
+   * relay whose service is advertised in the RFP as a `did:plc#service` ref, so
+   * a caller's PDS proxies to that did:plc and mints `aud: did:plc` (or
+   * `did:plc#serviceId`), which would never match the bare did:web. Each entry
+   * is accepted bare and with every configured `#serviceId` fragment.
+   */
+  extraAudienceDids?: string[];
   /** Identity resolver used to fetch the issuer's signing key. */
   idResolver: IdResolver;
 };
@@ -62,16 +71,19 @@ export type VerifyMarketServiceAuthOptions = {
 export async function verifyMarketServiceAuth(
   opts: VerifyMarketServiceAuthOptions,
 ): Promise<ServiceAuthResult> {
-  const { authHeader, hostname, lxm, serviceIds, idResolver } = opts;
+  const { authHeader, hostname, lxm, serviceIds, extraAudienceDids, idResolver } = opts;
   const token = extractBearer(authHeader);
   const serviceDid = serviceDidForHost(hostname);
 
   const payload = await verifyJwt(token, null, lxm, (did: string) => idResolver.did.resolveAtprotoKey(did));
 
-  // Acceptable audiences: the bare service DID, plus one ref per service id.
+  // Acceptable audiences: the bare service DID, plus one ref per service id —
+  // and the same matrix for every extra DID this endpoint also answers for.
   const acceptable = new Map<string, string | undefined>();
-  acceptable.set(serviceDid, undefined);
-  for (const id of serviceIds) acceptable.set(`${serviceDid}#${id}`, id);
+  for (const did of [serviceDid, ...(extraAudienceDids ?? [])]) {
+    acceptable.set(did, undefined);
+    for (const id of serviceIds) acceptable.set(`${did}#${id}`, id);
+  }
 
   const aud = (payload as Record<string, unknown>).aud as string | undefined;
   if (aud === undefined || !acceptable.has(aud)) {

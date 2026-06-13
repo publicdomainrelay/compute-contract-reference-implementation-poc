@@ -10,7 +10,16 @@
 
 import { createRequesterPDS, runComputeContract } from "./server.ts";
 
-const vmName = (() => { const i = Deno.args.indexOf("--vm-name"); return i >= 0 ? Deno.args[i + 1] ?? "compute" : "compute"; })();
+/** 8 random lowercase hex chars (4 bytes), for a unique default VM name suffix. */
+function randomHex8(): string {
+  const b = new Uint8Array(4);
+  crypto.getRandomValues(b);
+  return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+// Default VM name is `compute-<8 hex>` when --vm-name is not passed, so repeated
+// runs get distinct names; an explicit --vm-name is used verbatim.
+const vmName = (() => { const i = Deno.args.indexOf("--vm-name"); return i >= 0 && Deno.args[i + 1] ? Deno.args[i + 1] : `compute-${randomHex8()}`; })();
 const bidWindowSec = (() => { const i = Deno.args.indexOf("--bid-window-sec"); return i >= 0 ? parseInt(Deno.args[i + 1] ?? "30", 10) : 30; })();
 const noDelete = Deno.args.includes("--no-delete");
 const execProgram = (() => { const i = Deno.args.indexOf("--exec"); return i >= 0 ? Deno.args[i + 1] ?? "bash" : "bash"; })();
