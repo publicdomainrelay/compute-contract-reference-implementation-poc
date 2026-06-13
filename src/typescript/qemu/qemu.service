@@ -1,0 +1,22 @@
+[Unit]
+Description=fedfork qemu compute provider (deno main.ts, mini-cloud-0001)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+SyslogIdentifier=qemu
+User=johnandersen777
+WorkingDirectory=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/qemu
+Environment=HOME=/home/johnandersen777
+Environment=PATH=/home/johnandersen777/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/qemu/qemu.env
+EnvironmentFile=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/qemu/qemu.env.secrets
+ExecStart=/home/johnandersen777/.deno/bin/deno run -A ./main.ts
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,21 @@
+[Unit]
+Description=fedfork bidder (deno main.ts, market bidding)
+After=network-online.target bidder-tunnel.service
+Wants=network-online.target bidder-tunnel.service
+
+[Service]
+Type=simple
+SyslogIdentifier=bidder
+User=johnandersen777
+WorkingDirectory=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/bidder
+Environment=HOME=/home/johnandersen777
+Environment=PATH=/home/johnandersen777/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/bidder/bidder.env
+EnvironmentFile=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/bidder/bidder.env.secrets
+ExecStart=/home/johnandersen777/.deno/bin/deno run --allow-all ./main.ts
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

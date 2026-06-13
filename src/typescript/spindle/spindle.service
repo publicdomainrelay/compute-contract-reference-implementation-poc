@@ -1,0 +1,21 @@
+[Unit]
+Description=fedcicd spindle (deno main.ts, gha.spindle.tangled.fedcicd.com)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+SyslogIdentifier=spindle
+User=johnandersen777
+WorkingDirectory=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/spindle
+Environment=HOME=/home/johnandersen777
+Environment=PATH=/home/johnandersen777/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/spindle/spindle.env
+EnvironmentFile=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/spindle/spindle.env.secrets
+ExecStart=/home/johnandersen777/.deno/bin/deno run --allow-all ./main.ts
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

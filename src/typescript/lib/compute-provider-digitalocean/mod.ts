@@ -103,7 +103,7 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
     });
     const json = await res.json();
-    console.error("[do] /v2/account:", JSON.stringify(json));
+    log("debug", "DO /v2/account response", { account: json });
     if (res.status >= 400) throw new Error(`DO /v2/account ${res.status}: ${JSON.stringify(json)}`);
 
     let uuid = json.account.team.uuid;
@@ -112,7 +112,7 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
       uuid = uuid.substring(8);
     }
     const result = { rbacRepoRoot: RBAC_REPO_ROOT, teamUuid: uuid };
-    console.error("[do] /v2/account fixedup:", JSON.stringify(result));
+    log("debug", "DO /v2/account resolved context", { ...result });
     return result;
   }
 
@@ -120,9 +120,12 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     const proc = new Deno.Command(cmd[0], { args: cmd.slice(1), cwd, stdin: "null", stdout: "piped", stderr: "piped" });
     const out = await proc.output();
     if (out.code !== 0) {
-      console.error(`[exec] ${cmd.join(" ")} -> ${out.code}`);
-      console.error(`[exec] stdout: ${new TextDecoder().decode(out.stdout)}`);
-      console.error(`[exec] stderr: ${new TextDecoder().decode(out.stderr)}`);
+      log("error", "subprocess failed", {
+        cmd,
+        code: out.code,
+        stdout: new TextDecoder().decode(out.stdout),
+        stderr: new TextDecoder().decode(out.stderr),
+      });
     }
     return { code: out.code, stdout: out.stdout, stderr: out.stderr };
   }
@@ -192,9 +195,9 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
       },
       createdAt: new Date().toISOString(),
     };
-    console.error(`[com.fedproxy.rbac] creating`);
+    log("info", "creating rbac record", { nsid: RBAC_NSID });
     const rbacRef = await atprotoCreateRecord(RBAC_NSID, rbacRecord);
-    console.error(`[com.fedproxy.rbac] created`);
+    log("info", "rbac record created", { nsid: RBAC_NSID, uri: rbacRef.uri });
 
     const rbac = doctx.rbacRepoRoot;
     if (!(await isDir(`${rbac}/.git`))) {
@@ -230,12 +233,12 @@ echo "password=\${TOKEN}"
         ["git", "branch", "--set-upstream-to=origin/main"],
       ];
       for (const cmd of cmds) {
-        console.error(`[rbac] ${cmd.join(" ")}`);
+        log("info", "rbac git command", { cmd });
         const r = await runProc(cmd, rbac);
         if (r.code !== 0) {
           if (cmd[1] === "pull" && new TextDecoder().decode(r.stderr).includes("couldn't find remote ref main")) continue;
           if (cmd[1] === "branch" && new TextDecoder().decode(r.stderr).includes("no commit on branch")) continue;
-          console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
+          log("error", "rbac git command failed", { cmd, code: r.code });
         }
       }
     }
@@ -268,13 +271,13 @@ echo "password=\${TOKEN}"
       ["git", "push", "-u", "origin", "main"],
     ];
     for (const cmd of commitCmds) {
-      console.error(`[rbac] running ${cmd.join(" ")}`);
+      log("info", "rbac git command", { cmd });
       const r = await runProc(cmd, rbac);
       if (r.code !== 0) {
         if (cmd[1] === "commit" && new TextDecoder().decode(r.stdout).includes("nothing to commit")) continue;
-        console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
+        log("error", "rbac git command failed", { cmd, code: r.code });
       }
-      console.error(`[rbac] ran ${cmd.join(" ")} exited code (${r.code})`);
+      log("info", "rbac git command exited", { cmd, code: r.code });
     }
 
     const schemaCmds: string[][] = [
@@ -284,7 +287,7 @@ echo "password=\${TOKEN}"
     for (const cmd of schemaCmds) {
       const r = await runProc(cmd, rbac);
       if (r.code !== 0) {
-        console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
+        log("error", "rbac git command failed", { cmd, code: r.code });
       }
     }
 
@@ -375,13 +378,13 @@ echo "password=\${TOKEN}"
       return canonicalJson(value) === wanted;
     });
     if (existing) {
-      console.error(`[com.fedproxy.rbac] account.auth record already exists (${existing.uri})`);
+      log("info", "account.auth record already exists", { uri: existing.uri });
       return;
     }
 
-    console.error(`[com.fedproxy.rbac] creating account.auth record`);
+    log("info", "creating account.auth record", { nsid: RBAC_NSID });
     await atprotoCreateRecord(RBAC_NSID, rbacRecord);
-    console.error(`[com.fedproxy.rbac] account.auth record created`);
+    log("info", "account.auth record created", { nsid: RBAC_NSID });
   }
 
   function injectAcceptBundle(userData: string, bundle: Record<string, unknown>): string {

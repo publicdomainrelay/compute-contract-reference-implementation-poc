@@ -425,7 +425,7 @@ const main = async () => {
   const app = makeApp();
   const { port } = cfg.server;
   Deno.serve({ port, hostname: "0.0.0.0", onListen: ({ port, hostname }) => {
-    console.error(`[server] listening on http://${hostname}:${port} (settlement: ${settlement.mode})`);
+    log("info", "server listening", { url: `http://${hostname}:${port}`, settlement: settlement.mode });
   } }, app.fetch);
 };
 

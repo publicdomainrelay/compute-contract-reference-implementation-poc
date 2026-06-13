@@ -2,11 +2,15 @@
 // reads only the variables it actually needs (e.g. the x402 settlement requires
 // CDP keys, the free settlement requires none).
 
+import { createLogger } from "../utils/log.ts";
+
+const log = createLogger({ service: "bidder" });
+
 /** Read a required env var, exiting with a clear message if it is unset. */
 export function reqEnv(name: string): string {
   const v = Deno.env.get(name);
   if (!v) {
-    console.error(`${name} is not set`);
+    log("error", "required env var not set", { name });
     Deno.exit(1);
   }
   return v;
