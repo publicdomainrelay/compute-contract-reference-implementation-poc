@@ -195,14 +195,12 @@ async function imageExists(tag: string): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 function generateEntrypoint(distro: Distro): string {
-  // No systemd. Cloud-init stages run sequentially, then sshd in foreground.
-  // set +e ensures runcmd failures (e.g. systemctl from provisioning.ts)
-  // don't block the container from starting.
+  // No systemd. Cloud-init stages run sequentially, then websocat/fedproxy/sshd.
   const sshdPath = "/usr/sbin/sshd";
 
   return `#!/bin/bash
 set -e
-echo "[container-entrypoint] Starting cloud-init + sshd container (${distro})"
+echo "[container-entrypoint] Starting cloud-init + services container (${distro})"
 
 # Generate SSH host keys on first boot
 if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
@@ -253,13 +251,12 @@ echo "[container-entrypoint] Running cloud-init modules --mode=config"
 cloud-init modules --mode=config || true
 
 echo "[container-entrypoint] Running cloud-init modules --mode=final"
-# systemctl shim handles systemctl commands, no need for set +e
 cloud-init modules --mode=final || true
 echo "[container-entrypoint] cloud-init complete"
 
-# Start sshd in foreground (container's main process)
-echo "[container-entrypoint] Starting sshd on port 22"
-exec ${sshdPath} -D -p 22
+	# Start sshd in foreground (container's main process)
+	echo "[container-entrypoint] Starting sshd on port 22"
+	exec ${sshdPath} -D -p 22
 `;
 }
 
@@ -405,10 +402,21 @@ export async function runContainer(
   });
   await Deno.writeTextFile(udFile, userData);
 
+  // Generate entrypoint and write to temp file (runtime mount → no image rebuild
+  // needed when entrypoint changes).
+  const entrypointScript = generateEntrypoint(distro);
+  const epFile = await Deno.makeTempFile({
+    dir: CACHE_DIR,
+    prefix: "container-ep-",
+    suffix: ".sh",
+  });
+  await Deno.writeTextFile(epFile, entrypointScript);
+  await run("chmod", ["+x", epFile]);
+
   // Clean up any old container with same name
   await new Deno.Command("docker", { args: ["rm", "-f", containerName] }).output().catch(() => {});
 
-  // Run container
+  // Run container — entrypoint mounted at runtime overrides baked-in
   const { code } = await new Deno.Command("docker", {
     args: [
       "run", "-d",
@@ -416,6 +424,7 @@ export async function runContainer(
       "--memory", memory,
       "--memory-swap", memory,
       "-v", `${udFile}:/tmp/user-data:ro`,
+      "-v", `${epFile}:/entrypoint.sh:ro`,
       "-e", "USER_DATA_FILE=/tmp/user-data",
       tag,
     ],
@@ -425,6 +434,7 @@ export async function runContainer(
 
   if (code !== 0) {
     await Deno.remove(udFile).catch(() => {});
+    await Deno.remove(epFile).catch(() => {});
     throw new Error(`docker run failed for ${containerName} (exit ${code})`);
   }
 
@@ -438,16 +448,18 @@ export async function runContainer(
   console.log("==> Waiting for SSH...");
   const ready = await pollSsh(ip, 22);
   if (!ready) {
-    // Clean up temp file but leave container for debugging
+    // Clean up temp files but leave container for debugging
     await Deno.remove(udFile).catch(() => {});
+    await Deno.remove(epFile).catch(() => {});
     throw new Error(`SSH not ready within timeout for ${containerName} (ip=${ip})`);
   }
 
   console.log(`==> SSH ready! ssh agent@${ip}`);
   console.log(`    Container: ${containerName}`);
 
-  // Clean up temp file
+  // Clean up temp files
   await Deno.remove(udFile).catch(() => {});
+  await Deno.remove(epFile).catch(() => {});
 
   return { ip, containerName };
 }

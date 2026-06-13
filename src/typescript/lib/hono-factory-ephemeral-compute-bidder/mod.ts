@@ -77,6 +77,8 @@ import { TID } from "@atproto/common";
 import { createComputeProviderDigitalOcean } from "@publicdomainrelay/compute-provider-digitalocean";
 import type { StrongRef } from "@publicdomainrelay/compute-provider-digitalocean";
 import { createAttestationCid, type RecordMap } from "@atiproto/atproto-attestation";
+import { createComputeProviderLocalFactory } from "@publicdomainrelay/hono-factory-compute-provider-local";
+import { createLogger } from "../../utils/log.ts";
 
 // ── options ──────────────────────────────────────────────────────────
 
@@ -139,45 +141,97 @@ function parseAtUri(uri: string): { repo: string; collection: string; rkey: stri
 }
 
 /**
- * Start a local container-mode OIDC issuer (../../qemu/main.ts) and wait for
- * its relay-registered issuer URL.  Returns the did:web URL to use as the
- * DigitalOcean base URL (DO_BASE_URL).
+ * Start the local compute provider in-process (no subprocess shell-out).
+ * Creates the Hono factory, registers with the relay, and returns the
+ * https:// base URL derived from the proxyRef once the relay registration
+ * completes.  The ISSUER_URL is updated dynamically so service-auth JWT
+ * validation (aud == service did) passes when callers reach us through
+ * the relay.
  */
 async function startContainerHost(): Promise<string> {
-  const tmpDir = await Deno.makeTempDir({ prefix: "bidder-container-" });
-  const issuerPath = `${tmpDir}/bidder-container-xrpc.txt`;
+  const CACHE_DIR = `${Deno.env.get("HOME")}/.cache/simple-qemu`;
+  const CONTAINER_IMAGE = Deno.env.get("CONTAINER_IMAGE") ?? "container-runner-ubuntu:latest";
+  const DISPATCHER_HOST = Deno.env.get("DISPATCHER_HOST") ?? "xrpc.fedproxy.com";
+  const dispatcherDid = `did:web:${DISPATCHER_HOST}`;
 
-  const qemuMainPath = new URL("../../qemu/main.ts", import.meta.url).pathname;
+  // Mutable issuer URL — starts as a placeholder and gets updated after
+  // relay registration (only then do we know the proxyRef).
+  let issuerUrl = "http://localhost:0";
 
-  const cmd = new Deno.Command("deno", {
-    args: ["run", "-A", qemuMainPath, "--write-xrpc-relay-generated-issuer-to", issuerPath],
-    env: { ...Deno.env.toObject(), CONTAINER_MODE: "true" },
-    stdout: "inherit",
-    stderr: "inherit",
+  const qemuLog = createLogger({ service: "qemu", selfDid: () => "did:plc:unknown" });
+
+  // Warm up OIDC signing key (same as qemu/main.ts startup).
+  const { getSigningKey, getPublicJwk } = await import("../../qemu/oidc_helper.ts");
+  await getSigningKey();
+  const jwk = await getPublicJwk();
+  qemuLog("info", "miniCloud listening", { port: 0, issuer: issuerUrl, kid: jwk.kid });
+
+  const factory = createComputeProviderLocalFactory({
+    operatorHandle: () => Deno.env.get("OPERATOR_HANDLE") ?? "",
+    selfDid: "",
+    issuerUrl: () => issuerUrl,
+    vmImage: Deno.env.get("VM_IMAGE") ?? "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner",
+    containerMode: true,
+    containerImage: CONTAINER_IMAGE,
+    cacheDir: CACHE_DIR,
+    log: qemuLog,
   });
-  cmd.spawn(); // fire-and-forget: the qemu server keeps running
 
-  // Poll the file until the relay registration writes the issuer URL.
-  const deadline = Date.now() + 60_000;
-  let url = "";
-  while (!url && Date.now() < deadline) {
-    try {
-      const content = await Deno.readTextFile(issuerPath);
-      url = content.trim();
-    } catch {
-      // File not written yet
-    }
-    if (!url) {
-      await new Promise((r) => setTimeout(r, 500));
-    }
-  }
+  const app = factory.createApp();
+  const { handleRequest } = createSubscriberFactory({ app });
 
-  if (!url) {
-    throw new Error("Container host did not write issuer URL within 60s");
-  }
+  const relayKeypair = await Secp256k1Keypair.create({ exportable: true });
+  const relaySigner: Signer = {
+    did: () => relayKeypair.did(),
+    sign: (bytes) => relayKeypair.sign(bytes),
+  };
 
-  console.log(JSON.stringify({ event: "container_host_ready", url, issuerPath }));
-  return url;
+  const baseUrl = await new Promise<string>((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error("Container host relay registration timed out")),
+      60_000,
+    );
+
+    runSubscriber({
+      label: "qemu",
+      keypair: relayKeypair,
+      getServiceAuthToken: async (lxm: string) =>
+        signServiceAuth(relaySigner, { aud: dispatcherDid, lxm }),
+      dispatcherHost: DISPATCHER_HOST,
+      handleRequest,
+      subscribe: undefined,
+      onLog: (e) =>
+        qemuLog("info", `xrpc-relay: ${e.message}`, { severity: e.severity }),
+      onRegistered: (info) => {
+        clearTimeout(timeout);
+        const proxyHost = info.proxyRef.replace(/^did:web:/, "");
+        const url = `https://${proxyHost}`;
+        issuerUrl = url;
+        Deno.env.set("ISSUER_URL", url);
+        Deno.env.set("THIS_ENDPOINT", url);
+        qemuLog("info", "xrpc-relay issuer url updated", { baseUrl: url });
+        console.log(
+          JSON.stringify({
+            event: "container_host_ready",
+            url: info.proxyRef,
+            baseUrl: url,
+          }),
+        );
+        resolve(url);
+      },
+      onSubscriptionOpen: (sub) =>
+        qemuLog("info", "xrpc-relay subscription open", {
+          subscriptionId: sub.subscriptionId,
+          nsid: sub.nsid,
+        }),
+      onStatus: (status) =>
+        qemuLog("info", "xrpc-relay status", { status }),
+    });
+
+    qemuLog("info", "xrpc-relay connecting", { dispatcherHost: DISPATCHER_HOST });
+  });
+
+  return baseUrl;
 }
 
 /**
@@ -249,9 +303,15 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
     const p = Deno.env.get("RBAC_REPO_ROOT") ?? "";
     try { return Deno.realPathSync(p); } catch { return p; }
   })();
+  // In container mode without explicit RBAC config, use a temp dir so the
+  // compute provider's RBAC filesystem ops have a place to write (best-effort —
+  // the container host uses service auth, not OIDC/RBAC, for droplet endpoints).
+  const _RBAC_REPO_ROOT_RESOLVED = START_CONTAINER_HOST && !RBAC_REPO_ROOT
+    ? await Deno.makeTempDir({ prefix: "rbac-" })
+    : RBAC_REPO_ROOT;
   const ACCEPT_PATH_RECORD = cpCfg?.acceptPathRecord ?? Deno.env.get("ACCEPT_PATH_RECORD") ?? "$HOME/secrets/publicdomainrelay.com/market/accept.json";
   const ACCEPT_PATH_VM = cpCfg?.acceptPathVm ?? Deno.env.get("ACCEPT_PATH_VM") ?? "/root/secrets/publicdomainrelay.com/market/accept.json";
-  const HAS_COMPUTE_PROVIDER = !!(DO_TOKEN && RBAC_REPO_ROOT);
+  const HAS_COMPUTE_PROVIDER = !!(DO_TOKEN && RBAC_REPO_ROOT) || START_CONTAINER_HOST;
 
   const logInfo = (obj: Record<string, unknown>) => console.log(JSON.stringify(obj));
   const log = (
@@ -308,6 +368,10 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
   await plc.submitOp(did, op);
   logInfo({ event: "bidder_did_plc_registered", did });
 
+  // Tell the in-process compute provider our DID so its RBAC middleware
+  // can resolve the operator for service-auth allowlist checks.
+  Deno.env.set("OPERATOR_HANDLE", did);
+
   // ── signer ─────────────────────────────────────────────────────
 
   const signer: Signer = {
@@ -327,6 +391,10 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
   const ready = relayReady.then(async (info) => {
     // Ensure account-auth RBAC record exists before handling contracts.
     await _cpReady;
+    // Let the bidder authorize itself to call the compute provider's
+    // /v2/account + /v2/droplets endpoints.  The operator allowlist check
+    // in raiseIfUnauthorizedServiceAuth fetches this record from our repo.
+    await ensureOperatorAllowlist(api, did, DO_BASE_URL);
     // Create the offering record once relay is registered.
     await ensureOffering(api, did);
     // Create initial discovery record in own repo.
@@ -360,7 +428,7 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
         acceptPathVm: ACCEPT_PATH_VM,
         digitaloceanBaseUrl: DO_BASE_URL,
         doToken: DO_TOKEN,
-        rbacRepoRoot: RBAC_REPO_ROOT,
+        rbacRepoRoot: _RBAC_REPO_ROOT_RESOLVED,
         parseAtUri,
       })
     : null;
@@ -874,6 +942,58 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
   };
 }
 
+// ── operator allowlist helper ──────────────────────────────────────────
+// Creates a com.publicdomainrelay.temp.auth.allowlist.rbacDid record in
+// the operator's (our own) repo so raiseIfUnauthorizedServiceAuth can
+// verify that we're allowed to call the compute provider's /v2/account
+// and /v2/droplets endpoints (step 2b in rbac_helper.ts).  Mirrors the
+// allow-access.ts CLI but uses the repo-factory API directly.
+const ALLOWLIST_NSID = "com.publicdomainrelay.temp.auth.allowlist.rbacDid";
+
+async function ensureOperatorAllowlist(
+  api: ReturnType<typeof createRepoFactory>["api"],
+  operatorDid: string,
+  service: string,
+): Promise<void> {
+  const existing = await api.listRecords(operatorDid, ALLOWLIST_NSID, { limit: 100 });
+  // Check if an allowlist record already protects this service+scope.
+  for (const rec of existing?.records ?? []) {
+    const v = rec.value as Record<string, unknown>;
+    const protects = v.protects as Record<string, { service: string; scope?: string }> | undefined;
+    for (const p of Object.values(protects ?? {})) {
+      if (
+        (p.service === service || p.service === "*") &&
+        (p.scope === "account.auth" || p.scope === "*" || !p.scope)
+      ) {
+        console.log(JSON.stringify({ event: "bidder_allowlist_exists", uri: rec.uri }));
+        return;
+      }
+    }
+  }
+  const rkey = TID.next().toString();
+  await api.applyWrites(operatorDid, [{
+    action: "create",
+    collection: ALLOWLIST_NSID,
+    rkey,
+    record: {
+      $type: ALLOWLIST_NSID,
+      protects: {
+        allowSelf: { service, scope: "account.auth" },
+      },
+      allowed: {
+        allowSelf: [operatorDid],
+      },
+      createdAt: new Date().toISOString(),
+    },
+  }]);
+  console.log(JSON.stringify({
+    event: "bidder_allowlist_created",
+    uri: `at://${operatorDid}/${ALLOWLIST_NSID}/${rkey}`,
+    service,
+    operatorDid,
+  }));
+}
+
 // ── offering helper ──────────────────────────────────────────────────
 // Creates a com.publicdomainrelay.temp.market.offering record in the
 // bidder's own repo so requesters can discover it.
@@ -901,4 +1021,34 @@ async function ensureOffering(
     },
   }]);
   console.log(JSON.stringify({ event: "bidder_offering_created", uri: `at://${did}/${OFFERING_NSID}/${rkey}` }));
+}
+
+// ── CLI main (when run directly) ──────────────────────────────────────
+
+if (import.meta.main) {
+  const writeDidPlcToIdx = Deno.args.indexOf("--write-did-plc-to");
+  const writeDidPlcTo = writeDidPlcToIdx >= 0 && Deno.args[writeDidPlcToIdx + 1]
+    ? Deno.args[writeDidPlcToIdx + 1]
+    : "";
+
+  const bidder = await createEphemeralBidder({
+    port: 0,
+    label: "test-bidder",
+  });
+
+  // Wait for relay registration + offering creation so the requester
+  // doesn't discover us and submit RFPs before we're ready to receive.
+  const bidInfo = await bidder.ready; // waits for relay + offering creation
+  bidder.proxyRef = bidInfo.proxyRef;
+  bidder.relaySubdomain = bidInfo.subdomain;
+  console.log(`    Bidder DID: ${bidder.did}`);
+  console.log(`    Relay subdomain: ${bidInfo.subdomain}`);
+  console.log(`    Bidder proxyRef: ${bidder.proxyRef}`);
+
+  // Write DID to file AFTER full readiness so the requester's
+  // startBidderAndSetEnv poll doesn't return until we can receive RFPs.
+  if (writeDidPlcTo) {
+    await Deno.writeTextFile(writeDidPlcTo, bidder.did + "\n");
+    console.log(JSON.stringify({ event: "bidder_did_written", path: writeDidPlcTo, did: bidder.did }));
+  }
 }

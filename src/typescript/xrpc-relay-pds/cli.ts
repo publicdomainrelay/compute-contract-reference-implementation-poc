@@ -115,6 +115,10 @@ async function startBidderAndSetEnv(): Promise<void> {
     label: "test-bidder",
   });
 
+  // Wait for relay registration + offering creation so the requester
+  // doesn't try to submit RFPs before we can receive them.
+  await bidder.ready;
+
   const slot = findNextBidderHandleSlot();
   const key = `BIDDER_HANDLE_${String(slot).padStart(4, "0")}`;
   Deno.env.set(key, bidder.did);

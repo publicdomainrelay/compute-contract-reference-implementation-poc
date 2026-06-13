@@ -8,6 +8,7 @@
     "@atproto/identity": "npm:@atproto/identity",
     "@atiproto/atproto-attestation": "../atproto-attestation-port/mod.ts",
     "@publicdomainrelay/compute-provider-digitalocean": "../compute-provider-digitalocean/mod.ts",
+    "@publicdomainrelay/hono-factory-compute-provider-local": "../hono-factory-compute-provider-local/mod.ts",
     "@publicdomainrelay/did-plc": "../did-plc/mod.ts",
     "@publicdomainrelay/hono-factory-atproto-repo": "../hono-factory-atproto-repo/mod.ts",
     "@publicdomainrelay/hono-factory-xrpc-subscriber": "../hono-factory-xrpc-subscriber/mod.ts",

@@ -49,12 +49,16 @@ export type ComputeProviderLocalEnv = {
 // ---------------------------------------------------------------------------
 
 export interface ComputeProviderLocalFactoryOptions {
-  /** Operator handle (DID) for RBAC service-auth checks. */
-  operatorHandle: string;
+  /** Operator handle (DID) for RBAC service-auth checks.  When a function,
+   *  called at request time so callers can update a captured variable after
+   *  the operator DID becomes known (e.g. after PLC registration). */
+  operatorHandle: string | (() => string);
   /** This host's own DID, used as actorDid when no caller context is available. */
   selfDid: string;
-  /** OIDC issuer URL (also used as THIS_ENDPOINT). */
-  issuerUrl: string;
+  /** OIDC issuer URL (also used as THIS_ENDPOINT).  When a function, called
+   *  at request time so callers can update a captured variable after relay
+   *  registration (before that the proxyRef is unknown). */
+  issuerUrl: string | (() => string);
   /** Docker image for QEMU VMs. */
   vmImage: string;
   /** When true, use container.ts (cloud-init+sshd) instead of QEMU. */
@@ -262,7 +266,11 @@ export interface ComputeProviderLocalFactoryState {
 export function createComputeProviderLocalFactory(
   opts: ComputeProviderLocalFactoryOptions,
 ): ComputeProviderLocalFactory {
-  const { operatorHandle, issuerUrl, log } = opts;
+  const { operatorHandle: _operatorHandle, issuerUrl: _issuerUrl, log } = opts;
+  const getIssuerUrl = (): string =>
+    typeof _issuerUrl === "function" ? _issuerUrl() : _issuerUrl;
+  const getOperatorHandle = (): string =>
+    typeof _operatorHandle === "function" ? _operatorHandle() : _operatorHandle;
 
   const dropletsByActx = new Map<string, Map<string, Droplet>>();
 
@@ -290,8 +298,8 @@ export function createComputeProviderLocalFactory(
       app.get("/.well-known/openid-configuration", async (c) => {
         const jwk = await getPublicJwk();
         return c.json({
-          issuer: issuerUrl,
-          jwks_uri: `${issuerUrl}/.well-known/jwks`,
+          issuer: getIssuerUrl(),
+          jwks_uri: `${getIssuerUrl()}/.well-known/jwks`,
           response_types_supported: ["id_token"],
           claims_supported: ["sub", "aud", "exp", "iat", "iss", "actx"],
           id_token_signing_alg_values_supported: ["RS256"],
@@ -317,7 +325,7 @@ export function createComputeProviderLocalFactory(
       app.use("/v1/oidc/issue", async (c, next) => {
         try {
           const token = extractBearer(c.req.header("Authorization"));
-          const authToken = await raiseIfUnauthorized(issuerUrl, "droplets.wid", token, "/v1/oidc/issue", c.req.method);
+          const authToken = await raiseIfUnauthorized(getIssuerUrl(), "droplets.wid", token, "/v1/oidc/issue", c.req.method);
           c.set("authToken", authToken);
           setLogContext({ actorDid: authToken.actx });
           await next();
@@ -330,7 +338,7 @@ export function createComputeProviderLocalFactory(
       app.use("/v2/account", async (c, next) => {
         try {
           const token = extractBearer(c.req.header("Authorization"));
-          const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", operatorHandle, token, "/v2/account", c.req.method);
+          const authToken = await raiseIfUnauthorizedServiceAuth(getIssuerUrl(), "account.auth", getOperatorHandle(), token, "/v2/account", c.req.method);
           c.set("authToken", authToken);
           setLogContext({ actorDid: authToken.actx });
           await next();
@@ -343,7 +351,7 @@ export function createComputeProviderLocalFactory(
       app.use("/v2/droplets", async (c, next) => {
         try {
           const token = extractBearer(c.req.header("Authorization"));
-          const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", operatorHandle, token, c.req.path, c.req.method);
+          const authToken = await raiseIfUnauthorizedServiceAuth(getIssuerUrl(), "account.auth", getOperatorHandle(), token, c.req.path, c.req.method);
           c.set("authToken", authToken);
           setLogContext({ actorDid: authToken.actx });
           await next();
@@ -356,7 +364,7 @@ export function createComputeProviderLocalFactory(
       app.use("/v2/droplets/*", async (c, next) => {
         try {
           const token = extractBearer(c.req.header("Authorization"));
-          const authToken = await raiseIfUnauthorizedServiceAuth(issuerUrl, "account.auth", operatorHandle, token, c.req.path, c.req.method);
+          const authToken = await raiseIfUnauthorizedServiceAuth(getIssuerUrl(), "account.auth", getOperatorHandle(), token, c.req.path, c.req.method);
           c.set("authToken", authToken);
           setLogContext({ actorDid: authToken.actx });
           await next();
@@ -466,7 +474,10 @@ export function createComputeProviderLocalFactory(
           provisioningData.associateWithDroplet(droplet.id);
 
           log("info", "droplets.create → local VM", { name: body.name, actx });
-          await spawnVM(droplet, provisioningData.userData, opts);
+          // Fire-and-forget: container startup can take 5-30s (image build,
+          // cloud-init, sshd).  Don't block the HTTP response — the relay
+          // would time out.  Status transitions new→active in background.
+          spawnVM(droplet, provisioningData.userData, opts);
           return c.json({ droplet }, 202);
         } catch (err) {
           log("error", "droplets create failed", { error: String(err) });
