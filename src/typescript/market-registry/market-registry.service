@@ -1,0 +1,21 @@
+[Unit]
+Description=fedfork market registry (deno main.ts, bidder discovery/registration)
+After=network-online.target market-registry-tunnel.service
+Wants=network-online.target market-registry-tunnel.service
+
+[Service]
+Type=simple
+SyslogIdentifier=market-registry
+User=johnandersen777
+WorkingDirectory=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/market-registry
+Environment=HOME=/home/johnandersen777
+Environment=PATH=/home/johnandersen777/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/market-registry/market-registry.env
+EnvironmentFile=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/market-registry/market-registry.env.secrets
+ExecStart=/home/johnandersen777/.deno/bin/deno run --allow-all ./main.ts
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

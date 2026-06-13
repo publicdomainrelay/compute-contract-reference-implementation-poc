@@ -1,0 +1,24 @@
+[Unit]
+Description=fedfork market registry reverse ssh tunnel (market-registry-0001 -> 127.0.0.1:4031 via fedproxy.com)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+SyslogIdentifier=market-registry-tunnel
+User=johnandersen777
+Environment=HOME=/home/johnandersen777
+EnvironmentFile=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/market-registry/market-registry-tunnel.env
+ExecStart=/usr/bin/ssh -NnT -p ${REMOTE_PORT} \
+  -o UserKnownHostsFile=/dev/null \
+  -o StrictHostKeyChecking=no \
+  -o PasswordAuthentication=no \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o ExitOnForwardFailure=yes \
+  -R ${TUNNEL_BIND}:${LOCAL_TARGET} ${REMOTE}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
