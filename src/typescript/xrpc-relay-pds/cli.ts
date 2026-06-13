@@ -10,6 +10,7 @@
 
 import { createRequesterPDS, runComputeContract } from "./server.ts";
 import { IdResolver } from "@atproto/identity";
+import { createEphemeralBidder } from "@publicdomainrelay/hono-factory-ephemeral-compute-bidder";
 
 // ── bidder handle env-var discovery ──────────────────────────────────────
 
@@ -97,49 +98,32 @@ function findNextBidderHandleSlot(): number {
 }
 
 /**
- * When START_BIDDER=true: spawn bidder-pds.ts as a subprocess, poll its
- * DID file until a did:plc: appears, and set the next BIDDER_HANDLE_NNNN
- * env var so discoverBidderDidsFromEnv() picks it up.
+ * When START_BIDDER=true: create an ephemeral bidder in-process, capture its
+ * DID, and set the next BIDDER_HANDLE_NNNN env var so
+ * discoverBidderDidsFromEnv() picks it up.
  */
 async function startBidderAndSetEnv(): Promise<void> {
   if (Deno.env.get("START_BIDDER") !== "true") return;
 
-  const tmpDir = await Deno.makeTempDir({ prefix: "bidder-" });
-  const didPlcPath = `${tmpDir}/bidder-did-plc.txt`;
-
-  const bidderPdsPath = new URL("./bidder-pds.ts", import.meta.url).pathname;
-
-  console.log(JSON.stringify({ event: "bidder_subprocess_starting", didPlcPath }));
-
-  const cmd = new Deno.Command("deno", {
-    args: ["run", "-A", bidderPdsPath, "--write-did-plc-to", didPlcPath],
-    env: { ...Deno.env.toObject(), START_CONTAINER_HOST: "true" },
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  cmd.spawn(); // fire-and-forget: bidder keeps running
-
-  // Poll the file until a did:plc: appears.
-  const deadline = Date.now() + 120_000;
-  let did = "";
-  while (!did && Date.now() < deadline) {
-    try {
-      const content = await Deno.readTextFile(didPlcPath);
-      const match = content.match(/did:plc:[a-zA-Z0-9]+/);
-      if (match) did = match[0];
-    } catch {
-      // File not written yet
-    }
-    if (!did) await new Promise((r) => setTimeout(r, 500));
+  // START_CONTAINER_HOST must be visible to the bidder.
+  if (!Deno.env.has("START_CONTAINER_HOST")) {
+    Deno.env.set("START_CONTAINER_HOST", "true");
   }
 
-  if (!did) throw new Error("Bidder did not write DID within 120s");
+  const bidder = await createEphemeralBidder({
+    port: 0,
+    label: "test-bidder",
+  });
 
   const slot = findNextBidderHandleSlot();
   const key = `BIDDER_HANDLE_${String(slot).padStart(4, "0")}`;
-  Deno.env.set(key, did);
+  Deno.env.set(key, bidder.did);
 
-  console.log(JSON.stringify({ event: "bidder_subprocess_registered", key, did, didPlcPath }));
+  console.log(JSON.stringify({
+    event: "bidder_in_process_registered",
+    key,
+    did: bidder.did,
+  }));
 }
 
 // ── websocat bootstrap ─────────────────────────────────────────────────

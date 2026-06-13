@@ -14,7 +14,7 @@
  */
 
 import { createRequesterPDS, runComputeContract } from "./server.ts";
-import { createBidderPDS } from "./bidder-pds.ts";
+import { createEphemeralBidder } from "@publicdomainrelay/hono-factory-ephemeral-compute-bidder";
 
 // ── helpers ──────────────────────────────────────────────────────────
 
@@ -62,7 +62,7 @@ async function main() {
 
   // ── 2. Start bidder PDS ────────────────────────────────────────
   console.log("[2] Starting bidder PDS…");
-  const bidder = await createBidderPDS({
+  const bidder = await createEphemeralBidder({
     port: 0,
     label: "test-bidder",
   });

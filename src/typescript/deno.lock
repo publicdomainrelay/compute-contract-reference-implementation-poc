@@ -4353,6 +4353,14 @@
           "npm:multiformats@*"
         ]
       },
+      "lib/hono-factory-ephemeral-compute-bidder": {
+        "dependencies": [
+          "npm:@atproto/common@*",
+          "npm:@atproto/crypto@*",
+          "npm:@atproto/identity@*",
+          "npm:hono@^4.12.23"
+        ]
+      },
       "lib/hono-factory-market": {
         "dependencies": [
           "npm:hono@^4.12.23"

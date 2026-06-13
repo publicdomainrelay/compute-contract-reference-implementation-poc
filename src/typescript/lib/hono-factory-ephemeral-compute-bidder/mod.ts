@@ -1,24 +1,27 @@
 /**
- * bidder-pds — lightweight atproto PDS that acts as a market bidder.
+ * ephemeral-compute-bidder — lightweight atproto PDS that acts as a market
+ * bidder with compute provider (DigitalOcean + RBAC), registry registration,
+ * and discovery/heartbeat support.
  *
  * Mounts submitRfp, submitAccept, and submitEvent handlers using repo-factory
  * primitives (no @atproto/api Agent, no PDS login). When DIGITALOCEAN_TOKEN +
- * RBAC_REPO_ROOT are set (via options or env), provisions real droplets on accept
- * and tears them down on vm.delete via the DigitalOcean compute provider — same
- * as ../bidder does.
+ * RBAC_REPO_ROOT are set (via options or env), provisions real droplets on
+ * accept and tears them down on vm.delete via the DigitalOcean compute
+ * provider.
  *
  * Without compute provider config, acts as a test-only bidder (no provisioning).
  *
  * Exports:
- *   createBidderPDS() — returns a running bidder with relay registration
+ *   createEphemeralBidder() — returns a running bidder with relay registration,
+ *     offering, discovery record, and optional registry registration
  *
  * Usage (test):
- *   const bidder = await createBidderPDS({ port: 0 });
+ *   const bidder = await createEphemeralBidder({ port: 0 });
  *   const { proxyRef, did } = await bidder.ready;
- *   // … run contract flow, bidder.did goes in requester's extraBidderDids …
+ *   // … run contract flow …
  *
  * Usage (with compute provider):
- *   const bidder = await createBidderPDS({
+ *   const bidder = await createEphemeralBidder({
  *     port: 0,
  *     computeProvider: {
  *       digitaloceanToken: "...",
@@ -67,10 +70,12 @@ import {
   SUBMIT_BID_LXM,
   EVENT_NSID,
   COMPUTE_EVENTS_VM_DELETE_NSID,
+  REGISTER_BIDDER_NSID,
+  BIDDER_DISCOVERY_NSID,
 } from "@publicdomainrelay/lexicons";
 import { TID } from "@atproto/common";
 import { createComputeProviderDigitalOcean } from "@publicdomainrelay/compute-provider-digitalocean";
-import type { StrongRef as ComputeProviderStrongRef } from "@publicdomainrelay/compute-provider-digitalocean";
+import type { StrongRef } from "@publicdomainrelay/compute-provider-digitalocean";
 import { createAttestationCid, type RecordMap } from "@atiproto/atproto-attestation";
 
 // ── options ──────────────────────────────────────────────────────────
@@ -83,7 +88,7 @@ export interface ComputeProviderConfig {
   acceptPathVm?: string;
 }
 
-export interface BidderPDSOptions {
+export interface EphemeralBidderOptions {
   port?: number;
   privateKeyHex?: string;
   plcDirectoryUrl?: string;
@@ -91,6 +96,10 @@ export interface BidderPDSOptions {
   label?: string;
   /** Compute provider config — when set, provisions real droplets on accept. */
   computeProvider?: ComputeProviderConfig;
+  /** Registry endpoint for registering this bidder (registerBidder XRPC). */
+  registryEndpoint?: string;
+  /** Interval (ms) for discovery/heartbeat updates. Default 60000. */
+  heartbeatIntervalMs?: number;
 }
 
 /** receiptKey → active contract state */
@@ -100,7 +109,7 @@ export interface ActiveContract {
   acceptAuthor: string;
 }
 
-export interface BidderPDS {
+export interface EphemeralBidder {
   did: string;
   signer: Signer;
   keypair: Secp256k1Keypair;
@@ -130,7 +139,7 @@ function parseAtUri(uri: string): { repo: string; collection: string; rkey: stri
 }
 
 /**
- * Start a local container-mode OIDC issuer (../qemu/main.ts) and wait for
+ * Start a local container-mode OIDC issuer (../../qemu/main.ts) and wait for
  * its relay-registered issuer URL.  Returns the did:web URL to use as the
  * DigitalOcean base URL (DO_BASE_URL).
  */
@@ -138,7 +147,7 @@ async function startContainerHost(): Promise<string> {
   const tmpDir = await Deno.makeTempDir({ prefix: "bidder-container-" });
   const issuerPath = `${tmpDir}/bidder-container-xrpc.txt`;
 
-  const qemuMainPath = new URL("../qemu/main.ts", import.meta.url).pathname;
+  const qemuMainPath = new URL("../../qemu/main.ts", import.meta.url).pathname;
 
   const cmd = new Deno.Command("deno", {
     args: ["run", "-A", qemuMainPath, "--write-xrpc-relay-generated-issuer-to", issuerPath],
@@ -219,15 +228,15 @@ function createAgentAdapter(
   };
 }
 
-// ── createBidderPDS ──────────────────────────────────────────────────
+// ── createEphemeralBidder ─────────────────────────────────────────────
 
-export async function createBidderPDS(opts: BidderPDSOptions = {}): Promise<BidderPDS> {
-  const PORT = opts.port ?? parseInt(Deno.env.get("PORT") ?? "0");
+export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): Promise<EphemeralBidder> {
   const PRIVATE_KEY_HEX = opts.privateKeyHex ?? Deno.env.get("REPO_PRIVATE_KEY_HEX") ?? "";
   const PLC_DIRECTORY_URL = opts.plcDirectoryUrl ?? Deno.env.get("PLC_DIRECTORY_URL") ?? "https://plc.directory";
   const DISPATCHER_HOST = opts.dispatcherHost ?? Deno.env.get("DISPATCHER_HOST") ?? "xrpc.fedproxy.com";
-  const BASE_ORIGIN = Deno.env.get("BASE_ORIGIN") ?? `http://localhost:${PORT}`;
-  const LABEL = opts.label ?? "test-bidder-pds";
+  const LABEL = opts.label ?? "ephemeral-bidder";
+  const REGISTRY_ENDPOINT = opts.registryEndpoint ?? Deno.env.get("REGISTRY_ENDPOINT") ?? "";
+  const HEARTBEAT_INTERVAL_MS = opts.heartbeatIntervalMs ?? parseInt(Deno.env.get("HEARTBEAT_INTERVAL_MS") ?? "60000");
 
   // ── compute provider config ─────────────────────────────────────
   const cpCfg = opts.computeProvider;
@@ -318,9 +327,12 @@ export async function createBidderPDS(opts: BidderPDSOptions = {}): Promise<Bidd
   const ready = relayReady.then(async (info) => {
     // Ensure account-auth RBAC record exists before handling contracts.
     await _cpReady;
-    // Create the offering record once relay is registered. We use api.applyWrites
-    // directly (no Agent needed); the offering lives in the bidder's own repo.
+    // Create the offering record once relay is registered.
     await ensureOffering(api, did);
+    // Create initial discovery record in own repo.
+    await ensureDiscoveryRecord();
+    // Register with the registry after offering is in place.
+    await registerWithRegistry();
     return info;
   });
 
@@ -333,7 +345,7 @@ export async function createBidderPDS(opts: BidderPDSOptions = {}): Promise<Bidd
   const { app, subscribe, api } = createRepoFactory({
     storage: new MemoryStorage(),
     signer,
-    baseOrigin: BASE_ORIGIN,
+    baseOrigin: `https://${keypair.did().replace(/:/g, "-").toLowerCase()}.${DISPATCHER_HOST}`,
   });
 
   // ── compute provider (DigitalOcean + RBAC) ──────────────────────
@@ -426,6 +438,96 @@ export async function createBidderPDS(opts: BidderPDSOptions = {}): Promise<Bidd
     return { status: res.status, ok: res.ok, body: resBody };
   }
 
+  // ── discovery record maintenance ─────────────────────────────────
+
+  let discoveryTimer: ReturnType<typeof setInterval> | null = null;
+  let discoveryRecordRkey: string | null = null;
+
+  async function ensureDiscoveryRecord(): Promise<void> {
+    const nowIso = new Date().toISOString();
+
+    // Check if discovery record already exists
+    if (!discoveryRecordRkey) {
+      const existing = await api.listRecords(did, BIDDER_DISCOVERY_NSID, { limit: 1 });
+      if (existing?.records?.length) {
+        discoveryRecordRkey = existing.records[0].uri.split("/").pop()!;
+      }
+    }
+
+    if (discoveryRecordRkey) {
+      // Update: fetch current record, bump updatedAt, write full record back
+      const current = await api.getRecord(did, BIDDER_DISCOVERY_NSID, discoveryRecordRkey);
+      const prev = (current?.value ?? {}) as Record<string, unknown>;
+      const updated = {
+        ...prev,
+        updatedAt: nowIso,
+      };
+      await api.applyWrites(did, [
+        { action: "update", collection: BIDDER_DISCOVERY_NSID, rkey: discoveryRecordRkey, record: updated },
+      ]);
+    } else {
+      // Create new
+      const rkey = TID.next().toString();
+      const record = {
+        $type: BIDDER_DISCOVERY_NSID,
+        endpointUrl: relayProxyRef || `${did}#pdr_temp_market`,
+        appliesTo: [COMPUTE_VM_NSID],
+        updatedAt: nowIso,
+        createdAt: nowIso,
+      };
+      await api.applyWrites(did, [
+        { action: "create", collection: BIDDER_DISCOVERY_NSID, rkey, record },
+      ]);
+      discoveryRecordRkey = rkey;
+    }
+  }
+
+  function startDiscoveryUpdater(): void {
+    if (discoveryTimer) return;
+    const intervalMs = HEARTBEAT_INTERVAL_MS;
+    logInfo({ event: "discovery_updater_start", intervalMs });
+    discoveryTimer = setInterval(async () => {
+      try {
+        await ensureDiscoveryRecord();
+      } catch (err) {
+        logInfo({ event: "discovery_update_error", err: String(err) });
+      }
+    }, intervalMs);
+  }
+
+  function stopDiscoveryUpdater(): void {
+    if (discoveryTimer) {
+      clearInterval(discoveryTimer);
+      discoveryTimer = null;
+    }
+  }
+
+  // ── registry integration ────────────────────────────────────────
+
+  async function registerWithRegistry(): Promise<void> {
+    if (!REGISTRY_ENDPOINT) {
+      logInfo({ event: "registry_disabled", reason: "no REGISTRY_ENDPOINT configured" });
+      return;
+    }
+
+    const body = {
+      bidderDid: did,
+      appliesTo: [COMPUTE_VM_NSID],
+    };
+
+    try {
+      const res = await callService(REGISTRY_ENDPOINT, REGISTER_BIDDER_NSID, REGISTER_BIDDER_NSID, body);
+      if (res.ok) {
+        logInfo({ event: "registered_with_registry" });
+        startDiscoveryUpdater();
+      } else {
+        logInfo({ event: "register_with_registry_error", status: res.status, body: res.body });
+      }
+    } catch (err) {
+      logInfo({ event: "register_with_registry_exception", err: String(err) });
+    }
+  }
+
   // ── submitRfp handler ───────────────────────────────────────────
   //
   // Called when a requester submits an RFP to this bidder. Creates a
@@ -507,7 +609,7 @@ export async function createBidderPDS(opts: BidderPDSOptions = {}): Promise<Bidd
     // Provision a real droplet if compute provider is wired.
     // Resolve chain: accept.rfp → RFP record → .payload → compute.vm record.
     let dropletId: number | string | undefined;
-    let rbacRef: ComputeProviderStrongRef | undefined;
+    let rbacRef: StrongRef | undefined;
     if (computeProvider && rfpRef) {
       try {
         const resolve = createRecordResolver(idResolver);
@@ -535,7 +637,7 @@ export async function createBidderPDS(opts: BidderPDSOptions = {}): Promise<Bidd
             };
             const result = await computeProvider.createDroplet(vmWithBundle as any, issuerDid) as {
               json: { droplet?: { id?: number | string } };
-              rbacRef: ComputeProviderStrongRef;
+              rbacRef: StrongRef;
             };
             dropletId = result.json.droplet?.id;
             rbacRef = result.rbacRef;
@@ -642,7 +744,7 @@ export async function createBidderPDS(opts: BidderPDSOptions = {}): Promise<Bidd
       if (contract.rbacRef) {
         try {
           await computeProvider.deleteRbacRecord(
-            { $type: "com.atproto.repo.strongRef", uri: contract.rbacRef.uri, cid: contract.rbacRef.cid },
+            { $type: "com.atproto.repo.strongRef", uri: contract.rbacRef.uri, cid: contract.rbacRef.cid } as StrongRef,
             reason,
           );
           ctx.log("info", "submitEvent: rbac record deleted", { rbacUri: contract.rbacRef.uri, reason });
@@ -712,13 +814,6 @@ export async function createBidderPDS(opts: BidderPDSOptions = {}): Promise<Bidd
   });
   app.post(`/xrpc/${SUBMIT_EVENT_NSID}`, (c) => eventHandler(c.req.raw));
 
-  // ── HTTP server ─────────────────────────────────────────────────
-
-  const serverController = new AbortController();
-  Deno.serve({ port: PORT, signal: serverController.signal }, app.fetch);
-
-  logInfo({ event: "bidder_listening", port: PORT, did });
-
   // ── relay subscriber ────────────────────────────────────────────
 
   const dispatcherDid = `did:web:${DISPATCHER_HOST}`;
@@ -770,7 +865,10 @@ export async function createBidderPDS(opts: BidderPDSOptions = {}): Promise<Bidd
     proxyRef: relayProxyRef,
     relaySubdomain,
     ready,
-    stop: () => { relayController.stop(); serverController.abort(); },
+    stop: () => {
+      stopDiscoveryUpdater();
+      relayController.stop();
+    },
     attestationKp,
     activeContracts,
   };
@@ -803,31 +901,4 @@ async function ensureOffering(
     },
   }]);
   console.log(JSON.stringify({ event: "bidder_offering_created", uri: `at://${did}/${OFFERING_NSID}/${rkey}` }));
-}
-
-// ── CLI main (when run directly) ──────────────────────────────────────
-
-if (import.meta.main) {
-  const writeDidPlcToIdx = Deno.args.indexOf("--write-did-plc-to");
-  const writeDidPlcTo = writeDidPlcToIdx >= 0 && Deno.args[writeDidPlcToIdx + 1]
-    ? Deno.args[writeDidPlcToIdx + 1]
-    : "";
-
-  const bidder = await createBidderPDS({
-    port: 0,
-    label: "test-bidder",
-  });
-
-  // Write DID to file before waiting for relay (DID is known after PLC registration).
-  if (writeDidPlcTo) {
-    await Deno.writeTextFile(writeDidPlcTo, bidder.did + "\n");
-    console.log(JSON.stringify({ event: "bidder_did_written", path: writeDidPlcTo, did: bidder.did }));
-  }
-
-  const bidInfo = await bidder.ready; // waits for relay + offering creation
-  bidder.proxyRef = bidInfo.proxyRef;
-  bidder.relaySubdomain = bidInfo.subdomain;
-  console.log(`    Bidder DID: ${bidder.did}`);
-  console.log(`    Relay subdomain: ${bidInfo.subdomain}`);
-  console.log(`    Bidder proxyRef: ${bidder.proxyRef}`);
 }

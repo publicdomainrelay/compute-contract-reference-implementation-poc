@@ -15,6 +15,7 @@
     "@publicdomainrelay/hono-factory-xrpc-subscriber": "../lib/hono-factory-xrpc-subscriber/mod.ts",
     "@publicdomainrelay/lexicons": "../lib/lexicons/mod.ts",
     "@publicdomainrelay/market": "../lib/market/mod.ts",
-    "@publicdomainrelay/xrpc-relay": "../lib/xrpc-relay/mod.ts"
+    "@publicdomainrelay/xrpc-relay": "../lib/xrpc-relay/mod.ts",
+    "@publicdomainrelay/hono-factory-ephemeral-compute-bidder": "../lib/hono-factory-ephemeral-compute-bidder/mod.ts"
   }
 }

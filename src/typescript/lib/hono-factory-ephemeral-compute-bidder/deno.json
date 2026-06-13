@@ -1,0 +1,19 @@
+{
+  "name": "@publicdomainrelay/hono-factory-ephemeral-compute-bidder",
+  "version": "0.0.0",
+  "exports": "./mod.ts",
+  "imports": {
+    "@atproto/common": "npm:@atproto/common",
+    "@atproto/crypto": "npm:@atproto/crypto",
+    "@atproto/identity": "npm:@atproto/identity",
+    "@atiproto/atproto-attestation": "../atproto-attestation-port/mod.ts",
+    "@publicdomainrelay/compute-provider-digitalocean": "../compute-provider-digitalocean/mod.ts",
+    "@publicdomainrelay/did-plc": "../did-plc/mod.ts",
+    "@publicdomainrelay/hono-factory-atproto-repo": "../hono-factory-atproto-repo/mod.ts",
+    "@publicdomainrelay/hono-factory-xrpc-subscriber": "../hono-factory-xrpc-subscriber/mod.ts",
+    "@publicdomainrelay/lexicons": "../lexicons/mod.ts",
+    "@publicdomainrelay/market": "../market/mod.ts",
+    "@publicdomainrelay/xrpc-relay": "../xrpc-relay/mod.ts",
+    "hono": "npm:hono@^4.12.23"
+  }
+}
