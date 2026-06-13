@@ -23,6 +23,7 @@
     "./utils/client-xrpc-caller",
     "./compute-spa",
     "./web-client-example",
+    "./xrpc-relay-pds",
     "./spindle",
     "./bidder",
     "./qemu"

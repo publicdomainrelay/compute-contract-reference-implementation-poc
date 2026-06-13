@@ -4433,9 +4433,6 @@
         ]
       },
       "web-client-example": {
-        "dependencies": [
-          "npm:@atproto/crypto@*"
-        ],
         "packageJson": {
           "dependencies": [
             "npm:@atproto/api@~0.20.14",
@@ -4454,6 +4451,11 @@
             "npm:vite@^8.0.12"
           ]
         }
+      },
+      "xrpc-relay-pds": {
+        "dependencies": [
+          "npm:@atproto/crypto@*"
+        ]
       }
     }
   }
