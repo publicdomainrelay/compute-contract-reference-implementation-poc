@@ -304,6 +304,13 @@ export async function createRequesterPDS(opts: PDSOptions = {}): Promise<Request
     storage: new MemoryStorage(),
     signer,
     baseOrigin: BASE_ORIGIN,
+    // Publish the same market services in the did:web doc as in the PLC doc, so
+    // an RFP that advertises submitBid as a did:web proxyRef resolves to this
+    // endpoint. Mirrors the `services` block in the genesis op above.
+    didWebServices: [
+      { id: "pdr_temp_market", type: "PDRTempMarket" },
+      { id: "pdr_temp_compute_event", type: "PDRTempComputeEvent" },
+    ],
   });
 
   // ── submitBid handler ───────────────────────────────────────────

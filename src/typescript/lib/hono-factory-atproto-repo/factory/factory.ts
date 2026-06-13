@@ -34,6 +34,18 @@ export interface RepoFactoryOptions {
   sequencer?: Sequencer;
   /** Base origin for the Hono app (default: https://pds.local). */
   baseOrigin?: string;
+  /**
+   * Service entries to publish in this repo's did:web document
+   * (`GET /.well-known/did.json`). The `serviceEndpoint` is derived per-request
+   * from the Host header, so one factory serves the did:web doc for whatever
+   * subdomain it is proxied behind (e.g. `<sub>.xrpc.fedproxy.com`).
+   *
+   * Without this, the did:web identity carries no `did.json` and
+   * service-proxying callers (e.g. market `submitBid`, which resolves the RFP's
+   * `submitBid` did:web ref to find the POST endpoint) cannot resolve the
+   * service and the call silently never lands. Omitted/empty → no route mounted.
+   */
+  didWebServices?: Array<{ id: string; type: string }>;
 }
 
 export interface RepoFactory {
@@ -105,6 +117,28 @@ export function createRepoFactory(opts: RepoFactoryOptions): RepoFactory {
   app.get("/.well-known/atproto-did", (c) => {
     return c.text(did);
   });
+
+  // did:web document — published only when service entries are configured.
+  // serviceEndpoint is derived from the Host header so the same factory serves
+  // the did:web doc for whatever subdomain it is proxied behind.
+  const didWebServices = opts.didWebServices ?? [];
+  if (didWebServices.length > 0) {
+    app.get("/.well-known/did.json", (c) => {
+      const host = (c.req.header("host") ?? "").split(":")[0];
+      if (!host) {
+        throw new XrpcError("InvalidRequest", "missing Host header");
+      }
+      return c.json({
+        "@context": ["https://www.w3.org/ns/did/v1"],
+        id: `did:web:${host}`,
+        service: didWebServices.map((s) => ({
+          id: s.id.startsWith("#") ? s.id : `#${s.id}`,
+          type: s.type,
+          serviceEndpoint: `https://${host}`,
+        })),
+      });
+    });
+  }
 
   // ── getServiceAuth ─────────────────────────────────────────────
   // Mint an inter-service auth JWT signed by this repo's signing key.

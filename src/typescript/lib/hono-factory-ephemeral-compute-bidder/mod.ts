@@ -414,6 +414,12 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
     storage: new MemoryStorage(),
     signer,
     baseOrigin: `https://${keypair.did().replace(/:/g, "-").toLowerCase()}.${DISPATCHER_HOST}`,
+    // Mirror the PLC market services into the did:web doc, so a bid's
+    // submitAccept did:web ref resolves back to this endpoint.
+    didWebServices: [
+      { id: "pdr_temp_market", type: "PDRTempMarket" },
+      { id: "pdr_temp_compute_event", type: "PDRTempComputeEvent" },
+    ],
   });
 
   // ── compute provider (DigitalOcean + RBAC) ──────────────────────
