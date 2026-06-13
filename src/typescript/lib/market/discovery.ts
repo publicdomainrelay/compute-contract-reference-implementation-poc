@@ -20,7 +20,7 @@ import { noopLogger, type Logger } from "./types.ts";
  * explicit registries. These are stable did:web refs (fedproxy tunnel URLs).
  */
 export const DEFAULT_REGISTRY_ENDPOINTS: string[] = [
-  "did:web:market-registry--johnandersen777-bsky-social.fedproxy.com#pdr_temp_market",
+  "did:web:market-registry-0001--johnandersen777-bsky-social.fedproxy.com#pdr_temp_market",
 ];
 
 /** Env var name for overriding the default registry list (comma-separated). */

@@ -132,6 +132,8 @@ export async function createMarketRegistry(opts: MarketRegistryOptions = {}): Pr
     sign: (bytes) => keypair.sign(bytes),
   };
 
+  const atprotoPublicKeyMultibase = signingKeyDid.replace("did:key:", "");
+
   // ── repo factory ────────────────────────────────────────────────
 
   const { app, subscribe, api } = createRepoFactory({
@@ -139,6 +141,43 @@ export async function createMarketRegistry(opts: MarketRegistryOptions = {}): Pr
     signer,
     baseOrigin: BASE_ORIGIN,
   });
+
+  // ── did:web document ────────────────────────────────────────────
+  //
+  // Serve a did:web document so the registry is reachable through any
+  // fedproxy tunnel hostname (e.g. market-registry-0001--...fedproxy.com).
+  // The Host header drives the DID id and serviceEndpoint.
+
+  app.get("/.well-known/did.json", (c) => {
+    const host = c.req.header("host") ?? "";
+    const webDid = `did:web:${host}`;
+    return c.json({
+      "@context": ["https://www.w3.org/ns/did/v1"],
+      id: webDid,
+      verificationMethod: [{
+        id: `${webDid}#atproto`,
+        type: "Multikey",
+        controller: webDid,
+        publicKeyMultibase: atprotoPublicKeyMultibase,
+      }],
+      service: [{
+        id: "#pdr_temp_market",
+        type: "PDRTempMarket",
+        serviceEndpoint: `https://${host}`,
+      }],
+    });
+  });
+
+  // ── hostname helper — uses request Host header so service-auth
+  //     audience matches whichever tunnel the request arrived through.
+
+  const resolveHostname = (req?: Request) => {
+    const host = req?.headers?.get?.("host") ?? "";
+    if (host) return host;
+    return relaySubdomain
+      ? `${relaySubdomain}.${DISPATCHER_HOST}`
+      : DISPATCHER_HOST;
+  };
 
   // ── registration store ──────────────────────────────────────────
 
@@ -157,9 +196,7 @@ export async function createMarketRegistry(opts: MarketRegistryOptions = {}): Pr
   // registerBidder — called by bidders to register their offering.
   const registerBidderHandler = createRegisterBidderHandler({
     deps: {
-      hostname: () => relaySubdomain
-        ? `${relaySubdomain}.${DISPATCHER_HOST}`
-        : DISPATCHER_HOST,
+      hostname: resolveHostname,
       idResolver,
       resolve: createRecordResolver(idResolver),
       log,
@@ -174,9 +211,7 @@ export async function createMarketRegistry(opts: MarketRegistryOptions = {}): Pr
   // listBidders — query endpoint for discovering bidders (any caller with valid service-auth).
   const listBiddersHandler = createListBiddersHandler({
     deps: {
-      hostname: () => relaySubdomain
-        ? `${relaySubdomain}.${DISPATCHER_HOST}`
-        : DISPATCHER_HOST,
+      hostname: resolveHostname,
       idResolver,
       resolve: createRecordResolver(idResolver),
       log,
