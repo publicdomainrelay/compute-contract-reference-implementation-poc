@@ -55,6 +55,10 @@ import {
   SUBMIT_ACCEPT_NSID,
   SUBMIT_RFP_LXM,
   SUBMIT_ACCEPT_LXM,
+  SUBMIT_EVENT_NSID,
+  SUBMIT_EVENT_LXM,
+  EVENT_NSID,
+  COMPUTE_EVENTS_VM_DELETE_NSID,
 } from "@publicdomainrelay/lexicons";
 
 // sh.tangled.graph.vouch — external namespace, not in PDR lexicons module.
@@ -89,6 +93,102 @@ async function generateSshKeypair(
   return { publicKey, privateKeyPath };
 }
 
+/**
+ * Mirror atprp-ssh-relay's flattenLabel: fold an identity part (service name,
+ * handle, or raw DID) into a single DNS label by replacing dots and colons with
+ * dashes. The relay serves each tunnel at
+ * `flattenLabel(SERVICE)--flattenLabel(SSH_USER).<endpoint>`; we recompute the
+ * same host so we can poll/ssh the VM at the exact name the relay registers.
+ * Must stay in sync with cmd/atprp-ssh-relay/main.go:flattenLabel.
+ */
+function flattenLabel(s: string): string {
+  return s.replace(/[.:]/g, "-");
+}
+
+// ── ssh-over-websocat tunnel helpers ─────────────────────────────────
+
+/**
+ * Common ssh args reaching the VM through the fedproxy WebSocket tunnel:
+ * `-o ProxyCommand=websocat --binary wss://<fqdn>` bridges ssh's stdio to the
+ * relay-fronted websocat→sshd listener; the generated key is the only
+ * credential (root login is key-only). Host-key checking is disabled because
+ * each VM mints a fresh host key on first boot.
+ */
+function sshTunnelArgs(privateKeyPath: string, fqdn: string): string[] {
+  return [
+    "-o", `ProxyCommand=websocat --binary wss://${fqdn}`,
+    "-o", `IdentityFile=${privateKeyPath}`,
+    "-o", "IdentitiesOnly=yes",
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "UserKnownHostsFile=/dev/null",
+    "-o", "LogLevel=ERROR",
+  ];
+}
+
+/**
+ * Poll the VM until sshd answers through the tunnel, or give up after
+ * timeoutMs. Each probe is a fresh non-interactive `ssh … true` with a short
+ * ConnectTimeout (well under the ~18s fedproxy idle-WS cutoff). Returns true
+ * once a probe exits 0.
+ */
+async function pollSshReady(
+  privateKeyPath: string,
+  fqdn: string,
+  timeoutMs: number,
+  log: (event: string, extra?: Record<string, unknown>) => void,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    attempt++;
+    const cmd = new Deno.Command("ssh", {
+      args: [
+        ...sshTunnelArgs(privateKeyPath, fqdn),
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        `root@${fqdn}`,
+        "true",
+      ],
+      stdout: "null",
+      stderr: "piped",
+    });
+    const { code, stderr } = await cmd.output();
+    if (code === 0) {
+      log("vm_ssh_ready", { fqdn, attempt });
+      return true;
+    }
+    log("vm_ssh_poll", { fqdn, attempt, code, error: new TextDecoder().decode(stderr).trim().slice(0, 200) });
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+  log("vm_ssh_timeout", { fqdn, timeoutMs });
+  return false;
+}
+
+/**
+ * Open an interactive ssh session (with TTY allocation) when stdin is a
+ * terminal, letting the operator play in the VM. Otherwise run a one-off
+ * `program` (default `bash`) non-interactively. Inherits stdio so the user
+ * drives the session directly. Returns the ssh exit code.
+ */
+async function runSshSession(
+  privateKeyPath: string,
+  fqdn: string,
+  program: string,
+): Promise<number> {
+  const interactive = Deno.stdin.isTerminal();
+  const args = [...sshTunnelArgs(privateKeyPath, fqdn)];
+  if (interactive) {
+    // -tt forces TTY allocation even though our own stdin is inherited.
+    args.push("-tt", `root@${fqdn}`);
+  } else {
+    args.push(`root@${fqdn}`, program);
+  }
+  const cmd = new Deno.Command("ssh", { args, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+  const child = cmd.spawn();
+  const { code } = await child.status;
+  return code;
+}
+
 // ── env ──────────────────────────────────────────────────────────────
 
 const PORT = parseInt(Deno.env.get("PORT") ?? "8080");
@@ -96,6 +196,10 @@ const PRIVATE_KEY_HEX = Deno.env.get("REPO_PRIVATE_KEY_HEX") ?? "";
 const BASE_ORIGIN = Deno.env.get("BASE_ORIGIN") ?? `http://localhost:${PORT}`;
 const PLC_DIRECTORY_URL = Deno.env.get("PLC_DIRECTORY_URL") ?? "https://plc.directory";
 const DISPATCHER_HOST = Deno.env.get("DISPATCHER_HOST") ?? "xrpc.fedproxy.com";
+// fedproxy host fronting the per-VM websocat→sshd tunnel (distinct from the
+// xrpc relay's DISPATCHER_HOST). The VM is reachable at
+// `<vmName>--<did>.<FEDPROXY_HOST>` once fedproxy-client comes up inside it.
+const FEDPROXY_HOST = Deno.env.get("FEDPROXY_HOST") ?? "fedproxy.com";
 
 // ── keypair ──────────────────────────────────────────────────────────
 
@@ -353,12 +457,27 @@ async function callBidder(
   const vmName = vmNameIdx >= 0 ? Deno.args[vmNameIdx + 1] ?? "compute" : "compute";
   const bidWindowIdx = Deno.args.indexOf("--bid-window-sec");
   const bidWindowSec = bidWindowIdx >= 0 ? parseInt(Deno.args[bidWindowIdx + 1] ?? "30", 10) : 30;
+  // Program to run for a one-off (non-TTY) session; ignored when interactive.
+  const execIdx = Deno.args.indexOf("--exec");
+  const execProgram = execIdx >= 0 ? Deno.args[execIdx + 1] ?? "bash" : "bash";
+  // When set, keep the VM after the ssh session exits (skip vm.delete event).
+  const noDelete = Deno.args.includes("--no-delete");
+  // How long to wait for sshd to answer through the tunnel before giving up.
+  const vmReadyTimeoutIdx = Deno.args.indexOf("--vm-ready-timeout-sec");
+  const vmReadyTimeoutSec = vmReadyTimeoutIdx >= 0 ? parseInt(Deno.args[vmReadyTimeoutIdx + 1] ?? "300", 10) : 300;
 
   let cloudInit = "";
 
   // Wait for relay registration.
   const { proxyRef } = await relayReady;
   console.log(JSON.stringify({ event: "relay_ready_for_rfp", proxyRef }));
+
+  // Host the relay serves the VM's websocat→sshd tunnel at. The VM's
+  // fedproxy-client connects with SERVICE=<vmName> and HANDLE=<did:plc> (see
+  // cloud-init), and the relay flattens that to
+  // `flattenLabel(vmName)--flattenLabel(did).<FEDPROXY_HOST>`. Recompute the
+  // same name so we poll/ssh exactly what the relay registered.
+  const vmFqdn = `${flattenLabel(vmName)}--${flattenLabel(did)}.${FEDPROXY_HOST}`;
 
   // Generate an SSH keypair; the public key is injected into root's
   // authorized_keys via the websocat default cloud-init, replacing whatever was
@@ -369,12 +488,12 @@ async function callBidder(
     event: "ssh_keypair_generated",
     privateKeyPath,
     publicKey: sshAuthorizedKey,
-    hint: `ssh -i ${privateKeyPath} -o ProxyCommand='websocat --binary ws://${relaySubdomain}.fedproxy.com' root@${relaySubdomain}.fedproxy.com`,
+    vmFqdn,
+    hint: `ssh -i ${privateKeyPath} -o ProxyCommand='websocat --binary wss://${vmFqdn}' root@${vmFqdn}`,
   }));
 
   cloudInit = buildDefaultUserData({
     vmName,
-    serviceName: vmName,
     didPlc: did,
     didPlcKey: did.replace(/^did:plc:/, ""),
     xrpcRelaySubdomain: relaySubdomain,
@@ -508,5 +627,66 @@ async function callBidder(
       bidUri: winner.uri, bidCid: winner.cid, winnerDid: winner.did,
       receiptUri, receiptCid, submitEventRef,
     }));
+
+    // 9. Wait for the VM to come up, then drop the operator into it over the
+    // websocat tunnel. When stdin is a TTY this is an interactive shell;
+    // otherwise it runs `execProgram` (default bash) one-off.
+    const log = (event: string, extra: Record<string, unknown> = {}) =>
+      console.log(JSON.stringify({ event, ...extra }));
+
+    log("vm_ssh_waiting", { vmFqdn, timeoutSec: vmReadyTimeoutSec });
+    const ready = await pollSshReady(privateKeyPath, vmFqdn, vmReadyTimeoutSec * 1000, log);
+
+    if (!ready) {
+      log("vm_ssh_unavailable", { vmFqdn });
+    } else {
+      const code = await runSshSession(privateKeyPath, vmFqdn, execProgram);
+      log("vm_ssh_session_exit", { vmFqdn, code });
+    }
+
+    // 10. Tear the VM down (unless --no-delete) by reporting a
+    // compute.events.vm.delete event to the bidder's submitEvent endpoint
+    // returned in the receipt. The provider treats the VM as a black box and
+    // can't observe that our session ended, so we tell it explicitly.
+    if (noDelete) {
+      log("vm_delete_skipped", { reason: "--no-delete" });
+    } else if (!receiptUri || !receiptCid || !submitEventRef) {
+      log("vm_delete_skipped", { reason: "missing receipt strongRef or submitEvent endpoint", receiptUri, receiptCid, submitEventRef });
+    } else {
+      try {
+        const nowIso = new Date().toISOString();
+        // Signed payload record describing the deletion (resolved + verified
+        // by the provider's submitEvent handler via badge.blue).
+        const { uri: delUri, cid: delCid } = await createSignedRepoRecord(
+          COMPUTE_EVENTS_VM_DELETE_NSID,
+          { $type: COMPUTE_EVENTS_VM_DELETE_NSID, reason: "session_ended", createdAt: nowIso },
+          kp, proxyRef,
+        );
+        // Signed market.event wrapping the receipt + delete payload strongRefs.
+        const eventRecord = {
+          $type: EVENT_NSID,
+          receipt: { $type: "com.atproto.repo.strongRef", uri: receiptUri, cid: receiptCid },
+          payload: { $type: "com.atproto.repo.strongRef", uri: delUri, cid: delCid },
+          createdAt: nowIso,
+        };
+        const { uri: eventUri, cid: eventCid } = await createSignedRepoRecord(
+          EVENT_NSID, eventRecord, kp, proxyRef,
+        );
+        const target = await resolveBidderEndpoint(submitEventRef);
+        if (!target) {
+          log("vm_delete_target_unresolvable", { submitEventRef });
+        } else {
+          log("submitting_vm_delete", { submitEventRef, eventUri });
+          const r = await callBidder(target.targetUrl, SUBMIT_EVENT_NSID, SUBMIT_EVENT_LXM, target.audDid, {
+            uri: eventUri,
+            cid: eventCid,
+            record: eventRecord,
+          });
+          log("vm_delete_result", { status: r.status, ok: r.ok });
+        }
+      } catch (err) {
+        log("vm_delete_error", { error: String(err) });
+      }
+    }
   }
 }

@@ -13,10 +13,9 @@ export interface CloudInitPreset {
 }
 
 export interface DefaultUserDataContext {
-  /** VM name / RBAC role from the form. */
+  /** VM name / RBAC role from the form; used verbatim as the fedproxy SERVICE.
+   * The relay flattens the served host to `<SERVICE>--<HANDLE>.fedproxy.com`. */
   vmName: string;
-  /** fedproxy SERVICE name / terminal subdomain (`<role>--<handle-label>`). */
-  serviceName: string;
   /** Logged-in user's full DID (`did:plc:…`). */
   didPlc: string;
   /** Bare PLC key (DID without the `did:plc:` prefix). */
@@ -29,7 +28,6 @@ export interface DefaultUserDataContext {
 
 const PLACEHOLDER: DefaultUserDataContext = {
   vmName: '<vm-name>',
-  serviceName: '<service-name>',
   didPlc: '<did:plc:…>',
   didPlcKey: '<plc-key>',
   xrpcRelaySubdomain: '<relay-subdomain>',
@@ -152,6 +150,8 @@ write_files:
       User=root
       # WebSocket listener on loopback :8080 → sshd on loopback :22.
       # fedproxy-client (SERVICE=${vmName}, PORT=8080) forwards external WS here.
+      # The relay flattens the served host to <SERVICE>--<HANDLE>.fedproxy.com,
+      # so SERVICE stays the bare VM name and HANDLE carries the did:plc.
       ExecStart=/usr/local/bin/websocat --binary ws-l:127.0.0.1:8080 tcp:127.0.0.1:22
       Restart=always
       RestartSec=5
@@ -211,6 +211,10 @@ write_files:
       User=root
       WorkingDirectory=/root
       Environment="SERVICE=${vmName}"
+      # SSH username the relay flattens into the host's handle segment. Pinning
+      # it to the did:plc yields <SERVICE>--did-plc-<key>.fedproxy.com instead of
+      # the resolved alsoKnownAs handle.
+      Environment="HANDLE=${didPlc}"
       Environment="PORT=8080"
       Environment="ATPRP_URL=https://${xrpcRelayFqdn}"
       Environment="AUTH_PLUGIN=oidc"
