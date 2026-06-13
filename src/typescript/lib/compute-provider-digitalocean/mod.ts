@@ -10,7 +10,7 @@
 import { Agent } from "@atproto/api";
 import { stringify as yamlStringify, parse as yamlParse } from "npm:yaml@^2.7.0";
 import { COMPUTE_CONFIG_WIF_SIMPLE_NSID } from "@publicdomainrelay/lexicons";
-import { ON_BEHALF_OF_HEADER } from "../../utils/log.ts";
+import { ON_BEHALF_OF_HEADER } from "@publicdomainrelay/utils-log";
 
 export type StrongRef = { $type: "com.atproto.repo.strongRef"; uri: string; cid: string };
 

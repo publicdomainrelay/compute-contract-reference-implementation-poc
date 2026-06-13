@@ -31,8 +31,8 @@
 //   VM_READY_TIMEOUT_MS     How long to wait for VM to register (default: 600000)
 //   PE_READY_TIMEOUT_MS     How long to wait for PE to respond (default: 120000)
 
-import { Agent, CredentialSession } from "npm:@atproto/api";
-import { IdResolver } from "npm:@atproto/identity";
+import { Agent, CredentialSession } from "npm:@atproto/api@^0.20.8";
+import { IdResolver } from "npm:@atproto/identity@^0.5.0";
 import {
   createMarketClient,
   createRecord as atprotoCreateRecord,
@@ -56,8 +56,8 @@ import {
   RFP_NSID,
   type Bid,
 } from "@publicdomainrelay/market";
-import { loadOrCreateAttestationKeyHex } from "../utils/attestation_key.ts";
-import { currentLogContext, setLogContext } from "../utils/log.ts";
+import { loadOrCreateAttestationKeyHex } from "@publicdomainrelay/utils-attestation-key";
+import { currentLogContext, setLogContext } from "@publicdomainrelay/utils-log";
 import { BIDS_X402_NSID, settleX402Payment } from "@publicdomainrelay/market-x402";
 import { BIDS_FREE_NSID } from "@publicdomainrelay/market-free";
 import {

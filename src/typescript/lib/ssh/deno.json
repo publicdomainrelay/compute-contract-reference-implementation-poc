@@ -1,0 +1,9 @@
+{
+  "name": "@publicdomainrelay/ssh",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "@publicdomainrelay/xrpc-relay-pds": "jsr:@publicdomainrelay/xrpc-relay-pds@^0"
+  }
+}

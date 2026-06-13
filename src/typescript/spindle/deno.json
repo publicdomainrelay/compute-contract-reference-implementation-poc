@@ -1,6 +1,10 @@
 {
+  "name": "@publicdomainrelay/spindle",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./main.ts",
   "imports": {
-    "@atproto/lex": "npm:@atproto/lex",
+    "@atproto/lex": "npm:@atproto/lex@^0.1.3",
     "@atproto/api": "npm:@atproto/api@^0.20.8",
     "@atproto/common-web": "npm:@atproto/common-web@^0.5.0",
     "@atproto/identity": "npm:@atproto/identity@^0.5.0",
@@ -8,6 +12,8 @@
     "@atproto/xrpc-server": "npm:@atproto/xrpc-server@^0.11.1",
     "@hono/hono": "jsr:@hono/hono@^4.12.23",
     "@std/yaml": "jsr:@std/yaml@^1.1.1",
-    "main.ts": "npm:main.ts@^1.0.0"
+    "@publicdomainrelay/market": "jsr:@publicdomainrelay/market@^0",
+    "@publicdomainrelay/utils-attestation-key": "jsr:@publicdomainrelay/utils-attestation-key@^0",
+    "@publicdomainrelay/utils-log": "jsr:@publicdomainrelay/utils-log@^0"
   }
 }

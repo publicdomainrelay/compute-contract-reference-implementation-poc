@@ -1,17 +1,22 @@
 {
   "name": "@publicdomainrelay/market",
   "version": "0.0.0",
-  "exports": "./mod.ts",
+  "license": "Unlicense",
+  "exports": {
+    ".": "./mod.ts",
+    "./discovery": "./discovery.ts"
+  },
   "imports": {
-    "@atproto/lex": "npm:@atproto/lex",
+    "@atproto/lex": "npm:@atproto/lex@^0.1.3",
     "@atproto/api": "npm:@atproto/api@^0.20.8",
     "@atproto/common-web": "npm:@atproto/common-web@^0.5.0",
     "@atproto/crypto": "npm:@atproto/crypto@^0.4.4",
     "@atproto/identity": "npm:@atproto/identity@^0.5.0",
     "@atproto/xrpc": "npm:@atproto/xrpc@^0.7.0",
     "@atproto/xrpc-server": "npm:@atproto/xrpc-server@^0.11.1",
-    "@atiproto/atproto-attestation": "../atproto-attestation-port/mod.ts",
+    "@atiproto/atproto-attestation": "jsr:@publicdomainrelay/atproto-attestation-port@^0.1",
     "@atiproto/key-resolver": "npm:@atiproto/key-resolver@^0.1.0",
-    "@publicdomainrelay/did-plc": "jsr:@publicdomainrelay/did-plc@*"
+    "@publicdomainrelay/lexicons": "jsr:@publicdomainrelay/lexicons@^0",
+    "@publicdomainrelay/did-plc": "jsr:@publicdomainrelay/did-plc@^0"
   }
 }

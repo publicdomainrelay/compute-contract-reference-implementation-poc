@@ -1,6 +1,6 @@
 TS_LIBS_DIR  := src/typescript/lib
 
-.PHONY: publish publish-lexicons publish-npm bump lex check-auth check-auth-goat check-auth-npm
+.PHONY: publish publish-lexicons publish-npm publish-jsr bump lex check-auth check-auth-goat check-auth-npm
 
 publish: check-auth lex publish-lexicons publish-npm
 
@@ -36,3 +36,64 @@ publish-npm: lex
 			echo "  deno run -A npm:npm publish $$dir"; \
 			deno run -A npm:npm publish "$$dir" --access public $(if $(NPM_OTP),--otp=$(NPM_OTP),); \
 		done
+
+# ── JSR publishing (dependency order) ─────────────────────────────────────
+
+JSR_FLAGS := --allow-slow-types --allow-dirty --no-check $(if $(JSR_TOKEN),--token $(JSR_TOKEN),)
+
+# Tier 0 — leaf packages (no @publicdomainrelay jsr deps)
+publish-jsr-tier0:
+	@echo "=== JSR Tier 0 (leaf) ==="
+	cd src/typescript/lib/lexicons                     && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/atproto-attestation-port     && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/did-plc                      && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/event-bus                    && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/xrpc-relay                   && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/hono-factory-xrpc-subscriber && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/utils-log                    && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/utils-attestation-key        && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/atproto-helpers              && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/deno-hono-helpers            && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/hono-factory-market          && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/hono-factory-market-bids     && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/hono-factory-compute         && deno publish $(JSR_FLAGS)
+
+# Tier 1 — depends on tier 0
+publish-jsr-tier1:
+	@echo "=== JSR Tier 1 ==="
+	cd src/typescript/lib/compute-provider-digitalocean && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/market                        && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/hono-factory-atproto-repo     && deno publish $(JSR_FLAGS)
+
+# Tier 2 — depends on tier 0-1
+publish-jsr-tier2:
+	@echo "=== JSR Tier 2 ==="
+	cd src/typescript/lib/market-free                     && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/market-x402                     && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/market-settlement               && deno publish $(JSR_FLAGS)
+	cd src/typescript/qemu                                && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/hono-factory-compute-provider-local && deno publish $(JSR_FLAGS)
+
+# Tier 3 — depends on tier 0-2
+publish-jsr-tier3:
+	@echo "=== JSR Tier 3 ==="
+	cd src/typescript/lib/hono-factory-ephemeral-compute-bidder && deno publish $(JSR_FLAGS)
+
+# Tier 4 — library app packages (depends on all above)
+publish-jsr-tier4:
+	@echo "=== JSR Tier 4 (lib apps) ==="
+	cd src/typescript/xrpc-relay-pds   && deno publish $(JSR_FLAGS)
+	cd src/typescript/market-registry  && deno publish $(JSR_FLAGS)
+	cd src/typescript/lib/ssh          && deno publish $(JSR_FLAGS)
+
+# Tier 5 — service entrypoints (runnable via `deno run -A jsr:...`)
+publish-jsr-tier5:
+	@echo "=== JSR Tier 5 (services) ==="
+	cd src/typescript/spindle && deno publish $(JSR_FLAGS)
+	cd src/typescript/bidder  && deno publish $(JSR_FLAGS)
+
+# Publish ALL packages to JSR in correct dependency order.
+# Requires: deno authenticated with JSR (run `deno publish` interactively once,
+# or set DENO_AUTH_TOKENS / pass --token).
+publish-jsr: publish-jsr-tier0 publish-jsr-tier1 publish-jsr-tier2 publish-jsr-tier3 publish-jsr-tier4 publish-jsr-tier5
+	@echo "=== All packages published to JSR ==="

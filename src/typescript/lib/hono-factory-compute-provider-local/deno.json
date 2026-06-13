@@ -1,8 +1,11 @@
 {
   "name": "@publicdomainrelay/hono-factory-compute-provider-local",
   "version": "0.0.0",
+  "license": "Unlicense",
   "exports": "./mod.ts",
   "imports": {
+    "@publicdomainrelay/qemu": "jsr:@publicdomainrelay/qemu@^0",
+    "@publicdomainrelay/utils-log": "jsr:@publicdomainrelay/utils-log@^0",
     "hono": "npm:hono@^4.12.23",
     "hono/cors": "npm:hono@^4.12.23/cors",
     "hono/factory": "npm:hono@^4.12.23/factory"

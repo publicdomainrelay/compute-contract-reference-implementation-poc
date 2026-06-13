@@ -27,12 +27,12 @@
 //   sh.tangled.repo.blob at the exact commit SHA supplied in the trigger
 //   payload.  No local checkout or REPO_PATH is needed.
 
-import { Agent, CredentialSession } from "npm:@atproto/api";
-import { IdResolver } from "npm:@atproto/identity";
-import { Hono } from "jsr:@hono/hono";
-import type { Context } from "jsr:@hono/hono";
-import { cors } from "jsr:@hono/hono/cors";
-import { parse as parseYaml } from "jsr:@std/yaml";
+import { Agent, CredentialSession } from "npm:@atproto/api@^0.20.8";
+import { IdResolver } from "npm:@atproto/identity@^0.5.0";
+import { Hono } from "jsr:@hono/hono@^4.12.23";
+import type { Context } from "jsr:@hono/hono@^4.12.23";
+import { cors } from "jsr:@hono/hono@^4.12.23/cors";
+import { parse as parseYaml } from "jsr:@std/yaml@^1.1.1";
 import { marketRFPSubmitWorkflow, marketRFPConfigFromEnv, pendingBids, type BidRecord } from "./marketRFP.ts";
 import {
   attestationVerificationMethod,
@@ -43,8 +43,8 @@ import {
   type MarketServerDeps,
   verifyServiceAuth,
 } from "@publicdomainrelay/market";
-import { loadOrCreateAttestationKeyHex } from "../utils/attestation_key.ts";
-import { createLogger, runWithLogContext } from "../utils/log.ts";
+import { loadOrCreateAttestationKeyHex } from "@publicdomainrelay/utils-attestation-key";
+import { createLogger, runWithLogContext } from "@publicdomainrelay/utils-log";
 
 // The spindle's network.attested signing key — stable + file-backed
 // (spindle/attestation.jwk, env override wins). The same key the market workflow

@@ -1,21 +1,28 @@
 {
+  "name": "@publicdomainrelay/xrpc-relay-pds",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": {
+    ".": "./server.ts",
+    "./cli": "./cli.ts"
+  },
   "tasks": {
     "server": "sh -ec 'deno run -A cli.ts | jq --unbuffered -rR \"(fromjson? // .)\"'",
     "test": "deno run -A vm_spin_test.ts"
   },
   "imports": {
-    "@atproto/common": "npm:@atproto/common",
-    "@atproto/common-web": "npm:@atproto/common-web",
-    "@atproto/crypto": "npm:@atproto/crypto",
-    "@atproto/identity": "npm:@atproto/identity",
-    "@atproto/xrpc": "npm:@atproto/xrpc",
-    "@atiproto/atproto-attestation": "../lib/atproto-attestation-port/mod.ts",
-    "@publicdomainrelay/did-plc": "../lib/did-plc/mod.ts",
-    "@publicdomainrelay/hono-factory-atproto-repo": "../lib/hono-factory-atproto-repo/mod.ts",
-    "@publicdomainrelay/hono-factory-xrpc-subscriber": "../lib/hono-factory-xrpc-subscriber/mod.ts",
-    "@publicdomainrelay/lexicons": "../lib/lexicons/mod.ts",
-    "@publicdomainrelay/market": "../lib/market/mod.ts",
-    "@publicdomainrelay/xrpc-relay": "../lib/xrpc-relay/mod.ts",
-    "@publicdomainrelay/hono-factory-ephemeral-compute-bidder": "../lib/hono-factory-ephemeral-compute-bidder/mod.ts"
+    "@atproto/common": "npm:@atproto/common@^0.5.0",
+    "@atproto/common-web": "npm:@atproto/common-web@^0.5.0",
+    "@atproto/crypto": "npm:@atproto/crypto@^0.5.0",
+    "@atproto/identity": "npm:@atproto/identity@^0.5.0",
+    "@atproto/xrpc": "npm:@atproto/xrpc@^0.7.0",
+    "@atiproto/atproto-attestation": "jsr:@publicdomainrelay/atproto-attestation-port@^0.1",
+    "@publicdomainrelay/did-plc": "jsr:@publicdomainrelay/did-plc@^0",
+    "@publicdomainrelay/hono-factory-atproto-repo": "jsr:@publicdomainrelay/hono-factory-atproto-repo@^0",
+    "@publicdomainrelay/hono-factory-xrpc-subscriber": "jsr:@publicdomainrelay/hono-factory-xrpc-subscriber@^0",
+    "@publicdomainrelay/lexicons": "jsr:@publicdomainrelay/lexicons@^0",
+    "@publicdomainrelay/market": "jsr:@publicdomainrelay/market@^0",
+    "@publicdomainrelay/xrpc-relay": "jsr:@publicdomainrelay/xrpc-relay@^0",
+    "@publicdomainrelay/hono-factory-ephemeral-compute-bidder": "jsr:@publicdomainrelay/hono-factory-ephemeral-compute-bidder@^0"
   }
 }

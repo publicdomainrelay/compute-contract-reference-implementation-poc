@@ -23,8 +23,8 @@ import {
   verifyRemoteProof,
 } from "@publicdomainrelay/market";
 import { ACCEPTS_X402_NSID, RECEIPTS_X402_NSID } from "@publicdomainrelay/lexicons";
-import type { Main as AcceptsX402 } from "../lexicons/com/publicdomainrelay/temp/market/accepts/x402.defs.ts";
-import type { Main as ReceiptsX402 } from "../lexicons/com/publicdomainrelay/temp/market/receipts/x402.defs.ts";
+import type { Main as AcceptsX402 } from "@publicdomainrelay/lexicons/com/publicdomainrelay/temp/market/accepts/x402.defs.ts";
+import type { Main as ReceiptsX402 } from "@publicdomainrelay/lexicons/com/publicdomainrelay/temp/market/receipts/x402.defs.ts";
 
 /** Error carrying an HTTP status, so callers can map it to their framework. */
 export class X402PaymentError extends Error {

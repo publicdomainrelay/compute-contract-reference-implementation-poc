@@ -1,18 +1,20 @@
 {
   "name": "@publicdomainrelay/market-registry",
+  "version": "0.0.0",
+  "license": "Unlicense",
   "exports": "./main.ts",
   "imports": {
-    "@atproto/api": "npm:@atproto/api",
-    "@atproto/common": "npm:@atproto/common",
-    "@atproto/common-web": "npm:@atproto/common-web",
-    "@atproto/crypto": "npm:@atproto/crypto",
-    "@atproto/identity": "npm:@atproto/identity",
-    "@publicdomainrelay/did-plc": "../lib/did-plc/mod.ts",
-    "@publicdomainrelay/hono-factory-atproto-repo": "../lib/hono-factory-atproto-repo/mod.ts",
-    "@publicdomainrelay/hono-factory-xrpc-subscriber": "../lib/hono-factory-xrpc-subscriber/mod.ts",
-    "@publicdomainrelay/lexicons": "../lib/lexicons/mod.ts",
-    "@publicdomainrelay/market": "../lib/market/mod.ts",
-    "@publicdomainrelay/xrpc-relay": "../lib/xrpc-relay/mod.ts",
+    "@atproto/api": "npm:@atproto/api@^0.20.8",
+    "@atproto/common": "npm:@atproto/common@^0.5.0",
+    "@atproto/common-web": "npm:@atproto/common-web@^0.5.0",
+    "@atproto/crypto": "npm:@atproto/crypto@^0.5.0",
+    "@atproto/identity": "npm:@atproto/identity@^0.5.0",
+    "@publicdomainrelay/did-plc": "jsr:@publicdomainrelay/did-plc@^0",
+    "@publicdomainrelay/hono-factory-atproto-repo": "jsr:@publicdomainrelay/hono-factory-atproto-repo@^0",
+    "@publicdomainrelay/hono-factory-xrpc-subscriber": "jsr:@publicdomainrelay/hono-factory-xrpc-subscriber@^0",
+    "@publicdomainrelay/lexicons": "jsr:@publicdomainrelay/lexicons@^0",
+    "@publicdomainrelay/market": "jsr:@publicdomainrelay/market@^0",
+    "@publicdomainrelay/xrpc-relay": "jsr:@publicdomainrelay/xrpc-relay@^0",
     "hono": "npm:hono@^4.12.23"
   }
 }

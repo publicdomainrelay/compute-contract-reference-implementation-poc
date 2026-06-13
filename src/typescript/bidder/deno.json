@@ -1,6 +1,10 @@
 {
+  "name": "@publicdomainrelay/bidder",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./main.ts",
   "imports": {
-    "@atproto/lex": "npm:@atproto/lex",
+    "@atproto/lex": "npm:@atproto/lex@^0.1.3",
     "@atproto/api": "npm:@atproto/api@^0.20.8",
     "@atproto/common-web": "npm:@atproto/common-web@^0.5.0",
     "@atproto/identity": "npm:@atproto/identity@^0.5.0",
@@ -9,6 +13,17 @@
     "@x402/core": "npm:@x402/core@^2.14.0",
     "@x402/evm": "npm:@x402/evm@^2.14.0",
     "@x402/hono": "npm:@x402/hono@^2.14.0",
-    "hono": "npm:hono@^4.12.23"
+    "hono": "npm:hono@^4.12.23",
+    "@publicdomainrelay/deno-hono-helpers": "jsr:@publicdomainrelay/deno-hono-helpers@^0",
+    "@publicdomainrelay/market": "jsr:@publicdomainrelay/market@^0",
+    "@publicdomainrelay/hono-factory-market": "jsr:@publicdomainrelay/hono-factory-market@^0",
+    "@publicdomainrelay/hono-factory-market-bids": "jsr:@publicdomainrelay/hono-factory-market-bids@^0",
+    "@publicdomainrelay/hono-factory-compute": "jsr:@publicdomainrelay/hono-factory-compute@^0",
+    "@publicdomainrelay/lexicons": "jsr:@publicdomainrelay/lexicons@^0",
+    "@publicdomainrelay/atproto-helpers": "jsr:@publicdomainrelay/atproto-helpers@^0",
+    "@publicdomainrelay/compute-provider-digitalocean": "jsr:@publicdomainrelay/compute-provider-digitalocean@^0",
+    "@publicdomainrelay/market-settlement": "jsr:@publicdomainrelay/market-settlement@^0",
+    "@publicdomainrelay/utils-attestation-key": "jsr:@publicdomainrelay/utils-attestation-key@^0",
+    "@publicdomainrelay/utils-log": "jsr:@publicdomainrelay/utils-log@^0"
   }
 }

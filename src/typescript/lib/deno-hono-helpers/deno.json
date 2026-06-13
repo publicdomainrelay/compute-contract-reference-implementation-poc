@@ -1,6 +1,7 @@
 {
   "name": "@publicdomainrelay/deno-hono-helpers",
   "version": "0.0.0",
+  "license": "Unlicense",
   "exports": "./mod.ts",
   "imports": {
     "hono": "npm:hono@^4.12.23"

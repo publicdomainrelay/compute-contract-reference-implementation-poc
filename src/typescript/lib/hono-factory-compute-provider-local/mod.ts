@@ -26,13 +26,13 @@
 
 import { createFactory } from "hono/factory";
 import { cors } from "hono/cors";
-import { getPublicJwk, OIDCToken, UnauthorizedException, subMatchesActx } from "../../qemu/oidc_helper.ts";
-import { raiseIfUnauthorized, raiseIfUnauthorizedServiceAuth } from "../../qemu/rbac_helper.ts";
-import type { AuthToken } from "../../qemu/rbac_helper.ts";
-import { ProvisioningData, validate as provisioningValidate } from "../../qemu/provisioning.ts";
-import { runContainer } from "../../qemu/container.ts";
-import type { Logger } from "../../utils/log.ts";
-import { runWithLogContext, setLogContext, ON_BEHALF_OF_HEADER } from "../../utils/log.ts";
+import { getPublicJwk, OIDCToken, UnauthorizedException, subMatchesActx } from "@publicdomainrelay/qemu/oidc_helper";
+import { raiseIfUnauthorized, raiseIfUnauthorizedServiceAuth } from "@publicdomainrelay/qemu/rbac_helper";
+import type { AuthToken } from "@publicdomainrelay/qemu/rbac_helper";
+import { ProvisioningData, validate as provisioningValidate } from "@publicdomainrelay/qemu/provisioning";
+import { runContainer } from "@publicdomainrelay/qemu/container";
+import type { Logger } from "@publicdomainrelay/utils-log";
+import { runWithLogContext, setLogContext, ON_BEHALF_OF_HEADER } from "@publicdomainrelay/utils-log";
 
 // ---------------------------------------------------------------------------
 // Env type

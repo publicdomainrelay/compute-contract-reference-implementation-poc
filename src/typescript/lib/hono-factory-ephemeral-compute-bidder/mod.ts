@@ -78,8 +78,8 @@ import { createComputeProviderDigitalOcean } from "@publicdomainrelay/compute-pr
 import type { StrongRef } from "@publicdomainrelay/compute-provider-digitalocean";
 import { createAttestationCid, type RecordMap } from "@atiproto/atproto-attestation";
 import { createComputeProviderLocalFactory } from "@publicdomainrelay/hono-factory-compute-provider-local";
-import { createLogger } from "../../utils/log.ts";
-import { DEFAULT_REGISTRY_ENDPOINTS } from "../market/discovery.ts";
+import { createLogger } from "@publicdomainrelay/utils-log";
+import { DEFAULT_REGISTRY_ENDPOINTS } from "@publicdomainrelay/market/discovery";
 
 // ── options ──────────────────────────────────────────────────────────
 
@@ -162,7 +162,7 @@ async function startContainerHost(): Promise<string> {
   const qemuLog = createLogger({ service: "qemu", selfDid: () => "did:plc:unknown" });
 
   // Warm up OIDC signing key (same as qemu/main.ts startup).
-  const { getSigningKey, getPublicJwk } = await import("../../qemu/oidc_helper.ts");
+  const { getSigningKey, getPublicJwk } = await import("@publicdomainrelay/qemu/oidc_helper");
   await getSigningKey();
   const jwk = await getPublicJwk();
   qemuLog("info", "miniCloud listening", { port: 0, issuer: issuerUrl, kid: jwk.kid });

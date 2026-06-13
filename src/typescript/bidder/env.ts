@@ -2,7 +2,7 @@
 // reads only the variables it actually needs (e.g. the x402 settlement requires
 // CDP keys, the free settlement requires none).
 
-import { createLogger } from "../utils/log.ts";
+import { createLogger } from "@publicdomainrelay/utils-log";
 
 const log = createLogger({ service: "bidder" });
 

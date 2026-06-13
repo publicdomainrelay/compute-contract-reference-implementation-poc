@@ -1,6 +1,7 @@
 {
   "name": "@publicdomainrelay/market-settlement",
   "version": "0.0.0",
+  "license": "Unlicense",
   "exports": "./mod.ts",
   "imports": {
     "@atproto/api": "npm:@atproto/api@^0.20.8",

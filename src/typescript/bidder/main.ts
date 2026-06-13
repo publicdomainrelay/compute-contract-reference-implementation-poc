@@ -40,8 +40,8 @@ import {
   resolvedRef,
   stripResolved,
 } from "@publicdomainrelay/market";
-import { loadOrCreateAttestationKeyHex } from "../utils/attestation_key.ts";
-import { createLogger, runWithLogContext } from "../utils/log.ts";
+import { loadOrCreateAttestationKeyHex } from "@publicdomainrelay/utils-attestation-key";
+import { createLogger, runWithLogContext } from "@publicdomainrelay/utils-log";
 import { createMarketFactory } from "@publicdomainrelay/hono-factory-market";
 import { createMarketBidsFactory } from "@publicdomainrelay/hono-factory-market-bids";
 import { createComputeFactory } from "@publicdomainrelay/hono-factory-compute";

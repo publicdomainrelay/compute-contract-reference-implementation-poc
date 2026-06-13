@@ -4,8 +4,6 @@
 // Two object stores: "blocks" (keyPath: cid) and "heads" (keyPath: did).
 // Guarded with `typeof indexedDB !== "undefined"` for tree-shaking in non-browser bundles.
 
-/// <reference lib="dom" />
-
 import type { Storage, Cid, Did, Tid, Bytes } from "../contracts.ts";
 
 const DB_NAME = "atproto-repo";

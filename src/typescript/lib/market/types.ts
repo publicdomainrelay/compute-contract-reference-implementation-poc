@@ -2,13 +2,13 @@
 // Record-shaped types (RFP, Bid, Accept, MarketEvent, Receipt, Offering) are
 // re-exported here as convenient aliases from the generated lexicon defs.
 
-import type { Main as _Accept } from "../lexicons/com/publicdomainrelay/temp/market/accept.defs.ts";
-import type { Main as _Bid } from "../lexicons/com/publicdomainrelay/temp/market/bid.defs.ts";
-import type { Main as _Event } from "../lexicons/com/publicdomainrelay/temp/market/event.defs.ts";
-import type { Main as _Offering } from "../lexicons/com/publicdomainrelay/temp/market/offering.defs.ts";
-import type { Main as _Receipt } from "../lexicons/com/publicdomainrelay/temp/market/receipt.defs.ts";
-import type { Main as _RFP } from "../lexicons/com/publicdomainrelay/temp/market/rfp.defs.ts";
-import type { Main as _StrongRef } from "../lexicons/com/atproto/repo/strongRef.defs.ts";
+import type { Main as _Accept } from "@publicdomainrelay/lexicons/com/publicdomainrelay/temp/market/accept.defs.ts";
+import type { Main as _Bid } from "@publicdomainrelay/lexicons/com/publicdomainrelay/temp/market/bid.defs.ts";
+import type { Main as _Event } from "@publicdomainrelay/lexicons/com/publicdomainrelay/temp/market/event.defs.ts";
+import type { Main as _Offering } from "@publicdomainrelay/lexicons/com/publicdomainrelay/temp/market/offering.defs.ts";
+import type { Main as _Receipt } from "@publicdomainrelay/lexicons/com/publicdomainrelay/temp/market/receipt.defs.ts";
+import type { Main as _RFP } from "@publicdomainrelay/lexicons/com/publicdomainrelay/temp/market/rfp.defs.ts";
+import type { Main as _StrongRef } from "@publicdomainrelay/lexicons/com/atproto/repo/strongRef.defs.ts";
 
 export type StrongRef = _StrongRef;
 export type RFP = _RFP;
@@ -28,5 +28,5 @@ export type Logger = (level: LogLevel, msg: string, fields?: Record<string, unkn
 export const noopLogger: Logger = () => {};
 
 export function strongRef(uri: string, cid: string): StrongRef {
-  return { $type: "com.atproto.repo.strongRef", uri, cid };
+  return { $type: "com.atproto.repo.strongRef", uri, cid } as StrongRef;
 }

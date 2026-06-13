@@ -28,7 +28,7 @@
 
 import { createComputeProviderLocalFactory } from "@publicdomainrelay/hono-factory-compute-provider-local";
 import { getSigningKey, getPublicJwk } from "./oidc_helper.ts";
-import { createLogger } from "../utils/log.ts";
+import { createLogger } from "@publicdomainrelay/utils-log";
 import { Secp256k1Keypair } from "@atproto/crypto";
 import { signServiceAuth } from "@publicdomainrelay/hono-factory-atproto-repo";
 import type { Signer } from "@publicdomainrelay/hono-factory-atproto-repo";

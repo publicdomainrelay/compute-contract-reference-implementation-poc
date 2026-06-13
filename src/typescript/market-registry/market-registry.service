@@ -12,7 +12,7 @@ Environment=HOME=/home/johnandersen777
 Environment=PATH=/home/johnandersen777/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/market-registry/market-registry.env
 EnvironmentFile=/home/johnandersen777/prod-compute-contract-reference-implementation-poc/src/typescript/market-registry/market-registry.env.secrets
-ExecStart=/home/johnandersen777/.deno/bin/deno run --allow-all ./main.ts
+ExecStart=/home/johnandersen777/.deno/bin/deno run --allow-all jsr:@publicdomainrelay/market-registry
 Restart=on-failure
 RestartSec=5
 KillMode=mixed

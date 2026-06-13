@@ -1,7 +1,7 @@
-import { verifySignature } from "npm:@atproto/crypto";
-import { decodeBase64, encodeBase64 } from "jsr:@std/encoding/base64";
-import { IdResolver } from "npm:@atproto/identity";
-import { verifyJwt } from "npm:@atproto/xrpc-server";
+import { verifySignature } from "npm:@atproto/crypto@^0.5.0";
+import { decodeBase64, encodeBase64 } from "jsr:@std/encoding@^1/base64";
+import { IdResolver } from "npm:@atproto/identity@^0.5.0";
+import { verifyJwt } from "npm:@atproto/xrpc-server@^0.11.1";
 
 export interface RegistrationPayload {
   key?: string;

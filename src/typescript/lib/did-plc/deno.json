@@ -1,6 +1,7 @@
 {
   "name": "@publicdomainrelay/did-plc",
   "version": "0.0.0",
+  "license": "Unlicense",
   "exports": "./mod.ts",
   "imports": {
     "@ipld/dag-cbor": "npm:@ipld/dag-cbor@^9.0.0",
