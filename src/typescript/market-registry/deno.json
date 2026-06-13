@@ -1,5 +1,6 @@
 {
   "name": "@publicdomainrelay/market-registry",
+  "exports": "./main.ts",
   "imports": {
     "@atproto/api": "npm:@atproto/api",
     "@atproto/common": "npm:@atproto/common",

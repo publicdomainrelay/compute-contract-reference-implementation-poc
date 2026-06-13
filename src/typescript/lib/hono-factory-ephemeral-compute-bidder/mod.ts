@@ -79,6 +79,7 @@ import type { StrongRef } from "@publicdomainrelay/compute-provider-digitalocean
 import { createAttestationCid, type RecordMap } from "@atiproto/atproto-attestation";
 import { createComputeProviderLocalFactory } from "@publicdomainrelay/hono-factory-compute-provider-local";
 import { createLogger } from "../../utils/log.ts";
+import { DEFAULT_REGISTRY_ENDPOINTS } from "../market/discovery.ts";
 
 // ── options ──────────────────────────────────────────────────────────
 
@@ -289,7 +290,12 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
   const PLC_DIRECTORY_URL = opts.plcDirectoryUrl ?? Deno.env.get("PLC_DIRECTORY_URL") ?? "https://plc.directory";
   const DISPATCHER_HOST = opts.dispatcherHost ?? Deno.env.get("DISPATCHER_HOST") ?? "xrpc.fedproxy.com";
   const LABEL = opts.label ?? "ephemeral-bidder";
-  const REGISTRY_ENDPOINT = opts.registryEndpoint ?? Deno.env.get("REGISTRY_ENDPOINT") ?? "";
+  const REGISTRY_ENDPOINTS: string[] = (() => {
+    if (opts.registryEndpoint) return [opts.registryEndpoint];
+    const env = Deno.env.get("REGISTRY_ENDPOINT");
+    if (env) return [env];
+    return DEFAULT_REGISTRY_ENDPOINTS;
+  })();
   const HEARTBEAT_INTERVAL_MS = opts.heartbeatIntervalMs ?? parseInt(Deno.env.get("HEARTBEAT_INTERVAL_MS") ?? "60000");
 
   // ── compute provider config ─────────────────────────────────────
@@ -579,7 +585,7 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
   // ── registry integration ────────────────────────────────────────
 
   async function registerWithRegistry(): Promise<void> {
-    if (!REGISTRY_ENDPOINT) {
+    if (REGISTRY_ENDPOINTS.length === 0) {
       logInfo({ event: "registry_disabled", reason: "no REGISTRY_ENDPOINT configured" });
       return;
     }
@@ -589,16 +595,18 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
       appliesTo: [COMPUTE_VM_NSID],
     };
 
-    try {
-      const res = await callService(REGISTRY_ENDPOINT, REGISTER_BIDDER_NSID, REGISTER_BIDDER_NSID, body);
-      if (res.ok) {
-        logInfo({ event: "registered_with_registry" });
-        startDiscoveryUpdater();
-      } else {
-        logInfo({ event: "register_with_registry_error", status: res.status, body: res.body });
+    for (const endpoint of REGISTRY_ENDPOINTS) {
+      try {
+        const res = await callService(endpoint, REGISTER_BIDDER_NSID, REGISTER_BIDDER_NSID, body);
+        if (res.ok) {
+          logInfo({ event: "registered_with_registry", endpoint });
+          startDiscoveryUpdater();
+        } else {
+          logInfo({ event: "register_with_registry_error", endpoint, status: res.status, body: res.body });
+        }
+      } catch (err) {
+        logInfo({ event: "register_with_registry_exception", endpoint, err: String(err) });
       }
-    } catch (err) {
-      logInfo({ event: "register_with_registry_exception", err: String(err) });
     }
   }
 

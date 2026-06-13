@@ -1,5 +1,6 @@
 {
   "name": "@publicdomainrelay/ephemeral-bidder",
+  "exports": "./main.ts",
   "imports": {
     "@atproto/common": "npm:@atproto/common",
     "@atproto/crypto": "npm:@atproto/crypto",
