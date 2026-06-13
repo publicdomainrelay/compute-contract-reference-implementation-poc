@@ -1,6 +1,8 @@
 {
   "tasks": {
-    "server": "sh -ec 'deno run -A --watch server.ts | jq --unbuffered -rR \"(fromjson? // .)\"'"
+    "server": "sh -ec 'deno run -A cli.ts | jq --unbuffered -rR \"(fromjson? // .)\"'",
+    "test": "deno run -A vm_spin_test.ts",
+    "patch": "bash patches/apply.sh"
   },
   "imports": {
     "@atproto/common": "npm:@atproto/common",

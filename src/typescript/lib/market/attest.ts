@@ -102,7 +102,12 @@ export async function loadOrGenerateKeypair(privKeyHex?: string): Promise<Attest
     const kp = await Secp256k1Keypair.create({ exportable: true });
     bytes = await kp.export();
   }
-  const privateKey: KeyData = { type: "k256", bytes };
+  // KeyData from @atiproto/key-resolver doesn't declare toBytes, but the
+  // attestation library's signBytes calls keyBytes.toBytes() on the unwrapped
+  // key. Without it, @noble/curves >=1.8 fails with "sig.toBytes is not a
+  // function" because the internal key wrapper tries to call .toBytes() on the
+  // raw KeyData object.
+  const privateKey = { type: "k256" as const, bytes, toBytes: () => bytes };
   // Attestation derives + validates the public did:key from the private key.
   const did = new Attestation({ privateKey }).publicKey;
   return { did: () => did, privateKey };
