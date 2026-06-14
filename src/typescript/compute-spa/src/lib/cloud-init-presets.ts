@@ -207,6 +207,11 @@ write_files:
       User=root
       WorkingDirectory=/root
       Environment="SERVICE=${vmName}"
+      # SSH username the relay flattens into the host's handle segment. Pinning
+      # it to the did:plc yields <SERVICE>--did-plc-<key>.fedproxy.com instead of
+      # the resolved alsoKnownAs handle (which is "handle.invalid" when the DID
+      # has no verified handle, breaking the SSH auth and the route).
+      Environment="HANDLE=${didPlc}"
       Environment="PORT=8080"
       Environment="ATPRP_URL=https://${xrpcRelayFqdn}"
       Environment="AUTH_PLUGIN=oidc"

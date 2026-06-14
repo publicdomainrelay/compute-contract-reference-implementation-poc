@@ -10,6 +10,8 @@ export interface SavedVM {
   receiptUri?: string;
   receiptCid?: string;
   submitEventRef?: string;
+  /** com.fedproxy.rbac record URI created to authorize this VM. */
+  rbacUri?: string;
   /** fedproxy SERVICE name / terminal subdomain (`<role>--<handle-label>`). */
   serviceName?: string;
   /** ttyd login password generated client-side, handed to the VM via the relay. */

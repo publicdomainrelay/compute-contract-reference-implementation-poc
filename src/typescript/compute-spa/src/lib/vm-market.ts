@@ -1,5 +1,5 @@
 import { pendingBids, type CollectedBid } from './relay-client.svelte.ts';
-import { VM_NSID, RFP_NSID, ACCEPT_NSID, VOUCH_NSID } from './constants.ts';
+import { VM_NSID, RFP_NSID, ACCEPT_NSID, VOUCH_NSID, SSH_KEY_NSID } from './constants.ts';
 
 type AttestationKeypair = {
   did: () => string;
@@ -13,7 +13,13 @@ export interface RequestVMParams {
   vmName: string;
   cloudInitScript: string;
   bidWindowSec: number;
+  /** Override registry endpoints for discovery (defaults to built-in list). */
+  registryEndpoints?: string[];
+  /** Override hardcoded bidder DIDs (defaults to built-in list). */
+  bidderDids?: string[];
   onLog: (msg: string) => void;
+  /** fedproxy SERVICE name for this VM (`<role>--<handle-label>`). Used in RBAC grant. */
+  serviceName?: string;
 }
 
 export interface RequestVMResult {
@@ -24,24 +30,30 @@ export interface RequestVMResult {
   receiptUri?: string;
   receiptCid?: string;
   submitEventRef?: string;
+  /** com.fedproxy.rbac record created to authorize this VM. */
+  rbacUri?: string;
 }
 
 export async function requestVM(params: RequestVMParams): Promise<RequestVMResult> {
-  const { agent, proxyRef, keypair, vmName, cloudInitScript, bidWindowSec, onLog } = params;
+  const { agent, proxyRef, keypair, vmName, cloudInitScript, bidWindowSec, registryEndpoints, bidderDids: bidderDidsOverride, onLog } = params;
 
   if (!keypair) throw new Error('relay keypair not ready');
   const signer = { keypair, issuer: proxyRef };
 
-  const { createRecord, createSignedRecord, createMarketClient, listRecordsAll, OFFERING_NSID } =
+  const { createRecord, createSignedRecord, createMarketClient, listRecordsAll, discoverBiddersFromRegistries, DEFAULT_REGISTRY_ENDPOINTS, OFFERING_NSID, parseAtUri } =
     await import('@publicdomainrelay/market') as {
       createRecord: (agent: unknown, col: string, rec: Record<string, unknown>) => Promise<{ uri: string; cid: string }>;
       createSignedRecord: (agent: unknown, col: string, rec: Record<string, unknown>, signer: unknown) => Promise<{ uri: string; cid: string }>;
       createMarketClient: (session: unknown, opts: Record<string, unknown>) => {
         submitRfp: (target: string, input: { rfpUri: string; rfpCid: string }) => Promise<{ ok: boolean }>;
-        submitAccept: (target: string, input: Record<string, unknown>) => Promise<{ uri?: string; cid?: string; submitEvent?: string }>;
+        submitAccept: (target: string, input: { acceptUri: string; acceptCid: string }) => Promise<{ id: string; uri: string; cid: string; submitEvent: string }>;
+        listBidders: (target: string, params?: Record<string, unknown>) => Promise<{ bidders: Array<{ bidderDid: string; offeringEndpointUrl: string; appliesTo: string[]; lastHeartbeat: string }>; cursor?: string }>;
       };
       listRecordsAll: (pdsUrl: string, did: string, collection: string) => Promise<Array<{ uri: string; cid: string; value: Record<string, unknown> }>>;
+      discoverBiddersFromRegistries: (opts: { payloadNsid: string; registryEndpoints?: string[]; marketClient?: unknown; log?: (severity: string, msg: string, extra?: Record<string, unknown>) => void }) => Promise<Set<string>>;
+      DEFAULT_REGISTRY_ENDPOINTS: string[];
       OFFERING_NSID: string;
+      parseAtUri: (uri: string) => { repo: string; collection: string; rkey: string };
     };
 
   // 1. compute.vm record
@@ -66,39 +78,66 @@ export async function requestVM(params: RequestVMParams): Promise<RequestVMResul
   const rfpRef = await createSignedRecord(agent, RFP_NSID, rfpRecord, signer);
   onLog(`market.rfp: ${rfpRef.uri}`);
 
-  // 2.5. discover vouched bidders and notify via OFFERING_NSID
+  // 2.5. discover bidders: vouches + registry (run concurrently)
   const { IdResolver } = await import('@atproto/identity');
   const idResolver = new IdResolver();
   const mc = createMarketClient(agent, {});
 
-  // Demo: always include these DIDs in addition to any discovered via vouches.
-  const DEFAULT_BIDDER_DIDS = ['did:plc:5svqtrhheairglgiiyvutzik'];
+  // Hardcoded DIDs always included in addition to discovered bidders.
+  // Caller can override via params; otherwise falls back to the built-in list.
+  const DEFAULT_BIDDER_DIDS = bidderDidsOverride ?? ['did:plc:5svqtrhheairglgiiyvutzik'];
 
   const userDid = (agent as { did?: string }).did ?? '';
-  onLog(`discovering vouched bidders for ${userDid}…`);
-  let vouchedDids: string[] = [];
-  try {
-    const userDoc = await idResolver.did.resolve(userDid);
-    const userPdsSvc = (userDoc?.service ?? []).find((s: { id: string }) => s.id === '#atproto_pds');
-    const userPds = (userPdsSvc as { serviceEndpoint?: string } | undefined)?.serviceEndpoint;
-    if (userPds) {
-      const vouchRecords = await listRecordsAll(userPds, userDid, VOUCH_NSID);
-      vouchedDids = Array.from(new Set(
-        vouchRecords
-          .filter((r) => (r.value.kind as string | undefined) !== 'denounce')
-          .map((r) => r.uri.split('/').pop() ?? '')
-          .filter((rkey) => rkey.startsWith('did:'))
-      ));
-      onLog(`found ${vouchedDids.length} vouched DID(s)`);
-    } else {
-      onLog('could not resolve user PDS — skipping vouch discovery');
-    }
-  } catch (err) {
-    onLog(`vouch discovery error — ${String(err)}`);
-  }
 
-  const bidderDids = Array.from(new Set([...DEFAULT_BIDDER_DIDS, ...vouchedDids]));
-  onLog(`checking ${bidderDids.length} bidder DID(s) (incl. ${DEFAULT_BIDDER_DIDS.length} default)`);
+  // Vouch-based discovery (from user's PDS).
+  const vouchPromise = (async (): Promise<string[]> => {
+    onLog(`discovering vouched bidders for ${userDid}…`);
+    try {
+      const userDoc = await idResolver.did.resolve(userDid);
+      const userPdsSvc = (userDoc?.service ?? []).find((s: { id: string }) => s.id === '#atproto_pds');
+      const userPds = (userPdsSvc as { serviceEndpoint?: string } | undefined)?.serviceEndpoint;
+      if (userPds) {
+        const vouchRecords = await listRecordsAll(userPds, userDid, VOUCH_NSID);
+        const dids = Array.from(new Set(
+          vouchRecords
+            .filter((r) => (r.value.kind as string | undefined) !== 'denounce')
+            .map((r) => r.uri.split('/').pop() ?? '')
+            .filter((rkey) => rkey.startsWith('did:'))
+        ));
+        onLog(`found ${dids.length} vouched DID(s)`);
+        return dids;
+      } else {
+        onLog('could not resolve user PDS — skipping vouch discovery');
+      }
+    } catch (err) {
+      onLog(`vouch discovery error — ${String(err)}`);
+    }
+    return [];
+  })();
+
+  // Registry-based discovery (queries market registry for registered bidders).
+  const registryPromise = (async (): Promise<string[]> => {
+    onLog('discovering bidders from market registry…');
+    try {
+      const registryDids = await discoverBiddersFromRegistries({
+        payloadNsid: VM_NSID,
+        registryEndpoints: registryEndpoints ?? DEFAULT_REGISTRY_ENDPOINTS,
+        marketClient: mc,
+        log: (severity: string, msg: string) => {
+          if (severity === 'warn') onLog(`registry: ${msg}`);
+        },
+      });
+      onLog(`found ${registryDids.size} registry DID(s)`);
+      return Array.from(registryDids);
+    } catch (err) {
+      onLog(`registry discovery error — ${String(err)}`);
+    }
+    return [];
+  })();
+
+  const [vouchedDids, registryDids] = await Promise.all([vouchPromise, registryPromise]);
+  const bidderDids = Array.from(new Set([...DEFAULT_BIDDER_DIDS, ...vouchedDids, ...registryDids]));
+  onLog(`checking ${bidderDids.length} bidder DID(s) (${DEFAULT_BIDDER_DIDS.length} default, ${vouchedDids.length} vouched, ${registryDids.length} registry)`);
 
   await Promise.all(bidderDids.map(async (bidderDid) => {
     try {
@@ -144,6 +183,90 @@ export async function requestVM(params: RequestVMParams): Promise<RequestVMResul
 
   const bidRef = { $type: 'com.atproto.repo.strongRef', uri: winner.uri, cid: winner.cid };
 
+  // Resolve winner's bid config to build the RBAC grant that authorizes
+  // the VM to register its SSH public key. Mirrors the spindle's
+  // marketRFP.ts RBAC creation (com.fedproxy.rbac).
+  const RBAC_NSID = 'com.fedproxy.rbac';
+  let rbacRef: { uri: string; cid: string } | undefined;
+  const winnerConfigRef = (winner.record as Record<string, unknown>).config as { uri?: string } | undefined;
+  if (winnerConfigRef?.uri && params.serviceName) {
+    try {
+      const winnerPdsSvc = (await idResolver.did.resolve(winner.did))?.service
+        ?.find((s: { id: string }) => s.id === '#atproto_pds');
+      const winnerPds = (winnerPdsSvc as { serviceEndpoint?: string } | undefined)?.serviceEndpoint;
+      if (winnerPds) {
+        const { repo, collection, rkey } = parseAtUri(winnerConfigRef.uri);
+        const configUrl = new URL(`${winnerPds}/xrpc/com.atproto.repo.getRecord`);
+        configUrl.searchParams.set('repo', repo);
+        configUrl.searchParams.set('collection', collection);
+        configUrl.searchParams.set('rkey', rkey);
+        const configRes = await fetch(configUrl.toString());
+        if (configRes.ok) {
+          const configData = await configRes.json() as { value: Record<string, unknown> };
+          const winnerConfig = configData.value;
+          const issuerUri = winnerConfig['issuer_uri'] as string | undefined;
+          const actx = winnerConfig['actx'] as string | undefined;
+          if (issuerUri && actx) {
+            const agentDid = (agent as { did?: string }).did ?? '';
+            const agentDidPlcKey = agentDid.replace(/^did:plc:/, '');
+            const serviceName = params.serviceName;
+
+            const rbacRecord = {
+              $type: RBAC_NSID,
+              roles: {
+                [serviceName]: {
+                  role_name: serviceName,
+                  definition: {
+                    aud: `api://ATProto?actx=${agentDid}`,
+                    iss: issuerUri,
+                    sub: `actx:${actx}:plc:${agentDidPlcKey}:role:${serviceName}`,
+                    policies: [`${serviceName}-ssh-key-register`],
+                  },
+                },
+              },
+              policies: {
+                [`${serviceName}-ssh-key-register`]: {
+                  meta: { policy: 'ssh-key-register' },
+                  schemas: {
+                    '/xrpc/com.atproto.repo.createRecord': {
+                      type: 'object',
+                      $schema: 'http://json-schema.org/draft-07/schema#',
+                      required: ['capability', 'body'],
+                      properties: {
+                        capability: { enum: ['create'] },
+                        body: {
+                          type: 'object',
+                          additionalProperties: false,
+                          required: ['collection', 'record'],
+                          properties: {
+                            collection: { type: 'string', const: SSH_KEY_NSID },
+                            record: {
+                              type: 'object',
+                              properties: { service: { type: 'string', const: serviceName } },
+                              required: ['service'],
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+              custom_claims_roles_index: { job_workflow_ref: {} },
+              createdAt: new Date().toISOString(),
+            };
+
+            onLog('creating com.fedproxy.rbac record…');
+            rbacRef = await createRecord(agent, RBAC_NSID, rbacRecord);
+            onLog(`com.fedproxy.rbac: ${rbacRef.uri}`);
+          }
+        }
+      }
+    } catch (err) {
+      onLog(`rbac record skipped — ${String(err)}`);
+    }
+  }
+
   // 5. market.accept
   onLog('creating market.accept…');
   const acceptRecord: Record<string, unknown> = {
@@ -176,5 +299,5 @@ export async function requestVM(params: RequestVMParams): Promise<RequestVMResul
     onLog('no submitAccept endpoint on bid — skipping');
   }
 
-  return { vmUri: vmRef.uri, rfpUri: rfpRef.uri, acceptUri: acceptRef.uri, bidUri: winner.uri, receiptUri, receiptCid, submitEventRef };
+  return { vmUri: vmRef.uri, rfpUri: rfpRef.uri, acceptUri: acceptRef.uri, bidUri: winner.uri, receiptUri, receiptCid, submitEventRef, rbacUri: rbacRef?.uri };
 }

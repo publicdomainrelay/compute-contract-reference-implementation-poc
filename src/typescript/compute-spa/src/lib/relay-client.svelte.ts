@@ -103,6 +103,23 @@ class RelayClient {
     const app = new Hono();
     app.use('*', cors());
 
+    // ── request/response logging ──────────────────────────────────
+    app.use('*', async (c, next) => {
+      const method = c.req.method;
+      const path = new URL(c.req.url).pathname;
+      const start = Date.now();
+      console.log('[relay] ←', method, path);
+      await next();
+      const status = c.res.status;
+      const durationMs = Date.now() - start;
+      let responseBody: unknown;
+      try {
+        const text = await c.res.clone().text();
+        try { responseBody = JSON.parse(text); } catch { responseBody = text; }
+      } catch { responseBody = null; }
+      console.log('[relay] →', method, path, { status, durationMs, responseBody });
+    });
+
     // did:web document for this subscriber's subdomain identity
     app.get('/.well-known/did.json', (c) => {
       const kp = this.#keypair!;
@@ -122,6 +139,11 @@ class RelayClient {
         ],
         service: [
           {
+            id: '#atproto_pds',
+            type: 'AtprotoPersonalDataServer',
+            serviceEndpoint: `https://${host}`,
+          },
+          {
             id: `#${MARKET_SERVICE_ID}`,
             type: 'PDRTempMarket',
             serviceEndpoint: `https://${host}`,
@@ -135,10 +157,16 @@ class RelayClient {
       });
     });
 
-    // Auth for all /xrpc/* routes. VM ↔ relay calls (getRecord/createRecord)
-    // carry an OIDC bearer (fedproxy-client AUTH_PLUGIN=oidc); market bidder
-    // calls (submitBid/submitEvent) carry an atproto service-auth JWT.
-    const VM_OIDC_NSIDS = ['com.atproto.repo.getRecord', 'com.atproto.repo.createRecord'];
+    // Auth for /xrpc/* routes:
+    //   - com.atproto.repo.getRecord  → public read (except ttydCredentials: requires OIDC)
+    //   - com.atproto.repo.listRecords → public read
+    //   - com.atproto.repo.createRecord → OIDC (VM sshPublicKey publishing)
+    //   - market endpoints               → atproto service-auth JWT
+    const OIDC_CREATE_NSIDS = ['com.atproto.repo.createRecord'];
+    const MARKET_NSIDS = [
+      'com.publicdomainrelay.temp.market.submitBid',
+      'com.publicdomainrelay.temp.market.submitEvent',
+    ];
     app.use('/xrpc/*', async (c, next) => {
       if (!this.subdomain) {
         return c.json({ error: 'Unauthorized', message: 'not yet registered' }, 401);
@@ -146,7 +174,26 @@ class RelayClient {
       const hostname = `${this.subdomain}.${DISPATCHER_HOST}`;
       const nsid = c.req.path.slice('/xrpc/'.length);
 
-      if (VM_OIDC_NSIDS.includes(nsid)) {
+      // Public read: getRecord (non-ttyd), listRecords, describeServer
+      const isGetRecord = nsid === 'com.atproto.repo.getRecord';
+      const isListRecords = nsid === 'com.atproto.repo.listRecords';
+      const isDescribe = nsid === 'com.atproto.server.describeServer';
+      if (isGetRecord || isListRecords || isDescribe) {
+        // For getRecord: ttydCredentials needs OIDC; everything else is public.
+        if (isGetRecord && c.req.query('collection') === TTYD_CREDS_NSID) {
+          try {
+            const ttydReq = await this.#verifyTtydOidc(c.req.header('Authorization'));
+            c.set('ttydReq' as never, ttydReq);
+          } catch (err) {
+            return c.json({ error: 'Unauthorized', message: String(err) }, 401);
+          }
+        }
+        await next();
+        return;
+      }
+
+      // OIDC auth for createRecord (VM publishing sshPublicKey)
+      if (OIDC_CREATE_NSIDS.includes(nsid)) {
         try {
           const ttydReq = await this.#verifyTtydOidc(c.req.header('Authorization'));
           c.set('ttydReq' as never, ttydReq);
@@ -157,19 +204,22 @@ class RelayClient {
         return;
       }
 
-      try {
-        const { verifyServiceAuth } = await import('@publicdomainrelay/market');
-        const auth = await verifyServiceAuth({
-          authHeader: c.req.header('Authorization'),
-          hostname,
-          lxm: nsid,
-          serviceIds: [MARKET_SERVICE_ID, COMPUTE_EVENT_SERVICE_ID],
-          idResolver: this.#idResolver,
-        });
-        c.set('callerDid' as never, auth.issuerDid);
-        c.req.raw.headers.set('x-caller-did', auth.issuerDid);
-      } catch (err) {
-        return c.json({ error: 'Unauthorized', message: String(err) }, 401);
+      // Service-auth for market endpoints
+      if (MARKET_NSIDS.includes(nsid)) {
+        try {
+          const { verifyServiceAuth } = await import('@publicdomainrelay/market');
+          const auth = await verifyServiceAuth({
+            authHeader: c.req.header('Authorization'),
+            hostname,
+            lxm: nsid,
+            serviceIds: [MARKET_SERVICE_ID, COMPUTE_EVENT_SERVICE_ID],
+            idResolver: this.#idResolver,
+          });
+          c.set('callerDid' as never, auth.issuerDid);
+          c.req.raw.headers.set('x-caller-did', auth.issuerDid);
+        } catch (err) {
+          return c.json({ error: 'Unauthorized', message: String(err) }, 401);
+        }
       }
       await next();
     });
@@ -207,22 +257,34 @@ class RelayClient {
     });
 
     // VM fetches its ttyd password (OIDC-validated in middleware above).
-    app.get('/xrpc/com.atproto.repo.getRecord', (c) => {
+    // Non-ttyd getRecord (public repo reads) forwards to the PDS.
+    app.get('/xrpc/com.atproto.repo.getRecord', async (c) => {
       const ttydReq = c.get('ttydReq' as never) as TtydRequest | undefined;
-      if (!ttydReq) return c.json({ error: 'Unauthorized' }, 401);
       const collection = c.req.query('collection');
-      if (collection && collection !== TTYD_CREDS_NSID) {
-        return c.json({ error: 'RecordNotFound', message: `unsupported collection ${collection}` }, 404);
+      if (ttydReq && (!collection || collection === TTYD_CREDS_NSID)) {
+        console.log('[relay] ttyd getRecord served', { vmName: ttydReq.vmName });
+        return c.json({
+          uri: `at://${ttydReq.didPlc}/${TTYD_CREDS_NSID}/${ttydReq.vmName}`,
+          value: {
+            $type: TTYD_CREDS_NSID,
+            username: TTYD_USERNAME,
+            password: ttydReq.password,
+          },
+        });
       }
-      console.log('[relay] ttyd getRecord served', { vmName: ttydReq.vmName });
-      return c.json({
-        uri: `at://${ttydReq.didPlc}/${TTYD_CREDS_NSID}/${ttydReq.vmName}`,
-        value: {
-          $type: TTYD_CREDS_NSID,
-          username: TTYD_USERNAME,
-          password: ttydReq.password,
-        },
-      });
+      // Forward to in-browser PDS for public repo reads.
+      const pds = this.#pdsFetch;
+      if (pds) {
+        try {
+          const pdsRes = await pds(c.req.raw);
+          return new Response(pdsRes.body, {
+            status: pdsRes.status,
+            statusText: pdsRes.statusText,
+            headers: pdsRes.headers,
+          });
+        } catch { /* fall through */ }
+      }
+      return c.json({ error: 'RecordNotFound', message: 'PDS not available' }, 503);
     });
 
     // VM publishes its sshPublicKey; persist to the user's repo and un-gate Terminal.
@@ -249,8 +311,24 @@ class RelayClient {
       }
     });
 
-    app.all('/xrpc/*', (c) =>
-      c.json({ error: 'MethodNotImplemented', nsid: c.req.path.replace(/^\/xrpc\//, '') }, 501));
+    // Fallback: forward unhandled XRPC requests (com.atproto.repo.* etc.) to
+    // the in-browser PDS so external callers can resolve records from this DID.
+    app.all('/xrpc/*', async (c) => {
+      const pds = this.#pdsFetch;
+      if (pds) {
+        try {
+          const pdsRes = await pds(c.req.raw);
+          return new Response(pdsRes.body, {
+            status: pdsRes.status,
+            statusText: pdsRes.statusText,
+            headers: pdsRes.headers,
+          });
+        } catch {
+          // fall through to 501
+        }
+      }
+      return c.json({ error: 'MethodNotImplemented', nsid: c.req.path.replace(/^\/xrpc\//, '') }, 501);
+    });
 
     return app;
   }
@@ -340,6 +418,12 @@ class RelayClient {
   /** Wire the user-repo createRecord used to persist incoming sshPublicKey records. */
   setCreateRecord(fn: (collection: string, record: Record<string, unknown>) => Promise<{ uri: string; cid: string }>) {
     this.#createRecord = fn;
+  }
+
+  // Forward unhandled XRPC requests (com.atproto.repo.*) to the in-browser PDS.
+  #pdsFetch: ((req: Request) => Promise<Response>) | null = null;
+  setPdsFetch(fn: (req: Request) => Promise<Response>) {
+    this.#pdsFetch = fn;
   }
 
   setServiceAuthMinter(fn: (lxm: string) => Promise<string>) {

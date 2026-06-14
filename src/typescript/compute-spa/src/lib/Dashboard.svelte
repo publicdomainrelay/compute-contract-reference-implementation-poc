@@ -8,6 +8,16 @@
   import { loadSavedVMs, persistVM, removeVM, type SavedVM } from './vm-storage.ts';
   import { requestVM } from './vm-market.ts';
   import { vmServiceName, didPlcKey, terminalUrl, XRPC_DISPATCHER_HOST } from './constants.ts';
+  import {
+    loadMarketSettings,
+    saveMarketSettings,
+    enabledRegistries,
+    enabledBidders,
+    toggleEntry,
+    addEntry,
+    removeEntry,
+    type MarketSettings,
+  } from './market-settings.ts';
 
   /** Random URL-safe ttyd password generated client-side per VM. */
   function generatePassword(): string {
@@ -55,6 +65,26 @@
   let logs = $state<string[]>([]);
   let savedVMs = $state<SavedVM[]>(loadSavedVMs());
 
+  // Market discovery settings (registry endpoints + bidder DIDs)
+  let discoveryExpanded = $state(false);
+  let marketSettings = $state<MarketSettings>(loadMarketSettings());
+  let newRegistryUrl = $state('');
+  let newBidderDid = $state('');
+
+  function saveSettings() { saveMarketSettings(marketSettings); }
+  function onToggle(kind: 'registries' | 'bidders', value: string) {
+    marketSettings = toggleEntry(marketSettings, kind, value);
+    saveSettings();
+  }
+  function onAdd(kind: 'registries' | 'bidders', value: string) {
+    marketSettings = addEntry(marketSettings, kind, value);
+    saveSettings();
+  }
+  function onRemove(kind: 'registries' | 'bidders', value: string) {
+    marketSettings = removeEntry(marketSettings, kind, value);
+    saveSettings();
+  }
+
   let selectedPreset = $derived(
     CLOUD_INIT_PRESETS.find((p) => p.id === selectedPresetId) ?? CLOUD_INIT_PRESETS[0]
   );
@@ -63,7 +93,7 @@
   // available, placeholders otherwise so the preview is always meaningful.
   let defaultCtx = $derived<DefaultUserDataContext>({
     vmName: vmName.trim() || '<vm-name>',
-    serviceName: auth.handle ? vmServiceName(vmName, auth.handle) : '<service-name>',
+    serviceName: auth.did ? vmServiceName(vmName, auth.did) : '<service-name>',
     didPlc: auth.did ?? '<did:plc:…>',
     didPlcKey: auth.did ? didPlcKey(auth.did) : '<plc-key>',
     xrpcRelaySubdomain: relayClient.subdomain ?? '<relay-subdomain>',
@@ -97,6 +127,14 @@
       });
       return res.data.token;
     });
+  });
+
+  // Wire the in-browser PDS fetch into the relay so external callers can resolve
+  // records (com.atproto.repo.getRecord / listRecords) from this subscriber's DID.
+  $effect(() => {
+    const pds = auth.localPds;
+    if (!pds) return;
+    relayClient.setPdsFetch((req) => pds.fetch(req));
   });
 
   // Re-register ttyd handshakes for saved VMs so a page reload can still serve
@@ -169,6 +207,17 @@
         console.error('[deleteVM] submitEvent failed:', err);
       }
     }
+    // Delete the com.fedproxy.rbac record created during VM provisioning.
+    if (vm.rbacUri && auth.agent) {
+      try {
+        // at://did:plc:xxx/com.fedproxy.rbac/rkey
+        const parts = vm.rbacUri.replace('at://', '').split('/');
+        await auth.agent.com.atproto.repo.deleteRecord({ repo: parts[0], collection: parts[1], rkey: parts[2] });
+        console.log('[deleteVM] rbac record deleted', vm.rbacUri);
+      } catch (err) {
+        console.error('[deleteVM] rbac delete failed:', err);
+      }
+    }
     savedVMs = removeVM(savedVMs, vm.vmUri);
     // Reset the create-VM panel so it's ready for a fresh creation.
     if (submitResult?.vm?.vmUri === vm.vmUri) {
@@ -189,8 +238,11 @@
       if (!auth.handle || !auth.did) throw new Error('not signed in');
 
       // Generate the ttyd password client-side and register the handshake so the
-      // relay can serve it (OIDC-validated) when the VM boots.
-      const serviceName = vmServiceName(vmName, auth.handle);
+      // relay can serve it (OIDC-validated) when the VM boots. The terminal host
+      // is `<vmName>--<flattened-did>.fedproxy.com`: SERVICE=vmName and the relay
+      // flattens the SSH username (HANDLE=did:plc:…) into the handle segment, so
+      // the service name must be derived from the DID to match the VM's route.
+      const serviceName = vmServiceName(vmName, auth.did);
       const ttydPassword = generatePassword();
       relayClient.registerTtydRequest({
         vmName: vmName.trim(),
@@ -207,7 +259,10 @@
         vmName,
         cloudInitScript: effectiveScript,
         bidWindowSec,
+        registryEndpoints: enabledRegistries(marketSettings),
+        bidderDids: enabledBidders(marketSettings),
         onLog: addLog,
+        serviceName,
       });
       const saved: SavedVM = {
         name: vmName,
@@ -219,6 +274,7 @@
         receiptUri: result.receiptUri,
         receiptCid: result.receiptCid,
         submitEventRef: result.submitEventRef,
+        rbacUri: result.rbacUri,
         serviceName,
         ttydPassword,
       };
@@ -235,9 +291,6 @@
 
 <div class="dashboard">
   <header>
-    <div class="brand">
-      <h1>Compute Contract Provider</h1>
-    </div>
     <nav class="tabs">
       <button class="tab" class:active={activeTab === 'live-graph'} onclick={() => navigate('live-graph')}>
         Live Graph
@@ -246,10 +299,7 @@
         Request VM
       </button>
     </nav>
-    {#if auth.handle}
-      <span class="handle">@{auth.handle}</span>
-      <button class="logout" onclick={() => auth.signOut()}>Sign out</button>
-    {:else}
+    {#if !auth.handle}
       <button class="login-btn" onclick={() => showLoginModal = true}>Log In</button>
     {/if}
   </header>
@@ -313,7 +363,64 @@
               spellcheck="false"
             ></textarea>
             {#if selectedPresetId === 'default'}
-              <span class="field-hint">Generated from your identity, VM name, and relay subdomain. Switch to “Custom” to edit.</span>
+              <span class="field-hint">Generated from your identity, VM name, and relay subdomain. Switch to "Custom" to edit.</span>
+            {/if}
+          </div>
+
+          <!-- Market Discovery Settings (collapsed by default) -->
+          <div class="discovery-section">
+            <button type="button" class="discovery-toggle" onclick={() => discoveryExpanded = !discoveryExpanded}>
+              <span class="toggle-arrow">{discoveryExpanded ? '▼' : '▶'}</span>
+              Market Discovery
+              <span class="toggle-summary">
+                ({marketSettings.registries.filter(r => r.enabled).length} registry, {marketSettings.bidders.filter(b => b.enabled).length} bidder)
+              </span>
+            </button>
+
+            {#if discoveryExpanded}
+              <div class="discovery-body">
+                <!-- Registries -->
+                <fieldset class="discovery-group">
+                  <legend>Registry Endpoints</legend>
+                  {#each marketSettings.registries as reg (reg.value)}
+                    <label class="check-row">
+                      <input type="checkbox" checked={reg.enabled} onchange={() => onToggle('registries', reg.value)} />
+                      <span class="check-value" title={reg.value}>{reg.value}</span>
+                      {#if !reg.isDefault}
+                        <button type="button" class="rm-btn" onclick={() => onRemove('registries', reg.value)} title="Remove">✕</button>
+                      {/if}
+                    </label>
+                  {/each}
+                  <div class="add-row">
+                    <input type="text" placeholder="did:web:… or https://…" bind:value={newRegistryUrl}
+                      onkeydown={(e) => { if (e.key === 'Enter') { onAdd('registries', newRegistryUrl.trim()); newRegistryUrl = ''; } }} />
+                    <button type="button" class="add-btn"
+                      disabled={!newRegistryUrl.trim()}
+                      onclick={() => { onAdd('registries', newRegistryUrl.trim()); newRegistryUrl = ''; }}>+ Add</button>
+                  </div>
+                </fieldset>
+
+                <!-- Bidders -->
+                <fieldset class="discovery-group">
+                  <legend>Bidder DIDs</legend>
+                  {#each marketSettings.bidders as bid (bid.value)}
+                    <label class="check-row">
+                      <input type="checkbox" checked={bid.enabled} onchange={() => onToggle('bidders', bid.value)} />
+                      <span class="check-value" title={bid.value}>{bid.value}</span>
+                      {#if !bid.isDefault}
+                        <button type="button" class="rm-btn" onclick={() => onRemove('bidders', bid.value)} title="Remove">✕</button>
+                      {/if}
+                    </label>
+                  {/each}
+                  <div class="add-row">
+                    <input type="text" placeholder="did:plc:…" bind:value={newBidderDid}
+                      onkeydown={(e) => { if (e.key === 'Enter') { onAdd('bidders', newBidderDid.trim()); newBidderDid = ''; } }} />
+                    <button type="button" class="add-btn"
+                      disabled={!newBidderDid.trim()}
+                      onclick={() => { onAdd('bidders', newBidderDid.trim()); newBidderDid = ''; }}>+ Add</button>
+                  </div>
+                </fieldset>
+              </div>
             {/if}
           </div>
 
@@ -357,7 +464,7 @@
             <a
               class="terminal-btn"
               class:ready
-              href={ready && auth.handle ? terminalUrl(vm.name, auth.handle, vm.ttydPassword) : undefined}
+              href={ready && auth.did ? terminalUrl(vm.name, auth.did, vm.ttydPassword) : undefined}
               target="_blank"
               rel="noopener"
               aria-disabled={!ready}
@@ -384,7 +491,7 @@
                 <a
                   class="terminal-btn sm"
                   class:ready
-                  href={ready && auth.handle ? terminalUrl(vm.name, auth.handle, vm.ttydPassword) : undefined}
+                  href={ready && auth.did ? terminalUrl(vm.name, auth.did, vm.ttydPassword) : undefined}
                   target="_blank"
                   rel="noopener"
                   aria-disabled={!ready}
@@ -446,18 +553,6 @@
     box-shadow: 0 1px 3px rgba(0,0,0,0.06);
     max-width: 100%;
   }
-  .brand { display: flex; align-items: baseline; gap: 0.75rem; min-width: 0; }
-  .brand h1 { margin: 0; font-size: 1.15rem; color: #1c2333; }
-  .handle {
-    color: #4a9eff;
-    font-size: 0.85rem;
-    max-width: 40vw;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-  }
-
   .tabs { display: flex; gap: 0.25rem; margin-left: auto; }
   .tab {
     padding: 0.4rem 1rem;
@@ -476,18 +571,6 @@
     color: #fff;
     border-color: #4a9eff;
   }
-
-  .logout {
-    padding: 0.4rem 1rem;
-    border-radius: 6px;
-    border: 1px solid #dde3ec;
-    background: transparent;
-    color: #64748b;
-    cursor: pointer;
-    font-size: 0.85rem;
-    transition: all 0.15s;
-  }
-  .logout:hover { border-color: #f87171; color: #f87171; }
 
   main { padding: 2rem; max-width: 700px; width: 100%; margin: 0 auto; }
 
@@ -688,5 +771,112 @@
   .modal form { display: flex; flex-direction: column; gap: 0.75rem; }
   .modal label { font-size: 0.85rem; color: #64748b; }
   .login-error { color: #dc2626; font-size: 0.88rem; margin: 0; }
+
+  /* Market Discovery collapsible section */
+  .discovery-section {
+    border: 1px solid #dde3ec;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .discovery-toggle {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.8rem;
+    border: none;
+    background: #f8fafc;
+    color: #475569;
+    font-size: 0.82rem;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s;
+    font-family: inherit;
+  }
+  .discovery-toggle:hover { background: #f0f4ff; }
+  .toggle-arrow { font-size: 0.65rem; width: 14px; text-align: center; flex-shrink: 0; }
+  .toggle-summary { font-weight: 400; font-size: 0.75rem; color: #94a3b8; }
+  .discovery-body {
+    padding: 0.6rem 0.8rem;
+    border-top: 1px solid #dde3ec;
+    background: #fff;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+  .discovery-group {
+    border: none;
+    padding: 0;
+    margin: 0;
+  }
+  .discovery-group legend {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #64748b;
+    margin-bottom: 0.3rem;
+    padding: 0;
+  }
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.15rem 0;
+    font-size: 0.75rem;
+  }
+  .check-row input[type="checkbox"] { width: 14px; height: 14px; margin: 0; cursor: pointer; accent-color: #4a9eff; }
+  .check-value {
+    flex: 1;
+    font-family: monospace;
+    font-size: 0.7rem;
+    color: #475569;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .rm-btn {
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+    border: 1px solid #e2e8f0;
+    background: transparent;
+    color: #94a3b8;
+    cursor: pointer;
+    font-size: 0.65rem;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: all 0.15s;
+  }
+  .rm-btn:hover { border-color: #f87171; color: #f87171; }
+  .add-row {
+    display: flex;
+    gap: 0.3rem;
+    margin-top: 0.25rem;
+  }
+  .add-row input {
+    flex: 1;
+    padding: 0.3rem 0.5rem;
+    border-radius: 4px;
+    border: 1px solid #dde3ec;
+    background: #f8fafc;
+    color: #1c2333;
+    font-size: 0.72rem;
+    font-family: monospace;
+    min-width: 0;
+  }
+  .add-row input:focus { outline: none; border-color: #4a9eff; }
+  .add-btn {
+    padding: 0.3rem 0.6rem;
+    border-radius: 4px;
+    border: 1px solid #4a9eff;
+    background: transparent;
+    color: #4a9eff;
+    cursor: pointer;
+    font-size: 0.72rem;
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+  .add-btn:hover:not(:disabled) { background: #eff6ff; }
+  .add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 </style>
