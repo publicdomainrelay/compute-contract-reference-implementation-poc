@@ -103,6 +103,23 @@ class RelayClient {
     const app = new Hono();
     app.use('*', cors());
 
+    // ── request/response logging ──────────────────────────────────
+    app.use('*', async (c, next) => {
+      const method = c.req.method;
+      const path = new URL(c.req.url).pathname;
+      const start = Date.now();
+      console.log('[relay] ←', method, path);
+      await next();
+      const status = c.res.status;
+      const durationMs = Date.now() - start;
+      let responseBody: unknown;
+      try {
+        const text = await c.res.clone().text();
+        try { responseBody = JSON.parse(text); } catch { responseBody = text; }
+      } catch { responseBody = null; }
+      console.log('[relay] →', method, path, { status, durationMs, responseBody });
+    });
+
     // did:web document for this subscriber's subdomain identity
     app.get('/.well-known/did.json', (c) => {
       const kp = this.#keypair!;

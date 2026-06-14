@@ -162,6 +162,24 @@ export async function startLocalPds(): Promise<LocalPds> {
   });
   log('PDS mounted');
 
+  // ── request/response logging ────────────────────────────────────
+  app.use('*', async (c, next) => {
+    const method = c.req.method;
+    const path = new URL(c.req.url).pathname;
+    const start = Date.now();
+    log(`→ ${method} ${path}`);
+    await next();
+    const status = c.res.status;
+    const durationMs = Date.now() - start;
+    let responseBody: unknown;
+    try {
+      const text = await c.res.clone().text();
+      try { responseBody = JSON.parse(text); } catch { responseBody = text; }
+    } catch { responseBody = null; }
+    const prefix = status >= 400 ? '✗' : '←';
+    console.log(`${TAG} ${prefix} ${method} ${path}`, STYLE, { status, durationMs, responseBody });
+  });
+
   // ── atproto-proxy forwarding ───────────────────────────────────
   // When the XrpcClient sets the atproto-proxy header (PDS service proxying),
   // resolve the DID ref to an HTTP endpoint and forward the request directly.

@@ -34,8 +34,14 @@
   /* App is light-only; no dark overrides */
 }
 
+html {
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+}
+
 body {
   margin: 0;
+  overflow-x: hidden;
 }
 
 h1,
@@ -146,8 +152,8 @@ code {
 }
 
 #app {
-  width: 1126px;
-  max-width: 100%;
+  width: 100%;
+  max-width: 1126px;
   margin: 0 auto;
   text-align: center;
   border-inline: 1px solid var(--border);

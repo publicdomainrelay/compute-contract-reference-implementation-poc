@@ -112,7 +112,8 @@
   function restartSimulation() {
     pendingCenterNode = null;
     const nodes = recordNodes;
-    const edges = edgeList;
+    const nodeUriSet = new Set(nodes.map((n: any) => n.uri));
+    const edges = edgeList.filter((e: any) => nodeUriSet.has(e.source) && nodeUriSet.has(e.target));
     nodeCount = nodes.length;
     edgeCount = edges.length;
 
@@ -431,6 +432,8 @@
     border-bottom: 1px solid #dde3ec;
     flex-wrap: wrap;
     flex-shrink: 0;
+    max-width: 100%;
+    overflow-x: hidden;
   }
 
   .status { font-size: 0.85rem; font-weight: 600; color: #64748b; }
@@ -453,7 +456,7 @@
   .controls button.recording { color: #dc2626; border-color: #fca5a5; background: #fef2f2; }
   button:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  .session-row { display: flex; gap: 0.4rem; align-items: center; }
+  .session-row { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
   .session-row select {
     padding: 0.2rem 0.5rem; border-radius: 5px;
     border: 1px solid #dde3ec; background: #f8fafc; color: #475569; font-size: 0.8rem;

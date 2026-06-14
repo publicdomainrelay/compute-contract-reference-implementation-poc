@@ -93,7 +93,7 @@
   // available, placeholders otherwise so the preview is always meaningful.
   let defaultCtx = $derived<DefaultUserDataContext>({
     vmName: vmName.trim() || '<vm-name>',
-    serviceName: auth.handle ? vmServiceName(vmName, auth.handle) : '<service-name>',
+    serviceName: auth.did ? vmServiceName(vmName, auth.did) : '<service-name>',
     didPlc: auth.did ?? '<did:plc:…>',
     didPlcKey: auth.did ? didPlcKey(auth.did) : '<plc-key>',
     xrpcRelaySubdomain: relayClient.subdomain ?? '<relay-subdomain>',
@@ -207,6 +207,17 @@
         console.error('[deleteVM] submitEvent failed:', err);
       }
     }
+    // Delete the com.fedproxy.rbac record created during VM provisioning.
+    if (vm.rbacUri && auth.agent) {
+      try {
+        // at://did:plc:xxx/com.fedproxy.rbac/rkey
+        const parts = vm.rbacUri.replace('at://', '').split('/');
+        await auth.agent.com.atproto.repo.deleteRecord({ repo: parts[0], collection: parts[1], rkey: parts[2] });
+        console.log('[deleteVM] rbac record deleted', vm.rbacUri);
+      } catch (err) {
+        console.error('[deleteVM] rbac delete failed:', err);
+      }
+    }
     savedVMs = removeVM(savedVMs, vm.vmUri);
     // Reset the create-VM panel so it's ready for a fresh creation.
     if (submitResult?.vm?.vmUri === vm.vmUri) {
@@ -227,8 +238,11 @@
       if (!auth.handle || !auth.did) throw new Error('not signed in');
 
       // Generate the ttyd password client-side and register the handshake so the
-      // relay can serve it (OIDC-validated) when the VM boots.
-      const serviceName = vmServiceName(vmName, auth.handle);
+      // relay can serve it (OIDC-validated) when the VM boots. The terminal host
+      // is `<vmName>--<flattened-did>.fedproxy.com`: SERVICE=vmName and the relay
+      // flattens the SSH username (HANDLE=did:plc:…) into the handle segment, so
+      // the service name must be derived from the DID to match the VM's route.
+      const serviceName = vmServiceName(vmName, auth.did);
       const ttydPassword = generatePassword();
       relayClient.registerTtydRequest({
         vmName: vmName.trim(),
@@ -248,6 +262,7 @@
         registryEndpoints: enabledRegistries(marketSettings),
         bidderDids: enabledBidders(marketSettings),
         onLog: addLog,
+        serviceName,
       });
       const saved: SavedVM = {
         name: vmName,
@@ -259,6 +274,7 @@
         receiptUri: result.receiptUri,
         receiptCid: result.receiptCid,
         submitEventRef: result.submitEventRef,
+        rbacUri: result.rbacUri,
         serviceName,
         ttydPassword,
       };
@@ -275,9 +291,6 @@
 
 <div class="dashboard">
   <header>
-    <div class="brand">
-      <h1>Compute Contract Provider</h1>
-    </div>
     <nav class="tabs">
       <button class="tab" class:active={activeTab === 'live-graph'} onclick={() => navigate('live-graph')}>
         Live Graph
@@ -286,10 +299,7 @@
         Request VM
       </button>
     </nav>
-    {#if auth.handle}
-      <span class="handle">@{auth.handle}</span>
-      <button class="logout" onclick={() => auth.signOut()}>Sign out</button>
-    {:else}
+    {#if !auth.handle}
       <button class="login-btn" onclick={() => showLoginModal = true}>Log In</button>
     {/if}
   </header>
@@ -454,7 +464,7 @@
             <a
               class="terminal-btn"
               class:ready
-              href={ready && auth.handle ? terminalUrl(vm.name, auth.handle, vm.ttydPassword) : undefined}
+              href={ready && auth.did ? terminalUrl(vm.name, auth.did, vm.ttydPassword) : undefined}
               target="_blank"
               rel="noopener"
               aria-disabled={!ready}
@@ -481,7 +491,7 @@
                 <a
                   class="terminal-btn sm"
                   class:ready
-                  href={ready && auth.handle ? terminalUrl(vm.name, auth.handle, vm.ttydPassword) : undefined}
+                  href={ready && auth.did ? terminalUrl(vm.name, auth.did, vm.ttydPassword) : undefined}
                   target="_blank"
                   rel="noopener"
                   aria-disabled={!ready}
@@ -543,18 +553,6 @@
     box-shadow: 0 1px 3px rgba(0,0,0,0.06);
     max-width: 100%;
   }
-  .brand { display: flex; align-items: baseline; gap: 0.75rem; min-width: 0; }
-  .brand h1 { margin: 0; font-size: 1.15rem; color: #1c2333; }
-  .handle {
-    color: #4a9eff;
-    font-size: 0.85rem;
-    max-width: 40vw;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-  }
-
   .tabs { display: flex; gap: 0.25rem; margin-left: auto; }
   .tab {
     padding: 0.4rem 1rem;
@@ -573,18 +571,6 @@
     color: #fff;
     border-color: #4a9eff;
   }
-
-  .logout {
-    padding: 0.4rem 1rem;
-    border-radius: 6px;
-    border: 1px solid #dde3ec;
-    background: transparent;
-    color: #64748b;
-    cursor: pointer;
-    font-size: 0.85rem;
-    transition: all 0.15s;
-  }
-  .logout:hover { border-color: #f87171; color: #f87171; }
 
   main { padding: 2rem; max-width: 700px; width: 100%; margin: 0 auto; }
 

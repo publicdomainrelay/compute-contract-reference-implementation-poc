@@ -313,6 +313,26 @@ export async function createRequesterPDS(opts: PDSOptions = {}): Promise<Request
     ],
   });
 
+  const logInfo = (obj: Record<string, unknown>) => console.log(JSON.stringify(obj));
+
+  // ── request/response logging ────────────────────────────────────
+  app.use("*", async (c, next) => {
+    const method = c.req.method;
+    const path = new URL(c.req.url).pathname;
+    const start = Date.now();
+    logInfo({ event: "request", method, path });
+    await next();
+    const status = c.res.status;
+    const durationMs = Date.now() - start;
+    let responseBody: unknown;
+    try {
+      const text = await c.res.clone().text();
+      try { responseBody = JSON.parse(text); } catch { responseBody = text; }
+    } catch { responseBody = null; }
+    const event = status >= 400 ? "response_error" : "response";
+    logInfo({ event, method, path, status, durationMs, responseBody });
+  });
+
   // ── submitBid handler ───────────────────────────────────────────
 
   const idResolver = new IdResolver();
@@ -351,8 +371,6 @@ export async function createRequesterPDS(opts: PDSOptions = {}): Promise<Request
 
   const serverController = new AbortController();
   Deno.serve({ port: PORT, signal: serverController.signal }, app.fetch);
-
-  const logInfo = (obj: Record<string, unknown>) => console.log(JSON.stringify(obj));
 
   logInfo({ event: "listening", port: PORT, did, baseOrigin: BASE_ORIGIN });
 

@@ -5,7 +5,7 @@ import path from 'path'
 export default defineConfig({
   plugins: [svelte()],
   define: { 'process.env': {} },
-  server: { hmr: { overlay: false } },
+  server: { hmr: { overlay: false }, allowedHosts: ["dev.ui.fedfork.com"] },
   resolve: {
     alias: {
       '@publicdomainrelay/lexicons': path.resolve(__dirname, '../lib/lexicons/mod.ts'),
