@@ -44,7 +44,10 @@
     "./lib/datastore-remote-git",
     "./lib/datastore-pds",
     "./lib/hono-factory-package-registry",
-    "./ephemeral-package-registry"
+    "./ephemeral-package-registry",
+    "./lib/oidc-helper",
+    "./lib/rbac-helper",
+    "./lib/hono-factory-workload-identity-droplet-oidc-poc"
   ],
   "allowScripts": ["npm:@parcel/watcher@2.5.6", "npm:core-js@3.49.0", "npm:node-pty@1.1.0"],
   "imports": {

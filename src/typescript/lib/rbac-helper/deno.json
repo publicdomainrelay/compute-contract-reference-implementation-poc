@@ -1,0 +1,12 @@
+{
+  "name": "@publicdomainrelay/rbac-helper",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "@publicdomainrelay/oidc-helper": "jsr:@publicdomainrelay/oidc-helper@^0",
+    "@atproto/identity": "npm:@atproto/identity@^0.5.0",
+    "@atproto/xrpc-server": "npm:@atproto/xrpc-server@^0.11.1",
+    "jose": "npm:jose@5"
+  }
+}

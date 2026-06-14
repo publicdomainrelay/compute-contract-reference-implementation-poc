@@ -3,7 +3,14 @@
   "version": "0.0.0",
   "license": "Unlicense",
   "exports": "./mod.ts",
+  "compilerOptions": {
+    "lib": ["deno.ns", "deno.unstable", "dom", "esnext"]
+  },
   "imports": {
-    "@publicdomainrelay/compute-provider": "jsr:@publicdomainrelay/compute-provider@^0"
+    "@atproto/api": "npm:@atproto/api@^0.20.8",
+    "@publicdomainrelay/compute-provider": "jsr:@publicdomainrelay/compute-provider@^0",
+    "@publicdomainrelay/oidc-helper": "jsr:@publicdomainrelay/oidc-helper@^0",
+    "@publicdomainrelay/hono-factory-workload-identity-droplet-oidc-poc": "jsr:@publicdomainrelay/hono-factory-workload-identity-droplet-oidc-poc@^0",
+    "yaml": "npm:yaml@^2.7.0"
   }
 }

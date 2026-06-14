@@ -1,0 +1,22 @@
+{
+  "name": "@publicdomainrelay/hono-factory-workload-identity-droplet-oidc-poc",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": {
+    ".": "./mod.ts",
+    "./provisioning": "./provisioning.ts"
+  },
+  "compilerOptions": {
+    "lib": ["deno.ns", "deno.unstable", "dom", "esnext"]
+  },
+  "imports": {
+    "@publicdomainrelay/oidc-helper": "jsr:@publicdomainrelay/oidc-helper@^0",
+    "@publicdomainrelay/rbac-helper": "jsr:@publicdomainrelay/rbac-helper@^0",
+    "@publicdomainrelay/hono-factory-atproto-repo": "jsr:@publicdomainrelay/hono-factory-atproto-repo@^0",
+    "@publicdomainrelay/hono-factory-xrpc-subscriber": "jsr:@publicdomainrelay/hono-factory-xrpc-subscriber@^0",
+    "@publicdomainrelay/xrpc-relay": "jsr:@publicdomainrelay/xrpc-relay@^0",
+    "@atproto/crypto": "npm:@atproto/crypto@^0.5.0",
+    "hono": "npm:hono@^4.12.23",
+    "js-yaml": "npm:js-yaml@^4.2.0"
+  }
+}

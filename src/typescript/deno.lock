@@ -4209,7 +4209,11 @@
       },
       "lib/compute-provider-local": {
         "dependencies": [
-          "jsr:@publicdomainrelay/compute-provider@0"
+          "jsr:@publicdomainrelay/compute-provider@0",
+          "jsr:@publicdomainrelay/hono-factory-workload-identity-droplet-oidc-poc@0",
+          "jsr:@publicdomainrelay/oidc-helper@0",
+          "npm:@atproto/api@~0.20.8",
+          "npm:yaml@^2.7.0"
         ]
       },
       "lib/datastore-pds": {
@@ -4300,6 +4304,18 @@
           "npm:hono@^4.12.23"
         ]
       },
+      "lib/hono-factory-workload-identity-droplet-oidc-poc": {
+        "dependencies": [
+          "jsr:@publicdomainrelay/hono-factory-atproto-repo@0",
+          "jsr:@publicdomainrelay/hono-factory-xrpc-subscriber@0",
+          "jsr:@publicdomainrelay/oidc-helper@0",
+          "jsr:@publicdomainrelay/rbac-helper@0",
+          "jsr:@publicdomainrelay/xrpc-relay@0",
+          "npm:@atproto/crypto@0.5",
+          "npm:hono@^4.12.23",
+          "npm:js-yaml@^4.2.0"
+        ]
+      },
       "lib/hono-factory-xrpc-relay": {
         "dependencies": [
           "jsr:@hono/hono@*",
@@ -4358,6 +4374,19 @@
           "npm:@atproto/xrpc@0.7"
         ]
       },
+      "lib/oidc-helper": {
+        "dependencies": [
+          "npm:jose@5"
+        ]
+      },
+      "lib/rbac-helper": {
+        "dependencies": [
+          "jsr:@publicdomainrelay/oidc-helper@0",
+          "npm:@atproto/identity@0.5",
+          "npm:@atproto/xrpc-server@~0.11.1",
+          "npm:jose@5"
+        ]
+      },
       "lib/ssh": {
         "dependencies": [
           "jsr:@publicdomainrelay/atproto-attestation-port@0.1",
@@ -4404,7 +4433,10 @@
         "dependencies": [
           "jsr:@publicdomainrelay/hono-factory-atproto-repo@0",
           "jsr:@publicdomainrelay/hono-factory-compute-provider-local@0",
+          "jsr:@publicdomainrelay/hono-factory-workload-identity-droplet-oidc-poc@0",
           "jsr:@publicdomainrelay/hono-factory-xrpc-subscriber@0",
+          "jsr:@publicdomainrelay/oidc-helper@0",
+          "jsr:@publicdomainrelay/rbac-helper@0",
           "jsr:@publicdomainrelay/utils-log@0",
           "jsr:@publicdomainrelay/xrpc-relay@0",
           "jsr:@std/assert@^1.0.19",

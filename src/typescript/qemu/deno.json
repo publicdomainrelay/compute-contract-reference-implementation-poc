@@ -11,6 +11,9 @@
   "tasks": {
     "dev": "deno run --watch --allow-all main.ts"
   },
+  "compilerOptions": {
+    "lib": ["deno.ns", "deno.unstable", "dom", "esnext"]
+  },
   "imports": {
     "@atproto/common": "npm:@atproto/common@^0.5.0",
     "@atproto/crypto": "npm:@atproto/crypto@^0.5.0",
@@ -20,6 +23,9 @@
     "@publicdomainrelay/hono-factory-xrpc-subscriber": "jsr:@publicdomainrelay/hono-factory-xrpc-subscriber@^0",
     "@publicdomainrelay/xrpc-relay": "jsr:@publicdomainrelay/xrpc-relay@^0",
     "@publicdomainrelay/hono-factory-compute-provider-local": "jsr:@publicdomainrelay/hono-factory-compute-provider-local@^0",
+    "@publicdomainrelay/oidc-helper": "jsr:@publicdomainrelay/oidc-helper@^0",
+    "@publicdomainrelay/rbac-helper": "jsr:@publicdomainrelay/rbac-helper@^0",
+    "@publicdomainrelay/hono-factory-workload-identity-droplet-oidc-poc": "jsr:@publicdomainrelay/hono-factory-workload-identity-droplet-oidc-poc@^0",
     "@publicdomainrelay/utils-log": "jsr:@publicdomainrelay/utils-log@^0",
     "@std/assert": "jsr:@std/assert@^1.0.19",
     "hono": "npm:hono@^4.12.23",

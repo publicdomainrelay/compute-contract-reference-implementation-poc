@@ -1,0 +1,9 @@
+{
+  "name": "@publicdomainrelay/oidc-helper",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "jose": "npm:jose@5"
+  }
+}

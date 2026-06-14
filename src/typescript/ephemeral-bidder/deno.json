@@ -1,6 +1,14 @@
 {
   "name": "@publicdomainrelay/ephemeral-bidder",
   "exports": "./main.ts",
+  "compilerOptions": {
+    "lib": [
+      "deno.ns",
+      "deno.unstable",
+      "dom",
+      "esnext"
+    ]
+  },
   "imports": {
     "@atproto/common": "npm:@atproto/common",
     "@atproto/crypto": "npm:@atproto/crypto",

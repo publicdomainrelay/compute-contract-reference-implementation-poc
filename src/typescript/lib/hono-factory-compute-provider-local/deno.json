@@ -3,6 +3,14 @@
   "version": "0.0.0",
   "license": "Unlicense",
   "exports": "./mod.ts",
+  "compilerOptions": {
+    "lib": [
+      "deno.ns",
+      "deno.unstable",
+      "dom",
+      "esnext"
+    ]
+  },
   "imports": {
     "@publicdomainrelay/compute-provider-local": "../compute-provider-local/mod.ts",
     "@publicdomainrelay/compute-provider": "../compute-provider/mod.ts",

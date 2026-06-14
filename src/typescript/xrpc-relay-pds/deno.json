@@ -10,6 +10,14 @@
     "server": "sh -ec 'deno run -A cli.ts | jq --unbuffered -rR \"(fromjson? // .)\"'",
     "test": "deno run -A vm_spin_test.ts"
   },
+  "compilerOptions": {
+    "lib": [
+      "deno.ns",
+      "deno.unstable",
+      "dom",
+      "esnext"
+    ]
+  },
   "imports": {
     "@atproto/common": "npm:@atproto/common@^0.5.0",
     "@atproto/common-web": "npm:@atproto/common-web@^0.5.0",
