@@ -20,7 +20,7 @@
  * Env:
  *   PORT              — listen port (default 8080)
  *   VM_IMAGE          — Docker image for QEMU VMs
- *   CONTAINER_MODE    — set "true" to use container.ts (cloud-init+sshd) instead of QEMU
+ *   CONTAINER_MODE    — set "true" to use cloud-init+sshd container instead of QEMU
  *   CONTAINER_IMAGE   — Docker image for container runner (default container-runner-ubuntu:latest)
  *   ISSUER_URL / THIS_ENDPOINT — OIDC issuer URL (default http://localhost:PORT)
  *   DATABASE_URI      — sqlite:///path or postgresql://... (default ./app.db)

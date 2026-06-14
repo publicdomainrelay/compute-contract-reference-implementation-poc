@@ -23,6 +23,9 @@
     "@publicdomainrelay/lexicons": "jsr:@publicdomainrelay/lexicons@^0",
     "@publicdomainrelay/market": "jsr:@publicdomainrelay/market@^0",
     "@publicdomainrelay/xrpc-relay": "jsr:@publicdomainrelay/xrpc-relay@^0",
-    "@publicdomainrelay/hono-factory-ephemeral-compute-bidder": "jsr:@publicdomainrelay/hono-factory-ephemeral-compute-bidder@^0"
+    "@publicdomainrelay/hono-factory-ephemeral-compute-bidder": "../lib/hono-factory-ephemeral-compute-bidder/mod.ts",
+    "@publicdomainrelay/hono-factory-compute-provider-local": "../lib/hono-factory-compute-provider-local/mod.ts",
+    "@publicdomainrelay/compute-provider-local": "../lib/compute-provider-local/mod.ts",
+    "@publicdomainrelay/compute-provider": "../lib/compute-provider/mod.ts"
   }
 }

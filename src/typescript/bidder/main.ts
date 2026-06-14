@@ -14,7 +14,7 @@
 //
 // Run: deno run --allow-net --allow-env --allow-run --allow-read --allow-write main.ts
 //
-// $ RBAC_REPO_ROOT="${HOME}/src/rbac/homelab/wid-atp" SETTLEMENT=free DIGITALOCEAN_BASE_URL=https://homelab.johnandersen777.bsky.social.fedproxy.com deno run --allow-all --watch main.ts
+// $ SETTLEMENT=free COMPUTE_PROVIDER=local deno run --allow-all --watch main.ts
 
 import { Hono } from "hono";
 import { registerErrorMiddleware } from "@publicdomainrelay/deno-hono-helpers";
@@ -59,7 +59,10 @@ import {
   parseAtUri,
   resolveAs,
 } from "@publicdomainrelay/atproto-helpers";
-import { createComputeProviderDigitalOcean } from "@publicdomainrelay/compute-provider-digitalocean";
+import type { ComputeProvider, ComputeProviderMode } from "@publicdomainrelay/compute-provider";
+import { computeProviderModeFromEnv, dropletSpecFromEnv, reqEnv as cpReqEnv, optUrl as cpOptUrl } from "@publicdomainrelay/compute-provider";
+import { createLocalComputeProvider } from "@publicdomainrelay/compute-provider-local";
+import { createDigitalOceanComputeProvider } from "@publicdomainrelay/compute-provider-digitalocean";
 import { reqEnv, optUrl } from "./env.ts";
 import {
   type SettlementCtx,
@@ -79,7 +82,7 @@ const COMPUTE_EVENT_SERVICE_ID = DEFAULT_COMPUTE_EVENT_SERVICE_ID;
 
 // Tracks active contracts: `${receiptUri}#${receiptCid}` -> provisioned
 // resources. Set on submitAccept, cleared on vm.delete event.
-type ActiveContract = { dropletId: number | string; rbacRef: StrongRef; acceptAuthor: string };
+type ActiveContract = { providerId: string | number; acceptAuthor: string };
 const activeContracts = new Map<string, ActiveContract>();
 
 // ---------------------------------------------------------------------------
@@ -109,17 +112,16 @@ const cfg = {
     port:    Number(Deno.env.get("PORT") ?? 4021),
   },
   compute: {
-    providers: {
-      [VM_NSID]: {
-        digitalocean: {
-          token:            reqEnv("DIGITALOCEAN_TOKEN"),
-          baseUrl:          optUrl("DIGITALOCEAN_BASE_URL", "https://droplet-oidc.its1337.com"),
-          rbacRepoRoot:     (() => { const p = reqEnv("RBAC_REPO_ROOT"); try { return Deno.realPathSync(p); } catch { return p; } })(),
-          acceptPathRecord: "$HOME/secrets/publicdomainrelay.com/market/accept.json",
-          acceptPathVm:     "/root/secrets/publicdomainrelay.com/market/accept.json",
-        },
-      },
-    },
+    mode: computeProviderModeFromEnv(),
+    token: Deno.env.get("COMPUTE_PROVIDER_TOKEN") ?? Deno.env.get("DIGITALOCEAN_TOKEN") ?? "",
+    baseUrl: Deno.env.get("COMPUTE_PROVIDER_BASE_URL") ?? Deno.env.get("DIGITALOCEAN_BASE_URL") ?? "",
+    spec: dropletSpecFromEnv(),
+    /** RBAC repo root for DO provider (git-backed policy repo). */
+    rbacRepoRoot: Deno.env.get("RBAC_REPO_ROOT") ?? "",
+    /** Path inside VM for accept bundle record. */
+    acceptPathRecord: Deno.env.get("ACCEPT_PATH_RECORD") ?? "/root/accept.json",
+    /** Path inside VM for accept bundle (cloud-init write_files). */
+    acceptPathVm: Deno.env.get("ACCEPT_PATH_VM") ?? "root/secrets/publicdomainrelay.com/market/accept.json",
   },
 } as const;
 
@@ -179,26 +181,42 @@ const settlement = settlementModeFromEnv() === "free"
   ? createFreeSettlement(settlementCtx)
   : createX402Settlement(settlementCtx);
 
-// DigitalOcean provisioning + RBAC backend. Wrapped behind getters since
-// `agent`/`agentDid` are only assigned once loginAgent() resolves.
-const {
-  createBidConfig,
-  createDroplet,
-  deleteDroplet,
-  deleteRbacRecord,
-  configureAccountAuthRbac,
-  injectAcceptBundle,
-} = createComputeProviderDigitalOcean({
-  getAgent: () => agent,
-  getAgentDid: () => agentDid,
-  log,
-  acceptPathRecord: cfg.compute.providers[VM_NSID].digitalocean.acceptPathRecord,
-  acceptPathVm:     cfg.compute.providers[VM_NSID].digitalocean.acceptPathVm,
-  digitaloceanBaseUrl: cfg.compute.providers[VM_NSID].digitalocean.baseUrl,
-  doToken:          cfg.compute.providers[VM_NSID].digitalocean.token,
-  rbacRepoRoot:     cfg.compute.providers[VM_NSID].digitalocean.rbacRepoRoot,
-  parseAtUri,
-});
+// Compute provider — wraps local or digitalocean backend behind the
+// ComputeProvider interface selected by COMPUTE_PROVIDER env var.
+const computeProvider: ComputeProvider = (() => {
+  const logCp = (level: LogLevel, msg: string, fields?: Record<string, unknown>) => log(level, msg, fields);
+  const createRecord = async (collection: string, record: Record<string, unknown>): Promise<StrongRef> => {
+    const res = await agent.com.atproto.repo.createRecord({
+      repo: agent.assertDid,
+      collection,
+      record,
+    });
+    return { $type: "com.atproto.repo.strongRef", uri: res.data.uri, cid: res.data.cid };
+  };
+
+  if (cfg.compute.mode === "digitalocean") {
+    const doToken = cfg.compute.token || reqEnv("DIGITALOCEAN_TOKEN");
+    const doBaseUrl = cfg.compute.baseUrl || reqEnv("DIGITALOCEAN_BASE_URL");
+    const rbacRoot = cfg.compute.rbacRepoRoot || reqEnv("RBAC_REPO_ROOT");
+    return createDigitalOceanComputeProvider({
+      getAgent: () => agent,
+      getAgentDid: () => agentDid,
+      log: logCp,
+      parseAtUri,
+      digitaloceanBaseUrl: doBaseUrl,
+      doToken,
+      rbacRepoRoot: rbacRoot,
+      acceptPathRecord: cfg.compute.acceptPathRecord,
+      acceptPathVm: cfg.compute.acceptPathVm,
+    });
+  }
+  // default: local
+  return createLocalComputeProvider({
+    log: logCp,
+    parseAtUri,
+    createRecord,
+  });
+})();
 
 // ---------------------------------------------------------------------------
 // Hono factories — market (submitRfp + submitAccept), market-bids (receipt
@@ -207,7 +225,7 @@ const {
 // ---------------------------------------------------------------------------
 
 const createAndSubmitBid = createBidFactory({
-  createBidConfig,
+  createBidConfig: computeProvider.createBidConfig,
   getMarketClient: () => bidderMarketClient,
   submitAcceptServiceDid: `${ownServiceDidWeb(cfg.server.baseUrl)}#${MARKET_SERVICE_ID}`,
   log,
@@ -237,8 +255,8 @@ const marketFactory = createMarketFactory(marketDeps, {
     serviceIds: [MARKET_SERVICE_ID],
     onAccept: async ({ acceptUri, acceptCid, accept, resolve }) => {
     // The accept's repo authority is the principal we provision on behalf of.
-    // Bind it up front so every nested log line (including the qemu-bound
-    // provisioning calls in createDroplet) names whose accept drove the work.
+    // Bind it up front so every nested log line (including the provisioning
+    // calls) names whose accept drove the work.
     const { repo: requesterDid } = parseAtUri(accept._uri);
     return await runWithLogContext({ onBehalfOfDid: requesterDid }, async () => {
     log("info", "settling accept", { accept: accept._uri });
@@ -270,11 +288,10 @@ const marketFactory = createMarketFactory(marketDeps, {
       vm: resolvedRef(vm),
     };
 
-    vm.user_data = injectAcceptBundle(vm.user_data, bundle);
+    vm.user_data = computeProvider.injectAcceptBundle(vm.user_data, bundle);
 
-    // TODO retry droplet creation on failure
-    const { json: dropletJson, rbacRef } = await createDroplet(vm, requesterDid) as { json: { droplet?: { id?: number | string } }; rbacRef: StrongRef };
-    const dropletId = dropletJson.droplet?.id;
+    const result = await computeProvider.provision(vm, requesterDid, cfg.compute.spec);
+    const providerId = result.providerId;
 
     // The bidder treats the VM as a black box. The requester watches it come up
     // and reports back via submitEvent (compute.events.vm.delete) when the
@@ -297,22 +314,15 @@ const marketFactory = createMarketFactory(marketDeps, {
 
     const id = receiptRef.uri.split("/").slice(-1)[0];
 
-    if (dropletId !== undefined) {
+    if (providerId !== undefined && providerId !== 0) {
       const receiptKey = refKey(receiptRef);
-      // requesterDid is the authority of the accept AT-URI — only this DID may
-      // later drive a vm.delete that tears down this droplet.
-      activeContracts.set(receiptKey, { dropletId, rbacRef, acceptAuthor: requesterDid });
-      log("info", "tracking droplet for receipt", {
-        receiptKey,
-        receiptUri: receiptRef.uri,
-        receiptCid: receiptRef.cid,
-        dropletId,
-        rbacUri: rbacRef.uri,
-        acceptAuthor: requesterDid,
-        activeContractsSize: activeContracts.size,
+      activeContracts.set(receiptKey, { providerId, acceptAuthor: requesterDid });
+      log("info", "tracking compute for receipt", {
+        receiptKey, receiptUri: receiptRef.uri, receiptCid: receiptRef.cid,
+        providerId, acceptAuthor: requesterDid, activeContractsSize: activeContracts.size,
       });
     } else {
-      log("warn", "no droplet id returned, cannot map receipt to droplet for cleanup", { dropletJson });
+      log("warn", "no provider id returned, cannot map receipt to compute for cleanup", { providerId });
     }
 
     return { body: { id, uri: receiptRef.uri, cid: receiptRef.cid, submitEvent: submitEventUrl } };
@@ -340,13 +350,9 @@ const computeFactory = createComputeFactory({
     },
     deleteRunningCompute: async ({ event, log, deleteEvent }) => {
       const receiptKey = refKey(event.receipt);
-      const reason = deleteEvent.reason ?? "vm.delete event received";
       const contract = activeContracts.get(receiptKey)!;
-      // Teardown is performed on behalf of the original accept author.
       return await runWithLogContext({ onBehalfOfDid: contract.acceptAuthor }, async () => {
-        await deleteDroplet(contract.dropletId, reason);
-        log("info", "submitEvent: deleting rbac record for receipt", { receiptKey, rbacUri: contract.rbacRef.uri });
-        await deleteRbacRecord(contract.rbacRef, reason);
+        await computeProvider.destroy(contract.providerId);
         activeContracts.delete(receiptKey);
         return { body: { ok: true } };
       });
@@ -366,7 +372,7 @@ const makeApp = () => {
   const app = new Hono();
   registerErrorMiddleware(app);
 
-  const readmeHtml = "<html><body><h1>compute-contract-provider-relay-digitalocean</h1></body></html>";
+  const readmeHtml = "<html><body><h1>compute-contract-provider-bidder</h1></body></html>";
   app.get("/", (c) => c.html(readmeHtml));
 
   // did:web document exposing the `pdr_temp_market` and `pdr_temp_compute_event`
@@ -415,7 +421,7 @@ const main = async () => {
   log("info", "attestation keypair loaded", { key: keypair.did(), issuer: attestationSigner.issuer });
   // Signer-bound client for outbound submitBid: signs + writes + forwards the bid.
   bidderMarketClient = createMarketClient(session, { agent, signer: attestationSigner, log });
-  await configureAccountAuthRbac();
+  if (computeProvider.setupAuth) await computeProvider.setupAuth();
   if (cfg.server.baseUrl) {
     const expectedEndpoint = `${ownServiceDidWeb(cfg.server.baseUrl)}#${MARKET_SERVICE_ID}`;
     await ensureOfferingRecord(agent, [VM_NSID], expectedEndpoint, log);

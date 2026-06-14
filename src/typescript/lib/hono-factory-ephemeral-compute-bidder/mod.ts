@@ -1,15 +1,18 @@
 /**
  * ephemeral-compute-bidder — lightweight atproto PDS that acts as a market
- * bidder with compute provider (DigitalOcean + RBAC), registry registration,
- * and discovery/heartbeat support.
+ * bidder with compute provider, registry registration, and discovery/heartbeat
+ * support.
  *
  * Mounts submitRfp, submitAccept, and submitEvent handlers using repo-factory
- * primitives (no @atproto/api Agent, no PDS login). When DIGITALOCEAN_TOKEN +
- * RBAC_REPO_ROOT are set (via options or env), provisions real droplets on
- * accept and tears them down on vm.delete via the DigitalOcean compute
- * provider.
+ * primitives (no @atproto/api Agent, no PDS login). When a compute provider
+ * is configured (via options, env, or --provider CLI flag), provisions compute
+ * on accept and tears it down on vm.delete.
  *
  * Without compute provider config, acts as a test-only bidder (no provisioning).
+ *
+ * Provider mode is selected by COMPUTE_PROVIDER env var or --provider CLI flag:
+ *   "digitalocean" — uses @publicdomainrelay/compute-provider-digitalocean
+ *   "local"        — uses @publicdomainrelay/compute-provider-local
  *
  * Exports:
  *   createEphemeralBidder() — returns a running bidder with relay registration,
@@ -20,17 +23,14 @@
  *   const { proxyRef, did } = await bidder.ready;
  *   // … run contract flow …
  *
- * Usage (with compute provider):
- *   const bidder = await createEphemeralBidder({
- *     port: 0,
- *     computeProvider: {
- *       digitaloceanToken: "...",
- *       digitaloceanBaseUrl: "https://mini-cloud-0001.fedfork.com",
- *       rbacRepoRoot: "/path/to/rbac/repo",
- *     },
- *   });
+ * Usage (with compute provider via env):
+ *   COMPUTE_PROVIDER=digitalocean COMPUTE_PROVIDER_TOKEN=... deno run ...
+ *
+ * Usage (with compute provider via CLI flag):
+ *   deno run ... --provider local
  */
 
+import { Agent } from "@atproto/api";
 import { Secp256k1Keypair } from "@atproto/crypto";
 import {
   createRepoFactory,
@@ -74,20 +74,40 @@ import {
   BIDDER_DISCOVERY_NSID,
 } from "@publicdomainrelay/lexicons";
 import { TID } from "@atproto/common";
-import { createComputeProviderDigitalOcean } from "@publicdomainrelay/compute-provider-digitalocean";
-import type { StrongRef } from "@publicdomainrelay/compute-provider-digitalocean";
-import { createAttestationCid, type RecordMap } from "@atiproto/atproto-attestation";
+import type { ComputeProvider, ComputeProviderMode, DropletSpec, ProvisionResult, StrongRef, VM } from "@publicdomainrelay/compute-provider";
+import { computeProviderModeFromEnv } from "@publicdomainrelay/compute-provider";
+import { createLocalComputeProvider } from "@publicdomainrelay/compute-provider-local";
 import { createComputeProviderLocalFactory } from "@publicdomainrelay/hono-factory-compute-provider-local";
+import type { ComputeProviderLocalFactory } from "@publicdomainrelay/hono-factory-compute-provider-local";
+import { createDigitalOceanComputeProvider } from "@publicdomainrelay/compute-provider-digitalocean";
+import { createAttestationCid, type RecordMap } from "@atiproto/atproto-attestation";
 import { createLogger } from "@publicdomainrelay/utils-log";
 import { DEFAULT_REGISTRY_ENDPOINTS } from "@publicdomainrelay/market/discovery";
 
 // ── options ──────────────────────────────────────────────────────────
 
 export interface ComputeProviderConfig {
-  digitaloceanToken: string;
-  digitaloceanBaseUrl?: string;
-  rbacRepoRoot: string;
+  mode?: ComputeProviderMode;  // "local" | "digitalocean"
+  /** DO API token (required for digitalocean mode). */
+  token?: string;
+  /** DO API base URL (digitalocean mode). */
+  baseUrl?: string;
+  spec?: DropletSpec;
+  // ── local mode ─────────────────────────────────────────────────
+  containerMode?: "vm" | "container";
+  vmImage?: string;
+  containerImage?: string;
+  cacheDir?: string;
+  // ── digitalocean RBAC mode ─────────────────────────────────────
+  /** ATProto Agent getter (digitalocean mode, for service auth + record creation). */
+  getAgent?: () => Agent;
+  /** Bidder DID getter (digitalocean mode). */
+  getAgentDid?: () => string;
+  /** RBAC git repo root for policy files (digitalocean mode). */
+  rbacRepoRoot?: string;
+  /** Path inside VM for accept record (digitalocean mode bid config). */
   acceptPathRecord?: string;
+  /** Path inside VM for accept bundle (digitalocean mode cloud-init). */
   acceptPathVm?: string;
 }
 
@@ -107,8 +127,9 @@ export interface EphemeralBidderOptions {
 
 /** receiptKey → active contract state */
 export interface ActiveContract {
-  dropletId?: number | string;
-  rbacRef?: { uri: string; cid: string };
+  /** Resolves to the provider id once background provisioning completes
+   *  (or undefined if provisioning was skipped/failed). */
+  providerIdPromise?: Promise<string | number | undefined>;
   acceptAuthor: string;
 }
 
@@ -142,40 +163,33 @@ function parseAtUri(uri: string): { repo: string; collection: string; rkey: stri
 }
 
 /**
- * Start the local compute provider in-process (no subprocess shell-out).
- * Creates the Hono factory, registers with the relay, and returns the
- * https:// base URL derived from the proxyRef once the relay registration
- * completes.  The ISSUER_URL is updated dynamically so service-auth JWT
- * validation (aud == service did) passes when callers reach us through
- * the relay.
+ * Start an in-process container host with XRPC relay registration.
+ * Returns the factory and base URL (derived from the relay proxyRef).
+ * The factory's provisionDroplet() injects ProvisioningData so the
+ * container can exchange a provisioning JWT for a long-lived OIDC
+ * token and bootstrap fedproxy-client + websocat for SSH relay access.
  */
-async function startContainerHost(): Promise<string> {
-  const CACHE_DIR = `${Deno.env.get("HOME")}/.cache/simple-qemu`;
-  const CONTAINER_IMAGE = Deno.env.get("CONTAINER_IMAGE") ?? "container-runner-ubuntu:latest";
+async function startContainerHost(args: {
+  operatorHandle: string;
+  selfDid: string;
+  containerImage: string;
+  cacheDir: string;
+  log: ReturnType<typeof createLogger>;
+}): Promise<{ baseUrl: string; factory: ComputeProviderLocalFactory }> {
   const DISPATCHER_HOST = Deno.env.get("DISPATCHER_HOST") ?? "xrpc.fedproxy.com";
   const dispatcherDid = `did:web:${DISPATCHER_HOST}`;
 
-  // Mutable issuer URL — starts as a placeholder and gets updated after
-  // relay registration (only then do we know the proxyRef).
   let issuerUrl = "http://localhost:0";
 
-  const qemuLog = createLogger({ service: "qemu", selfDid: () => "did:plc:unknown" });
-
-  // Warm up OIDC signing key (same as qemu/main.ts startup).
-  const { getSigningKey, getPublicJwk } = await import("@publicdomainrelay/qemu/oidc_helper");
-  await getSigningKey();
-  const jwk = await getPublicJwk();
-  qemuLog("info", "miniCloud listening", { port: 0, issuer: issuerUrl, kid: jwk.kid });
-
   const factory = createComputeProviderLocalFactory({
-    operatorHandle: () => Deno.env.get("OPERATOR_HANDLE") ?? "",
-    selfDid: "",
+    operatorHandle: () => args.operatorHandle,
+    selfDid: args.selfDid,
     issuerUrl: () => issuerUrl,
     vmImage: Deno.env.get("VM_IMAGE") ?? "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner",
     containerMode: true,
-    containerImage: CONTAINER_IMAGE,
-    cacheDir: CACHE_DIR,
-    log: qemuLog,
+    containerImage: args.containerImage,
+    cacheDir: args.cacheDir,
+    log: args.log,
   });
 
   const app = factory.createApp();
@@ -202,7 +216,7 @@ async function startContainerHost(): Promise<string> {
       handleRequest,
       subscribe: undefined,
       onLog: (e) =>
-        qemuLog("info", `xrpc-relay: ${e.message}`, { severity: e.severity }),
+        args.log("info", `xrpc-relay: ${e.message}`, { severity: e.severity }),
       onRegistered: (info) => {
         clearTimeout(timeout);
         const proxyHost = info.proxyRef.replace(/^did:web:/, "");
@@ -210,7 +224,7 @@ async function startContainerHost(): Promise<string> {
         issuerUrl = url;
         Deno.env.set("ISSUER_URL", url);
         Deno.env.set("THIS_ENDPOINT", url);
-        qemuLog("info", "xrpc-relay issuer url updated", { baseUrl: url });
+        args.log("info", "xrpc-relay issuer url updated", { baseUrl: url });
         console.log(
           JSON.stringify({
             event: "container_host_ready",
@@ -221,67 +235,19 @@ async function startContainerHost(): Promise<string> {
         resolve(url);
       },
       onSubscriptionOpen: (sub) =>
-        qemuLog("info", "xrpc-relay subscription open", {
+        args.log("info", "xrpc-relay subscription open", {
           subscriptionId: sub.subscriptionId,
           nsid: sub.nsid,
         }),
       onStatus: (status) =>
-        qemuLog("info", "xrpc-relay status", { status }),
+        args.log("info", "xrpc-relay status", { status }),
     });
-
-    qemuLog("info", "xrpc-relay connecting", { dispatcherHost: DISPATCHER_HOST });
   });
 
-  return baseUrl;
+  return { baseUrl, factory };
 }
 
-/**
- * Build a minimal Agent-shaped adapter so the compute provider can issue
- * service-auth tokens via signServiceAuth and manage repo records via the
- * repo-factory API — no @atproto/api Agent or PDS login needed.
- */
-function createAgentAdapter(
-  api: ReturnType<typeof createRepoFactory>["api"],
-  signer: Signer,
-  did: string,
-) {
-  return {
-    assertDid: did,
-    com: {
-      atproto: {
-        server: {
-          getServiceAuth: async ({ aud, exp }: { aud: string; exp: number }) => {
-            const expiresInSec = Math.max(1, exp - Math.floor(Date.now() / 1000));
-            const token = await signServiceAuth(signer, { aud, expiresInSec });
-            return { data: { token } };
-          },
-        },
-        repo: {
-          createRecord: async (
-            { repo, collection, record }: { repo: string; collection: string; record: Record<string, unknown> },
-          ) => {
-            const rkey = TID.next().toString();
-            await api.applyWrites(repo, [{ action: "create", collection, rkey, record }]);
-            const rec = await api.getRecord(repo, collection, rkey);
-            return { data: { uri: `at://${repo}/${collection}/${rkey}`, cid: rec?.cid ?? "" } };
-          },
-          deleteRecord: async (
-            { repo, collection, rkey }: { repo: string; collection: string; rkey: string },
-          ) => {
-            await api.applyWrites(repo, [{ action: "delete", collection, rkey }]);
-            return { success: true };
-          },
-          listRecords: async (
-            { repo, collection, limit }: { repo: string; collection: string; limit?: number },
-          ) => {
-            const res = await api.listRecords(repo, collection, { limit: limit ?? 100 });
-            return { data: res };
-          },
-        },
-      },
-    },
-  };
-}
+/* createAgentAdapter removed — compute providers now accept createRecord directly */
 
 // ── createEphemeralBidder ─────────────────────────────────────────────
 
@@ -300,24 +266,9 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
 
   // ── compute provider config ─────────────────────────────────────
   const cpCfg = opts.computeProvider;
-  const DO_TOKEN = cpCfg?.digitaloceanToken ?? Deno.env.get("DIGITALOCEAN_TOKEN") ?? "";
-  const START_CONTAINER_HOST = Deno.env.get("START_CONTAINER_HOST") === "true";
-  const DO_BASE_URL = START_CONTAINER_HOST
-    ? await startContainerHost()
-    : (cpCfg?.digitaloceanBaseUrl ?? Deno.env.get("DIGITALOCEAN_BASE_URL") ?? "https://droplet-oidc.its1337.com");
-  const RBAC_REPO_ROOT = cpCfg?.rbacRepoRoot ?? (() => {
-    const p = Deno.env.get("RBAC_REPO_ROOT") ?? "";
-    try { return Deno.realPathSync(p); } catch { return p; }
-  })();
-  // In container mode without explicit RBAC config, use a temp dir so the
-  // compute provider's RBAC filesystem ops have a place to write (best-effort —
-  // the container host uses service auth, not OIDC/RBAC, for droplet endpoints).
-  const _RBAC_REPO_ROOT_RESOLVED = START_CONTAINER_HOST && !RBAC_REPO_ROOT
-    ? await Deno.makeTempDir({ prefix: "rbac-" })
-    : RBAC_REPO_ROOT;
-  const ACCEPT_PATH_RECORD = cpCfg?.acceptPathRecord ?? Deno.env.get("ACCEPT_PATH_RECORD") ?? "$HOME/secrets/publicdomainrelay.com/market/accept.json";
-  const ACCEPT_PATH_VM = cpCfg?.acceptPathVm ?? Deno.env.get("ACCEPT_PATH_VM") ?? "/root/secrets/publicdomainrelay.com/market/accept.json";
-  const HAS_COMPUTE_PROVIDER = !!(DO_TOKEN && RBAC_REPO_ROOT) || START_CONTAINER_HOST;
+  const mode: ComputeProviderMode = cpCfg?.mode ?? computeProviderModeFromEnv();
+  const token = cpCfg?.token ?? Deno.env.get("COMPUTE_PROVIDER_TOKEN") ?? "";
+  const baseUrl = cpCfg?.baseUrl ?? Deno.env.get("COMPUTE_PROVIDER_BASE_URL") ?? "";
 
   const logInfo = (obj: Record<string, unknown>) => console.log(JSON.stringify(obj));
   const log = (
@@ -430,12 +381,12 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
   };
 
   const ready: Promise<{ subdomain: string; proxyRef: string }> = relayReady.then(async (info) => {
-    // Ensure account-auth RBAC record exists before handling contracts.
     await _cpReady;
-    // Let the bidder authorize itself to call the compute provider's
-    // /v2/account + /v2/droplets endpoints.  The operator allowlist check
-    // in raiseIfUnauthorizedServiceAuth fetches this record from our repo.
-    await ensureOperatorAllowlist(api, did, DO_BASE_URL);
+    // ensureOperatorAllowlist is only needed for the legacy HTTP provider;
+    // local and digitalocean modes don't use service-auth allowlists.
+    if (mode !== "local" && mode !== "digitalocean") {
+      await ensureOperatorAllowlist(api, did, baseUrl);
+    }
     // Create the offering record once relay is registered.
     await ensureOffering(api, did);
     // Create initial discovery record in own repo.
@@ -449,27 +400,125 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
   });
   bidder.ready = ready;
 
-  // ── compute provider (DigitalOcean + RBAC) ──────────────────────
-  // When DIGITALOCEAN_TOKEN + RBAC_REPO_ROOT are set, provision real
-  // droplets on accept and tear them down on vm.delete.
-  const computeProvider = HAS_COMPUTE_PROVIDER
-    ? createComputeProviderDigitalOcean({
-        getAgent: () => agentAdapter as any,
-        getAgentDid: () => did,
+  // ── compute provider ──────────────────────────────────────────────
+  const createRecord = async (
+    collection: string,
+    record: Record<string, unknown>,
+  ): Promise<StrongRef> => {
+    const rkey = TID.next().toString();
+    await api.applyWrites(did, [{ action: "create", collection, rkey, record }]);
+    const rec = await api.getRecord(did, collection, rkey);
+    return { $type: "com.atproto.repo.strongRef", uri: `at://${did}/${collection}/${rkey}`, cid: rec?.cid ?? "" };
+  };
+
+  const computeProvider: ComputeProvider | null = (() => {
+    if (mode === "digitalocean") {
+      if (!token || !cpCfg?.getAgent || !cpCfg?.getAgentDid || !cpCfg?.rbacRepoRoot) {
+        logInfo({ event: "bidder_do_incomplete", hint: "digitalocean mode requires token, getAgent, getAgentDid, rbacRepoRoot", mode });
+        return null;
+      }
+      return createDigitalOceanComputeProvider({
+        getAgent: cpCfg.getAgent,
+        getAgentDid: cpCfg.getAgentDid,
         log: (level, msg, fields) => logInfo({ label: LABEL, severity: level, message: msg, ...(fields ?? {}) }),
-        acceptPathRecord: ACCEPT_PATH_RECORD,
-        acceptPathVm: ACCEPT_PATH_VM,
-        digitaloceanBaseUrl: DO_BASE_URL,
-        doToken: DO_TOKEN,
-        rbacRepoRoot: _RBAC_REPO_ROOT_RESOLVED,
         parseAtUri,
-      })
-    : null;
-  const agentAdapter = createAgentAdapter(api, signer, did);
-  // configureAccountAuthRbac must run before the first createDroplet call.
-  // In test mode (no provider) this is a no-op.
-  const _cpReady = computeProvider
-    ? computeProvider.configureAccountAuthRbac().then(() => logInfo({ event: "bidder_compute_provider_ready", did }))
+        digitaloceanBaseUrl: baseUrl || "https://droplet-oidc.its1337.com",
+        doToken: token,
+        rbacRepoRoot: cpCfg.rbacRepoRoot,
+        acceptPathRecord: cpCfg.acceptPathRecord ?? "/root/accept.json",
+        acceptPathVm: cpCfg.acceptPathVm ?? "root/secrets/publicdomainrelay.com/market/accept.json",
+      });
+    }
+    if (mode === "local") {
+      const localLog = (level: string, msg: string, fields?: Record<string, unknown>) =>
+        logInfo({ label: LABEL, severity: level, message: msg, ...(fields ?? {}) });
+
+      // Start container host eagerly — we need its relay-registered base URL
+      // for the bid config's url_path (fedproxy-client reads it from the
+      // accept bundle to know where to fetch OIDC tokens).
+      const HOME = Deno.env.get("HOME") ?? "/tmp";
+      const containerHostPromise = startContainerHost({
+        operatorHandle: did,
+        selfDid: did,
+        containerImage: cpCfg?.containerImage ?? "container-runner-ubuntu:latest",
+        cacheDir: cpCfg?.cacheDir ?? `${HOME}/.cache/simple-qemu`,
+        log: createLogger({ service: "qemu", selfDid: () => did }),
+      });
+
+      // Build base provider for non-provision methods.
+      const localBase = createLocalComputeProvider({
+        log: localLog,
+        parseAtUri,
+        containerMode: cpCfg?.containerMode ?? "container",
+        vmImage: cpCfg?.vmImage,
+        containerImage: cpCfg?.containerImage,
+        cacheDir: cpCfg?.cacheDir,
+        createRecord,
+      });
+
+      // Override createBidConfig: include url_path pointing to the container
+      // host's OIDC issuer so fedproxy-client can fetch tokens.
+      const origCreateBidConfig = localBase.createBidConfig.bind(localBase);
+      localBase.createBidConfig = async (nowIso: string): Promise<StrongRef> => {
+        const { baseUrl } = await containerHostPromise;
+        // Create a bid config record with url_path.
+        const rkey = TID.next().toString();
+        await api.applyWrites(did, [{
+          action: "create",
+          collection: "com.publicdomainrelay.temp.compute.config.wif.simple",
+          rkey,
+          record: {
+            $type: "com.publicdomainrelay.temp.compute.config.wif.simple",
+            provider: "local",
+            // fedproxy-client OIDC plugin reads these files (all written
+            // by provisioning-token.sh at boot after a successful prove).
+            url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
+            token_path: "/root/secrets/digitalocean.com/serviceaccount/token",
+            actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
+            url_route: "/v1/oidc/issue",
+            // fedproxy-client OIDC plugin interpolates {actx} from actx_path,
+            // {did-plc-key} from the accept DID, {role} from SERVICE env var.
+            subject: "actx:{actx}:plc:{did-plc-key}:role:{role}",
+            createdAt: nowIso,
+          },
+        }]);
+        const rec = await api.getRecord(did, "com.publicdomainrelay.temp.compute.config.wif.simple", rkey);
+        return { $type: "com.atproto.repo.strongRef", uri: `at://${did}/com.publicdomainrelay.temp.compute.config.wif.simple/${rkey}`, cid: rec?.cid ?? "" };
+      };
+
+      // Override provision: go through the container host factory so
+      // ProvisioningData.create() injects the OIDC token exchange script.
+      localBase.provision = async (vm: VM, requesterDid: string, spec?: DropletSpec): Promise<ProvisionResult> => {
+        const { factory: chFactory } = await containerHostPromise;
+        // Use the PLC key (without did:plc: prefix) as actx — the OIDC
+        // plugin in fedproxy-client strips did:plc: when interpolating
+        // the {actx} template variable.
+        const actx = requesterDid.startsWith("did:plc:")
+          ? requesterDid.slice("did:plc:".length)
+          : requesterDid;
+        return chFactory.provisionDroplet(vm, actx, {
+          image: spec?.image,
+          region: spec?.region,
+          size: spec?.size,
+        });
+      };
+
+      // Override destroy: clean up Docker containers.
+      localBase.destroy = async (id: string | number): Promise<void> => {
+        const sid = String(id);
+        for (const name of [sid, `droplet-${sid}`]) {
+          await new Deno.Command("docker", { args: ["kill", name] }).output().catch(() => {});
+          await new Deno.Command("docker", { args: ["rm", "-f", name] }).output().catch(() => {});
+        }
+      };
+
+      return localBase;
+    }
+    return null;
+  })();
+
+  const _cpReady = computeProvider?.setupAuth
+    ? computeProvider.setupAuth().then(() => logInfo({ event: "bidder_compute_provider_ready", did, mode }))
     : Promise.resolve();
 
   // ── record helpers (same pattern as requester) ──────────────────
@@ -642,7 +691,7 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
 
     const nowIso = new Date().toISOString();
 
-    // 1. Create bid config (DigitalOcean OIDC exchange params) if compute provider is wired.
+    // 1. Create bid config if compute provider is wired.
     let bidConfigRef: { uri: string; cid: string } | undefined;
     if (computeProvider) {
       const configRef = await computeProvider.createBidConfig(nowIso);
@@ -709,68 +758,61 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
     const rfpRef = accept.rfp as { uri: string; cid: string } | undefined;
     const bidRef = accept.bid as { uri: string; cid: string } | undefined;
 
-    // Provision a real droplet if compute provider is wired.
+    // Provision compute if compute provider is wired — IN THE BACKGROUND.
     // Resolve chain: accept.rfp → RFP record → .payload → compute.vm record.
-    let dropletId: number | string | undefined;
-    let rbacRef: StrongRef | undefined;
+    //
+    // Container/VM boot + SSH polling can take well over the relay/fedproxy
+    // request-idle timeout (~18s). Awaiting it here makes the submitAccept
+    // response arrive too late → fedproxy returns 502 and the requester never
+    // gets the receipt. The receipt is the durable commitment; the requester
+    // polls SSH on its own (vmReadyTimeoutSec) until the VM answers, so we ack
+    // immediately and let provisioning finish asynchronously.
+    let providerIdPromise: Promise<string | number | undefined> = Promise.resolve(undefined);
     if (computeProvider && rfpRef) {
-      try {
+      providerIdPromise = (async (): Promise<string | number | undefined> => {
         const resolve = createRecordResolver(idResolver);
-        // Step 1: resolve the RFP record to get its payload ref (the compute.vm record).
         const rfpResolved = await resolve.resolve({ uri: rfpRef.uri, cid: rfpRef.cid });
         const rfpRecord = rfpResolved as Record<string, unknown> | null;
         const vmRef = rfpRecord?.payload as { uri: string; cid: string } | undefined;
-        if (vmRef) {
-          // Step 2: resolve the compute.vm record.
-          const vmResolved = await resolve.resolve({ uri: vmRef.uri, cid: vmRef.cid });
-          const vm = vmResolved as Record<string, unknown> | null;
-          if (vm) {
-            // Step 3: resolve bid → bidConfig → compute-config record value.
-            // fedproxy-client's oidc plugin requires accept.json to carry
-            // bid_config.value (with url_path); without it it exits fatal.
-            let bidConfigResolved:
-              | { uri: string; cid: string; value: unknown }
-              | null = null;
-            if (bidRef) {
-              try {
-                const bidResolved = await resolve.resolve({ uri: bidRef.uri, cid: bidRef.cid }) as Record<string, unknown> | null;
-                const cfgRef = bidResolved?.bidConfig as { uri: string; cid: string } | undefined;
-                if (cfgRef) {
-                  const cfgValue = await resolve.resolve({ uri: cfgRef.uri, cid: cfgRef.cid });
-                  bidConfigResolved = { uri: cfgRef.uri, cid: cfgRef.cid, value: cfgValue };
-                }
-              } catch (err) {
-                cbLog("warn", "bidder failed to resolve bidConfig", { error: String(err) });
-              }
-            }
+        if (!vmRef) return undefined;
+        const vmResolved = await resolve.resolve({ uri: vmRef.uri, cid: vmRef.cid });
+        const vm = vmResolved as Record<string, unknown> | null;
+        if (!vm) return undefined;
 
-            // injectAcceptBundle adds contract provenance to the VM's user_data.
-            const bundle = {
-              $type: "com.publicdomainrelay.temp.market.accept",
-              accept: { uri: acceptUri, cid: acceptCid },
-              rfp: { uri: rfpRef.uri, cid: rfpRef.cid },
-              bid: bidRef ? { uri: bidRef.uri, cid: bidRef.cid } : null,
-              bid_config: bidConfigResolved,
-            };
-            const vmWithBundle = {
-              ...vm,
-              user_data: computeProvider.injectAcceptBundle((vm.user_data as string) ?? "", bundle),
-              _uri: vmRef.uri,
-              _cid: vmRef.cid,
-            };
-            const result = await computeProvider.createDroplet(vmWithBundle as any, issuerDid) as {
-              json: { droplet?: { id?: number | string } };
-              rbacRef: StrongRef;
-            };
-            dropletId = result.json.droplet?.id;
-            rbacRef = result.rbacRef;
-            cbLog("info", "bidder provisioned droplet", { dropletId, rbacUri: rbacRef.uri });
+        let bidConfigResolved: { uri: string; cid: string; value: unknown } | null = null;
+        if (bidRef) {
+          try {
+            const bidResolved = await resolve.resolve({ uri: bidRef.uri, cid: bidRef.cid }) as Record<string, unknown> | null;
+            const cfgRef = bidResolved?.bidConfig as { uri: string; cid: string } | undefined;
+            if (cfgRef) {
+              const cfgValue = await resolve.resolve({ uri: cfgRef.uri, cid: cfgRef.cid });
+              bidConfigResolved = { uri: cfgRef.uri, cid: cfgRef.cid, value: cfgValue };
+            }
+          } catch (err) {
+            cbLog("warn", "bidder failed to resolve bidConfig", { error: String(err) });
           }
         }
-      } catch (err) {
-        cbLog("error", "bidder failed to provision droplet", { error: String(err) });
-        return { status: 500, body: { error: "ProvisioningFailed", message: String(err) } };
-      }
+
+        const bundle = {
+          $type: "com.publicdomainrelay.temp.market.accept",
+          accept: { uri: acceptUri, cid: acceptCid },
+          rfp: { uri: rfpRef.uri, cid: rfpRef.cid },
+          bid: bidRef ? { uri: bidRef.uri, cid: bidRef.cid } : null,
+          bid_config: bidConfigResolved,
+        };
+        const vmWithBundle = {
+          ...vm,
+          user_data: computeProvider.injectAcceptBundle((vm.user_data as string) ?? "", bundle),
+          _uri: vmRef.uri,
+          _cid: vmRef.cid,
+        };
+        const result = await computeProvider.provision(vmWithBundle as any, issuerDid);
+        cbLog("info", "bidder provisioned compute", { providerId: result.providerId });
+        return result.providerId;
+      })().catch((err) => {
+        cbLog("error", "bidder failed to provision", { error: String(err) });
+        return undefined;
+      });
     }
 
     // Create a signed receipt in the bidder's repo.
@@ -803,15 +845,13 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
     // Track the contract so submitEvent can look it up later.
     const rkey = receiptUri.split("/").pop()!;
     activeContracts.set(refKey({ uri: receiptUri, cid: receiptCid }), {
-      dropletId,
-      rbacRef: rbacRef ? { uri: rbacRef.uri, cid: rbacRef.cid } : undefined,
+      providerIdPromise,
       acceptAuthor: issuerDid,
     });
 
     cbLog("info", "bidder created receipt", {
       receiptUri, receiptCid,
       acceptAuthor: issuerDid,
-      dropletId,
       activeCount: activeContracts.size,
     });
 
@@ -856,24 +896,20 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
     // Tear down provisioned resources if compute provider is wired.
     const reason = "vm.delete event received";
     if (computeProvider) {
-      if (contract.dropletId !== undefined) {
+      // Provisioning runs in the background; wait for it to settle so we know
+      // the provider id before tearing down (avoids leaking a container that
+      // finished booting after the accept ack).
+      const providerId = await contract.providerIdPromise;
+      if (providerId !== undefined) {
         try {
-          await computeProvider.deleteDroplet(contract.dropletId, reason);
-          ctx.log("info", "submitEvent: droplet deleted", { dropletId: contract.dropletId, reason });
+          await computeProvider.destroy(providerId);
+          ctx.log("info", "submitEvent: compute destroyed", { providerId, reason });
         } catch (err) {
-          ctx.log("error", "submitEvent: failed to delete droplet", { dropletId: contract.dropletId, error: String(err) });
+          ctx.log("error", "submitEvent: failed to destroy compute", { providerId, error: String(err) });
         }
       }
-      if (contract.rbacRef) {
-        try {
-          await computeProvider.deleteRbacRecord(
-            { $type: "com.atproto.repo.strongRef", uri: contract.rbacRef.uri, cid: contract.rbacRef.cid } as StrongRef,
-            reason,
-          );
-          ctx.log("info", "submitEvent: rbac record deleted", { rbacUri: contract.rbacRef.uri, reason });
-        } catch (err) {
-          ctx.log("error", "submitEvent: failed to delete rbac record", { rbacUri: contract.rbacRef.uri, error: String(err) });
-        }
+      if (computeProvider?.teardownAuth) {
+        // no-op for both local and DO — RBAC is gone
       }
     }
 
@@ -1066,9 +1102,20 @@ async function ensureOffering(
 // ── CLI main (when run directly) ──────────────────────────────────────
 
 if (import.meta.main) {
-  const writeDidPlcToIdx = Deno.args.indexOf("--write-did-plc-to");
-  const writeDidPlcTo = writeDidPlcToIdx >= 0 && Deno.args[writeDidPlcToIdx + 1]
-    ? Deno.args[writeDidPlcToIdx + 1]
+  const args = Deno.args;
+  const providerIdx = args.indexOf("--provider");
+  if (providerIdx >= 0 && args[providerIdx + 1]) {
+    Deno.env.set("COMPUTE_PROVIDER_CLI", args[providerIdx + 1]);
+  }
+  // also support -p
+  const pIdx = args.indexOf("-p");
+  if (pIdx >= 0 && args[pIdx + 1]) {
+    Deno.env.set("COMPUTE_PROVIDER_CLI", args[pIdx + 1]);
+  }
+
+  const writeDidPlcToIdx = args.indexOf("--write-did-plc-to");
+  const writeDidPlcTo = writeDidPlcToIdx >= 0 && args[writeDidPlcToIdx + 1]
+    ? args[writeDidPlcToIdx + 1]
     : "";
 
   const bidder = await createEphemeralBidder({

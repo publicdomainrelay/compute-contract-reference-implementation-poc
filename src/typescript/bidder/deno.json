@@ -24,6 +24,8 @@
     "@publicdomainrelay/compute-provider-digitalocean": "jsr:@publicdomainrelay/compute-provider-digitalocean@^0",
     "@publicdomainrelay/market-settlement": "jsr:@publicdomainrelay/market-settlement@^0",
     "@publicdomainrelay/utils-attestation-key": "jsr:@publicdomainrelay/utils-attestation-key@^0",
-    "@publicdomainrelay/utils-log": "jsr:@publicdomainrelay/utils-log@^0"
+    "@publicdomainrelay/utils-log": "jsr:@publicdomainrelay/utils-log@^0",
+    "@publicdomainrelay/compute-provider": "jsr:@publicdomainrelay/compute-provider@^0",
+    "@publicdomainrelay/compute-provider-local": "jsr:@publicdomainrelay/compute-provider-local@^0"
   }
 }

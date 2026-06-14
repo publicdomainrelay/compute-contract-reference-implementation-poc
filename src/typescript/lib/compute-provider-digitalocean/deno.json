@@ -6,6 +6,7 @@
   "imports": {
     "@atproto/lex": "npm:@atproto/lex@^0.1.3",
     "@atproto/api": "npm:@atproto/api@^0.20.8",
+    "@publicdomainrelay/compute-provider": "jsr:@publicdomainrelay/compute-provider@^0",
     "@publicdomainrelay/lexicons": "jsr:@publicdomainrelay/lexicons@^0",
     "@publicdomainrelay/utils-log": "jsr:@publicdomainrelay/utils-log@^0",
     "yaml": "npm:yaml@^2.7.0"

@@ -4,7 +4,9 @@
   "license": "Unlicense",
   "exports": "./mod.ts",
   "imports": {
-    "@publicdomainrelay/qemu": "jsr:@publicdomainrelay/qemu@^0",
+    "@publicdomainrelay/compute-provider-local": "../compute-provider-local/mod.ts",
+    "@publicdomainrelay/compute-provider": "../compute-provider/mod.ts",
+    "@publicdomainrelay/qemu": "../../qemu",
     "@publicdomainrelay/utils-log": "jsr:@publicdomainrelay/utils-log@^0",
     "hono": "npm:hono@^4.12.23",
     "hono/cors": "npm:hono@^4.12.23/cors",

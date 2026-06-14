@@ -11,20 +11,12 @@ import { Agent } from "@atproto/api";
 import { stringify as yamlStringify, parse as yamlParse } from "npm:yaml@^2.7.0";
 import { COMPUTE_CONFIG_WIF_SIMPLE_NSID } from "@publicdomainrelay/lexicons";
 import { ON_BEHALF_OF_HEADER } from "@publicdomainrelay/utils-log";
+import type { ComputeProvider, ProvisionResult, DropletSpec, VM } from "@publicdomainrelay/compute-provider";
 
 export type StrongRef = { $type: "com.atproto.repo.strongRef"; uri: string; cid: string };
 
-export type VM = {
-  cpus: number;
-  mem: string;
-  disk: string;
-  network: string;
-  role: string;
-  user_data: string;
-  location?: { country?: string; region?: string };
-  _uri?: string;
-  _cid?: string;
-};
+// Re-export VM type for consumers that still import it from here.
+export type { VM };
 
 type LogLevel = "info" | "warn" | "error" | "debug";
 type Logger = (level: LogLevel, msg: string, fields?: Record<string, unknown>) => void;
@@ -488,3 +480,55 @@ echo "password=\${TOKEN}"
     injectAcceptBundle,
   };
 }
+
+// ---------------------------------------------------------------------------
+// ComputeProvider adapter — wraps the RBAC-aware DO implementation in the
+// provider-agnostic ComputeProvider interface.
+// ---------------------------------------------------------------------------
+
+export function createDigitalOceanComputeProvider(
+  ctx: ComputeProviderDigitalOceanCtx,
+): ComputeProvider {
+  const {
+    createBidConfig,
+    createDroplet,
+    deleteDroplet,
+    deleteRbacRecord,
+    configureAccountAuthRbac,
+    injectAcceptBundle,
+  } = createComputeProviderDigitalOcean(ctx);
+
+  const rbacByProvider = new Map<string | number, StrongRef>();
+
+  return {
+    name: "digitalocean",
+
+    async provision(
+      vm: VM,
+      requesterDid: string,
+      _spec?: DropletSpec,
+    ): Promise<ProvisionResult> {
+      const { json, rbacRef } = await createDroplet(vm, requesterDid);
+      const droplet = (json as Record<string, unknown>)?.droplet as
+        | Record<string, unknown>
+        | undefined;
+      const providerId: string | number = (droplet?.id as string | number) ?? 0;
+      rbacByProvider.set(providerId, rbacRef);
+      return { providerId, metadata: json as Record<string, unknown> };
+    },
+
+    async destroy(id: string | number): Promise<void> {
+      const rbacRef = rbacByProvider.get(id);
+      if (rbacRef) {
+        await deleteRbacRecord(rbacRef, "vm.delete event");
+        rbacByProvider.delete(id);
+      }
+      await deleteDroplet(id, "vm.delete event");
+    },
+
+    createBidConfig,
+    injectAcceptBundle,
+    setupAuth: configureAccountAuthRbac,
+  };
+}
+

@@ -30,7 +30,8 @@ import { getPublicJwk, OIDCToken, UnauthorizedException, subMatchesActx } from "
 import { raiseIfUnauthorized, raiseIfUnauthorizedServiceAuth } from "@publicdomainrelay/qemu/rbac_helper";
 import type { AuthToken } from "@publicdomainrelay/qemu/rbac_helper";
 import { ProvisioningData, validate as provisioningValidate } from "@publicdomainrelay/qemu/provisioning";
-import { runContainer } from "@publicdomainrelay/qemu/container";
+import { runContainer } from "@publicdomainrelay/compute-provider-local";
+import type { VM, ProvisionResult } from "@publicdomainrelay/compute-provider";
 import type { Logger } from "@publicdomainrelay/utils-log";
 import { runWithLogContext, setLogContext, ON_BEHALF_OF_HEADER } from "@publicdomainrelay/utils-log";
 
@@ -61,7 +62,7 @@ export interface ComputeProviderLocalFactoryOptions {
   issuerUrl: string | (() => string);
   /** Docker image for QEMU VMs. */
   vmImage: string;
-  /** When true, use container.ts (cloud-init+sshd) instead of QEMU. */
+  /** When true, use cloud-init+sshd container instead of QEMU. */
   containerMode: boolean;
   /** Docker image for container runner. */
   containerImage: string;
@@ -257,6 +258,12 @@ export interface ComputeProviderLocalFactory {
   createApp(): ReturnType<ReturnType<typeof createFactory<ComputeProviderLocalEnv>>["createApp"]>;
   state: ComputeProviderLocalFactoryState;
   killAllDroplets(): Promise<void>;
+  /**
+   * Provision a droplet programmatically (no HTTP request needed).
+   * Calls ProvisioningData.create() to inject the OIDC token exchange script
+   * so the container can authenticate with the relay and set up fedproxy-client.
+   */
+  provisionDroplet(vm: VM, actx: string, opts?: { image?: string; region?: string; size?: string; tags?: string[] }): Promise<ProvisionResult>;
 }
 
 export interface ComputeProviderLocalFactoryState {
@@ -532,6 +539,48 @@ export function createComputeProviderLocalFactory(
             .catch(() => {})
         ),
       );
+    },
+
+    /**
+     * Provision a droplet programmatically — no HTTP request needed.
+     * Injects ProvisioningData (OIDC token exchange) so the container can
+     * authenticate with the relay and bootstrap fedproxy-client + websocat.
+     */
+    async provisionDroplet(
+      vm: VM,
+      actx: string,
+      provOpts?: { image?: string; region?: string; size?: string; tags?: string[] },
+    ): Promise<ProvisionResult> {
+      const droplet = makeDroplet({
+        name: `vm-${crypto.randomUUID().slice(0, 8)}`,
+        region: provOpts?.region,
+        size: provOpts?.size,
+        image: provOpts?.image,
+        user_data: vm.user_data,
+        tags: provOpts?.tags,
+      });
+      getDropletsMap(actx).set(droplet.id, droplet);
+
+      const provisioningData = await ProvisioningData.create(actx, vm.user_data, getIssuerUrl());
+      provisioningData.associateWithDroplet(droplet.id);
+
+      log("info", "provisionDroplet → local container", {
+        name: droplet.name,
+        actx,
+        image: droplet.image?.slug,
+      });
+
+      await spawnVM(droplet, provisioningData.userData, opts);
+
+      return {
+        providerId: droplet.id,
+        metadata: {
+          dropletId: droplet.id,
+          containerName: (droplet as unknown as Record<string, unknown>)["containerName"] ?? null,
+          ip: droplet.networks?.v4?.[0]?.ip_address ?? "",
+          mode: "container",
+        },
+      };
     },
   };
 }

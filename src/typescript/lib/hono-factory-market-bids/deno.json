@@ -4,6 +4,10 @@
   "license": "Unlicense",
   "exports": "./mod.ts",
   "imports": {
+    "@atproto/api": "npm:@atproto/api@^0.20.8",
+    "@publicdomainrelay/market": "jsr:@publicdomainrelay/market@^0",
+    "@publicdomainrelay/market-free": "jsr:@publicdomainrelay/market-free@^0",
+    "@publicdomainrelay/market-x402": "jsr:@publicdomainrelay/market-x402@^0",
     "hono": "npm:hono@^4.12.23",
     "hono/factory": "npm:hono@^4.12.23/factory"
   }

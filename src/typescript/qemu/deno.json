@@ -6,8 +6,7 @@
     ".": "./main.ts",
     "./oidc_helper": "./oidc_helper.ts",
     "./rbac_helper": "./rbac_helper.ts",
-    "./provisioning": "./provisioning.ts",
-    "./container": "./container.ts"
+    "./provisioning": "./provisioning.ts"
   },
   "tasks": {
     "dev": "deno run --watch --allow-all main.ts"

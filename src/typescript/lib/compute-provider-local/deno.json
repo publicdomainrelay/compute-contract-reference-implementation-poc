@@ -1,0 +1,9 @@
+{
+  "name": "@publicdomainrelay/compute-provider-local",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "@publicdomainrelay/compute-provider": "jsr:@publicdomainrelay/compute-provider@^0"
+  }
+}
