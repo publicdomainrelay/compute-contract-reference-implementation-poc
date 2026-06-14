@@ -57,7 +57,6 @@ import {
 } from "@publicdomainrelay/lexicons";
 
 const VOUCH_NSID = "sh.tangled.graph.vouch";
-const RBAC_NSID = "com.fedproxy.rbac";
 import { TID } from "@atproto/common";
 import { buildDefaultUserData } from "./cloud-init-presets.ts";
 
@@ -704,66 +703,10 @@ runcmd:
   }, pds.attestationKp, pds.did);
   log("accept_created", { uri: acceptUri, cid: acceptCid });
 
-  // 6b. Mint the droplets.wid com.fedproxy.rbac grant in OUR (requester) repo.
-  // The provisioned VM proves itself to the bidder's issuer (/v1/oidc/prove),
-  // then mints workload-identity OIDC tokens at /v1/oidc/issue. That endpoint
-  // authorizes the caller by loading com.fedproxy.rbac from the actx DID's repo
-  // — and actx is us (the requester). Without this grant the VM's
-  // fedproxy-client OIDC plugin gets 401 and the SSH tunnel never comes up.
-  // Service + scope must match exactly what the issuer checks: the winner's
-  // advertised issuer_uri + "droplets.wid". The prove-issued token's subject is
-  // "actx:<requesterPlc>", so the role sub must equal that.
-  try {
-    const resolver = createRecordResolver(new IdResolver());
-    const cfgRef = winner.record.bidConfig as { uri: string; cid: string } | undefined;
-    let issuerUri: string | undefined;
-    if (cfgRef?.uri && cfgRef?.cid) {
-      const cfg = stripResolved(
-        await resolver.resolve({ uri: cfgRef.uri, cid: cfgRef.cid }),
-      ) as Record<string, unknown>;
-      issuerUri = cfg["issuer_uri"] as string | undefined;
-    }
-    if (!issuerUri) {
-      log("rbac_grant_skipped", { reason: "winner bid config missing issuer_uri", cfgRef });
-    } else {
-      const requesterPlc = pds.did.split(":").pop()!;
-      const roleName = `droplets-wid-${requesterPlc}`;
-      const grant = {
-        $type: RBAC_NSID,
-        protects: { [roleName]: { service: issuerUri, scope: "droplets.wid" } },
-        roles: {
-          [roleName]: {
-            role_name: roleName,
-            definition: {
-              aud: `api://DigitalOcean?actx=${requesterPlc}`,
-              iss: issuerUri,
-              sub: `actx:${requesterPlc}`,
-              policies: [roleName],
-            },
-          },
-        },
-        policies: {
-          [roleName]: {
-            meta: { policy: roleName },
-            schemas: {
-              "/v1/oidc/issue": {
-                type: "object",
-                $schema: "http://json-schema.org/draft-07/schema#",
-                required: ["capability"],
-                properties: { capability: { enum: ["create"] } },
-              },
-            },
-          },
-        },
-        custom_claims_roles_index: { job_workflow_ref: {} },
-        createdAt: new Date().toISOString(),
-      };
-      const ref = await pds.createRepoRecord(RBAC_NSID, grant);
-      log("rbac_grant_created", { uri: ref.uri, service: issuerUri, sub: `actx:${requesterPlc}` });
-    }
-  } catch (err) {
-    log("rbac_grant_error", { error: String(err) });
-  }
+  // NOTE: the droplets.wid com.fedproxy.rbac grant is minted by the PROVIDER in
+  // its own repo (compute-provider-local configureRbac), mirroring the DO
+  // provider. The requester does not mint it — the issuer authorizes against the
+  // provider's repo (actx == provider), not ours.
 
   // 7. Submit accept to winning bidder.
   const submitAcceptTarget = winner.record.submitAccept as string | undefined;

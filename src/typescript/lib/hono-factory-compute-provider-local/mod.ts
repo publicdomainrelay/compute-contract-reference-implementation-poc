@@ -26,11 +26,12 @@
 
 import { createFactory } from "hono/factory";
 import { cors } from "hono/cors";
-import { getPublicJwk, OIDCToken, UnauthorizedException, subMatchesActx } from "@publicdomainrelay/qemu/oidc_helper";
-import { raiseIfUnauthorized, raiseIfUnauthorizedServiceAuth } from "@publicdomainrelay/qemu/rbac_helper";
+import { UnauthorizedException } from "@publicdomainrelay/qemu/oidc_helper";
+import { raiseIfUnauthorizedServiceAuth } from "@publicdomainrelay/qemu/rbac_helper";
 import type { AuthToken } from "@publicdomainrelay/qemu/rbac_helper";
-import { ProvisioningData, validate as provisioningValidate } from "@publicdomainrelay/qemu/provisioning";
-import { runContainer } from "@publicdomainrelay/compute-provider-local";
+import { ProvisioningData } from "@publicdomainrelay/qemu/provisioning";
+import { createWorkloadIdentityDropletOidcPoc } from "@publicdomainrelay/hono-factory-workload-identity-droplet-oidc-poc";
+import { dockerInspectIp, pollSsh, runContainer } from "@publicdomainrelay/compute-provider-local";
 import type { VM, ProvisionResult } from "@publicdomainrelay/compute-provider";
 import type { Logger } from "@publicdomainrelay/utils-log";
 import { runWithLogContext, setLogContext, ON_BEHALF_OF_HEADER } from "@publicdomainrelay/utils-log";
@@ -132,31 +133,8 @@ function makeDroplet(req: DropletCreateRequest): Droplet {
 // ---------------------------------------------------------------------------
 // Docker / VM helpers
 // ---------------------------------------------------------------------------
-
-async function dockerInspectIp(containerName: string): Promise<string> {
-  const cmd = new Deno.Command("docker", {
-    args: ["inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", containerName],
-    stdout: "piped",
-    stderr: "inherit",
-  });
-  const { code, stdout } = await cmd.output();
-  if (code !== 0) throw new Error(`docker inspect failed for ${containerName}`);
-  return new TextDecoder().decode(stdout).trim();
-}
-
-async function pollSsh(host: string, timeoutMs = 300_000): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const conn = await Deno.connect({ hostname: host, port: 22 });
-      conn.close();
-      return true;
-    } catch {
-      await new Promise((r) => setTimeout(r, 500));
-    }
-  }
-  return false;
-}
+// dockerInspectIp + pollSsh are shared from @publicdomainrelay/compute-provider-local
+// (the single Docker engine); the QEMU path below uses them directly.
 
 async function spawnVM(
   droplet: Droplet,
@@ -294,6 +272,26 @@ export function createComputeProviderLocalFactory(
     return m;
   }
 
+  // Flat lookup by droplet id across all actx maps — used by the issuer's
+  // /v1/oidc/prove route to resolve the container being provisioned.
+  function getDropletById(id: string): Record<string, unknown> | undefined {
+    for (const m of dropletsByActx.values()) {
+      const d = m.get(id);
+      if (d) return d as unknown as Record<string, unknown>;
+    }
+    return undefined;
+  }
+
+  // The workload-identity OIDC issuer (discovery, jwks, /v1/oidc/issue + prove)
+  // lives in one shared package; we mount its app below. We only use its `app`
+  // here — the XRPC relay is owned by the caller (qemu/main.ts), so startRelay
+  // is intentionally not called.
+  const oidcPoc = createWorkloadIdentityDropletOidcPoc({
+    getIssuerUrl,
+    getDroplet: getDropletById,
+    log,
+  });
+
   const factory = createFactory<ComputeProviderLocalEnv>({
     initApp: (app) => {
       // ── CORS ─────────────────────────────────────────────────────
@@ -308,46 +306,16 @@ export function createComputeProviderLocalFactory(
         });
       });
 
-      // ── OIDC discovery ───────────────────────────────────────────
-      app.get("/.well-known/openid-configuration", async (c) => {
-        const jwk = await getPublicJwk();
-        return c.json({
-          issuer: getIssuerUrl(),
-          jwks_uri: `${getIssuerUrl()}/.well-known/jwks`,
-          response_types_supported: ["id_token"],
-          claims_supported: ["sub", "aud", "exp", "iat", "iss", "actx"],
-          id_token_signing_alg_values_supported: ["RS256"],
-          scopes_supported: ["openid"],
-        });
-      });
+      // ── OIDC issuer ──────────────────────────────────────────────
+      // Discovery, JWKS, /v1/oidc/issue (+ droplets.wid RBAC middleware) and
+      // /v1/oidc/prove are all served by the shared workload-identity issuer
+      // app — the single source of truth for issuer logic (the ephemeral
+      // bidder's local compute provider mounts the same app).
+      app.route("/", oidcPoc.app);
 
-      app.get("/.well-known/jwks", async (c) => {
-        const jwk = await getPublicJwk();
-        return c.json({ keys: [jwk] });
-      });
-
-      // ── RBAC middleware ──────────────────────────────────────────
-      //
-      // Two flows:
-      //   droplets.wid (OIDC):  /v1/oidc/issue
-      //     Token: OIDC JWT, aud encodes actx, validated via OIDC discovery + JWKS
-      //
-      //   account.auth (ATProto service auth): /v2/account, /v2/droplets*
-      //     Token: com.atproto.server.getServiceAuth JWT, iss=DID,
-      //     validated against DID document verificationMethod keys
-
-      app.use("/v1/oidc/issue", async (c, next) => {
-        try {
-          const token = extractBearer(c.req.header("Authorization"));
-          const authToken = await raiseIfUnauthorized(getIssuerUrl(), "droplets.wid", token, "/v1/oidc/issue", c.req.method);
-          c.set("authToken", authToken);
-          setLogContext({ actorDid: authToken.actx });
-          await next();
-        } catch (err) {
-          log("warn", "rbac denied /v1/oidc/issue", { error: String(err) });
-          return c.json({ id: "unauthorized", message: String(err) }, 401);
-        }
-      });
+      // ── /v2 RBAC middleware (account.auth ATProto service auth) ────
+      //   Token: com.atproto.server.getServiceAuth JWT, iss=DID, validated
+      //   against the DID document verificationMethod keys.
 
       app.use("/v2/account", async (c, next) => {
         try {
@@ -388,69 +356,7 @@ export function createComputeProviderLocalFactory(
         }
       });
 
-      // ── /v1/oidc/issue ───────────────────────────────────────────
-      app.post("/v1/oidc/issue", async (c) => {
-        try {
-          const body = await c.req.json<Record<string, unknown>>();
-          const authToken = c.get("authToken") as AuthToken;
-          const actx = authToken.actx;
-
-          const sub = (body["sub"] as string | undefined) ?? actx;
-          if (!subMatchesActx(sub, actx)) {
-            return c.json({ id: "unauthorized", message: `sub must be scoped to actx:${actx}` }, 401);
-          }
-
-          const token = await OIDCToken.create(actx, { ...body, sub });
-          return c.json({ token: token.asString });
-        } catch (err) {
-          log("error", "oidc issue failed", { error: String(err) });
-          return c.json({ id: "server_error", message: String(err) }, 500);
-        }
-      });
-
-      // ── /v1/oidc/prove ───────────────────────────────────────────
-      app.post("/v1/oidc/prove", async (c) => {
-        log("debug", "/v1/oidc/prove request received");
-        try {
-          const body = await c.req.json<{ sig: string; port: number }>();
-          log("debug", "/v1/oidc/prove body parsed", { port: body.port, sigLen: body.sig?.length });
-          const token = extractBearer(c.req.header("Authorization"));
-          log("debug", "/v1/oidc/prove bearer extracted", { tokenPresent: !!token, tokenLen: token?.length });
-
-          const provToken = await OIDCToken.validate(token);
-          const actx = provToken.actx;
-          log("debug", "/v1/oidc/prove token validated", { actx, provTokenSub: provToken.sub });
-
-          const result = await provisioningValidate(token, body.sig, body.port, (id) => {
-            const droplet = getDropletsMap(actx).get(id) as Record<string, unknown> | undefined;
-            log("debug", "/v1/oidc/prove droplet lookup", { id, found: !!droplet });
-            return droplet;
-          });
-          log("debug", "/v1/oidc/prove provisioningValidate result", { valid: !!result });
-          if (!result) return c.json({ valid: false });
-
-          const { oidcToken, droplet } = result;
-          const dropletTags = ((droplet["tags"] as string[]) ?? []);
-          log("debug", "/v1/oidc/prove droplet info", { dropletId: droplet["id"], tags: dropletTags });
-          const subject = [
-            `actx:${oidcToken.actx}`,
-            ...dropletTags
-              .filter((t) => t.startsWith("oidc-sub:") && t.split(":").length === 3 && t.split(":")[1] !== "actx")
-              .map((t) => t.split(":")[1] + ":" + t.split(":")[2]),
-          ].join(":");
-          log("debug", "/v1/oidc/prove computed subject", { subject });
-
-          const issued = await OIDCToken.create(oidcToken.actx, {
-            sub: subject,
-            droplet_id: droplet["id"],
-          });
-          log("debug", "/v1/oidc/prove token issued", { sub: subject, dropletId: droplet["id"] });
-          return c.json({ token: issued.asString });
-        } catch (err) {
-          log("error", "oidc prove failed", { error: String(err), stack: err instanceof Error ? err.stack : undefined });
-          return c.json({ id: "unauthorized", message: String(err) }, 401);
-        }
-      });
+      // (/v1/oidc/issue + /v1/oidc/prove are served by the mounted issuer app.)
 
       // ── /v2/account ──────────────────────────────────────────────
       app.get("/v2/account", (c) => {

@@ -14,6 +14,7 @@
   "imports": {
     "@publicdomainrelay/compute-provider-local": "../compute-provider-local/mod.ts",
     "@publicdomainrelay/compute-provider": "../compute-provider/mod.ts",
+    "@publicdomainrelay/hono-factory-workload-identity-droplet-oidc-poc": "../hono-factory-workload-identity-droplet-oidc-poc/mod.ts",
     "@publicdomainrelay/qemu": "../../qemu",
     "@publicdomainrelay/utils-log": "jsr:@publicdomainrelay/utils-log@^0",
     "hono": "npm:hono@^4.12.23",

@@ -15,7 +15,6 @@
 // interface.
 
 import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
-import { Agent } from "@atproto/api";
 import type {
   ComputeProvider,
   ComputeProviderCtx,
@@ -40,8 +39,6 @@ import type { NonceStore } from "@publicdomainrelay/hono-factory-workload-identi
 // ── types ───────────────────────────────────────────────────────────────
 
 export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
-  getAgent: () => Agent;
-  getAgentDid: () => string;
   /** Path the accept bundle is written to inside the VM. Default: DEFAULT_ACCEPT_PATH_VM. */
   acceptPathVm?: string;
   /** "container" (lightweight, no KVM) or "vm" (QEMU). Default: "container". */
@@ -52,13 +49,21 @@ export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
   containerImage?: string;
   /** Cache directory. Default: ~/.cache/pdr-local. */
   cacheDir?: string;
+  /** Bind the issuer Hono app to a local HTTP port (PORT) in setup(). Default: false. */
+  serveHttp?: boolean;
+  /** Serve the issuer via the fedproxy XRPC relay in setup() (its real transport). Default: true. */
+  xrpcRelay?: boolean;
+  /** This provider's own DID (the RBAC actx / "team", mirroring DO's teamUuid). */
+  getAgentDid: () => string;
   /** Gets the xrpc relay url for the hono-factory-workload-identity-droplet-oidc-poc. */
   getIssuerUrl: () => string;
-  /** Creates an atproto record in the bidder's repo (for createBidConfig + RBAC). */
+  /** Creates an atproto record in the provider's repo (for createBidConfig + RBAC). */
   createRecord: (
     collection: string,
     record: Record<string, unknown>,
   ) => Promise<StrongRef>;
+  /** Deletes an atproto record from the provider's repo (for RBAC teardown). */
+  deleteRecord?: (collection: string, rkey: string) => Promise<void>;
 }
 
 type Distro = "fedora" | "ubuntu";
@@ -138,7 +143,7 @@ async function dockerRun(
   };
 }
 
-async function dockerInspectIp(containerName: string): Promise<string> {
+export async function dockerInspectIp(containerName: string): Promise<string> {
   const { code, stdout } = await dockerRun([
     "inspect", "--format",
     "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
@@ -148,7 +153,7 @@ async function dockerInspectIp(containerName: string): Promise<string> {
   return stdout;
 }
 
-async function pollSsh(
+export async function pollSsh(
   host: string,
   port: number = SSH_DEFAULT_PORT,
   timeoutMs: number = POLL_TIMEOUT_MS,
@@ -467,12 +472,13 @@ async function provisionVM(
 
 // ── factory ──────────────────────────────────────────────────────────────
 
-// RBAC NSID for the per-provision workload-identity grant records.
-const RBAC_NSID = "com.fedproxy.rbac";
-
-// Port the issuer Hono app listens on locally (the XRPC relay, when enabled,
-// also dispatches into the same app).
+// Port the issuer Hono app listens on locally (the XRPC relay also dispatches
+// into the same app).
 const PORT = Number(Deno.env.get("PORT") ?? 8080);
+
+// RBAC record NSID — the per-provision workload-identity grant (mirrors the DO
+// provider's com.fedproxy.rbac).
+const RBAC_NSID = "com.fedproxy.rbac";
 
 // Minimal droplet record the issuer's /v1/oidc/prove route resolves by id.
 interface LocalDroplet {
@@ -491,7 +497,7 @@ interface LocalDroplet {
 // ---------------------------------------------------------------------------
 
 export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
-  const { getAgent, getAgentDid, log, parseAtUri, getIssuerUrl, createRecord } = ctx;
+  const { log, parseAtUri, getAgentDid, getIssuerUrl, createRecord, deleteRecord } = ctx;
   const acceptPathVm = ctx.acceptPathVm ?? DEFAULT_ACCEPT_PATH_VM;
   const containerMode = ctx.containerMode ??
     (Deno.env.get("CONTAINER_MODE") === "true" ? "container" : "vm");
@@ -526,59 +532,50 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
 
   // ── RBAC ────────────────────────────────────────────────────────────
 
-  // Mints a com.fedproxy.rbac record granting the requester's droplet the
-  // ability to call /v1/oidc/issue for its own scoped subject.
+  // Mints the per-provision com.fedproxy.rbac grant in the PROVIDER's repo,
+  // mirroring compute-provider-digitalocean's configureDropletRbac (which writes
+  // the equivalent HCL role+policy to the provider's git RBAC repo). The actx is
+  // the provider (getAgentDid), matching DO's teamUuid: the VM's provisioning
+  // token carries this actx, and /v1/oidc/issue authorizes against this repo.
   async function configureRbac(vm: VM, requesterDid: string): Promise<StrongRef> {
     const agentDidPlc = getAgentDid().split(":").slice(-1)[0];
     const requesterPlc = requesterDid.split(":").slice(-1)[0];
     const serviceBaseUrl = getIssuerUrl();
     const slug = `${agentDidPlc}-${requesterPlc}-${vm.role}`;
     const roleName = `ex-${slug}`;
+    const subject = `actx:${agentDidPlc}:plc:${requesterPlc}:role:${vm.role}`;
 
     const rbacRecord = {
       $type: RBAC_NSID,
       protects: {
-        [roleName]: {
-          service: serviceBaseUrl,
-          scope: "droplets.wid",
-        },
+        [roleName]: { service: serviceBaseUrl, scope: "droplets.wid" },
       },
       roles: {
         [roleName]: {
           role_name: roleName,
           definition: {
             aud: `api://DigitalOcean?actx=${agentDidPlc}`,
-            sub: `actx:${agentDidPlc}:plc:${requesterPlc}:role:${vm.role}`,
+            sub: subject,
             policies: [roleName],
           },
         },
       },
       policies: {
         [roleName]: {
-          meta: {
-            policy: roleName,
-          },
+          meta: { policy: roleName },
           schemas: {
             "/v1/oidc/issue": {
               type: "object",
               $schema: "http://json-schema.org/draft-07/schema#",
               required: ["capability", "allowed_parameters"],
               properties: {
-                capability: {
-                  enum: ["create"],
-                },
+                capability: { enum: ["create"] },
                 allowed_parameters: {
                   type: "object",
                   properties: {
                     aud: { type: "string" },
-                    sub: {
-                      type: "string",
-                      const: `actx:${agentDidPlc}:plc:${requesterPlc}:role:${vm.role}`,
-                    },
-                    ttl: {
-                      type: "number",
-                      const: 3600,
-                    },
+                    sub: { type: "string", const: subject },
+                    ttl: { type: "number", const: 3600 },
                   },
                 },
               },
@@ -586,37 +583,29 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
           },
         },
       },
-      custom_claims_roles_index: {
-        job_workflow_ref: {},
-      },
+      custom_claims_roles_index: { job_workflow_ref: {} },
       createdAt: new Date().toISOString(),
     };
-    log("info", "creating rbac record", { nsid: RBAC_NSID });
+    log("info", "creating rbac record", { nsid: RBAC_NSID, roleName, sub: subject });
     const rbacRef = await createRecord(RBAC_NSID, rbacRecord);
     log("info", "rbac record created", { nsid: RBAC_NSID, uri: rbacRef.uri });
-
     return rbacRef;
   }
 
-  // Deletes a com.fedproxy.rbac record previously minted for a droplet, e.g.
-  // when the droplet is torn down via a vm.delete event.
+  // Deletes a com.fedproxy.rbac record minted for a droplet, on vm.delete /
+  // teardown (mirrors DO's deleteRbacRecord).
   async function deleteRbacRecord(rbacRef: StrongRef, reason: string): Promise<void> {
-    const agent = getAgent();
-    const { repo, collection, rkey } = parseAtUri(rbacRef.uri);
-    log("info", "deleting rbac record", { uri: rbacRef.uri, cid: rbacRef.cid, repo, collection, rkey, agentDid: agent.assertDid, reason });
+    if (!deleteRecord) {
+      log("warn", "no deleteRecord configured; skipping rbac delete", { uri: rbacRef.uri, reason });
+      return;
+    }
+    const { collection, rkey } = parseAtUri(rbacRef.uri);
+    log("info", "deleting rbac record", { uri: rbacRef.uri, collection, rkey, reason });
     try {
-      const res = await agent.com.atproto.repo.deleteRecord({ repo, collection, rkey });
-      log("info", "rbac record deleted", { uri: rbacRef.uri, reason, status: res.success, headers: res.headers });
+      await deleteRecord(collection, rkey);
+      log("info", "rbac record deleted", { uri: rbacRef.uri, reason });
     } catch (err) {
-      log("error", "failed to delete rbac record", {
-        uri: rbacRef.uri,
-        repo,
-        collection,
-        rkey,
-        reason,
-        err: String(err),
-        stack: err instanceof Error ? err.stack : undefined,
-      });
+      log("error", "failed to delete rbac record", { uri: rbacRef.uri, reason, err: String(err) });
     }
   }
 
@@ -628,15 +617,19 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     spec?: DropletSpec,
   ): Promise<{ result: ProvisionResult; rbacRef: StrongRef }> {
     const ds = spec ?? dropletSpecFromEnv();
+    const agentDidPlc = getAgentDid().split(":").pop() ?? "unknown";
     const requesterPlc = requesterDid.split(":").pop() ?? "unknown";
     const rfpRkey = (vm._uri ?? "").split("/")[4] ?? "unknown";
     const containerName = `pdr-${requesterPlc}-${rfpRkey}-${shortUuid()}`;
 
     await Deno.mkdir(cacheDir, { recursive: true });
 
+    // Mint the RBAC grant (provider repo) before provisioning, like DO.
     const rbacRef = await configureRbac(vm, requesterDid);
 
     // Register the droplet so the issuer's prove route can resolve it by id.
+    // Tags carry the oidc-sub fragments so the prove-issued token's subject is
+    // "actx:<provider>:plc:<requester>:role:<role>" — matching the grant above.
     const droplet: LocalDroplet = {
       id: containerName,
       name: containerName,
@@ -647,8 +640,11 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
 
     // Inject the OIDC provisioning exchange (nonce + prove script) into the
     // cloud-init user-data so the container can mint its own scoped tokens.
+    // actx is the PROVIDER (getAgentDid), mirroring DO's teamUuid: the prove
+    // token's aud carries this actx and /v1/oidc/issue authorizes against the
+    // provider's RBAC repo.
     const provisioningData = await ProvisioningData.create(
-      getAgentDid(),
+      agentDidPlc,
       vm.user_data ?? null,
       getIssuerUrl(),
     );
@@ -740,7 +736,10 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
       accept_path: acceptPathVm,
       issuer_uri: getIssuerUrl(),
       to_issue: "exchange-custom-droplet-oidc-poc",
-      actx: getAgentDid(),
+      // actx is the provider (mirrors DO's teamUuid). The VM reads it at runtime
+      // from actx_path (the team_uuid file the prove exchange writes); this field
+      // is the same value, for discoverability.
+      actx: getAgentDid().split(":").slice(-1)[0],
       actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
       token_path: "/root/secrets/digitalocean.com/serviceaccount/token",
       url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
@@ -837,17 +836,23 @@ export function createLocalComputeProvider(
     nonceStore,
   } = createComputeProviderLocal(ctx);
 
+  // Track the RBAC grant minted per provisioned droplet so destroy() can revoke
+  // it (mirrors the DO provider's rbacByProvider map).
+  const rbacByProvider = new Map<string | number, StrongRef>();
+
   // Point the provisioning nonce persistence at the shared in-memory store so
   // provision() and the issuer's /v1/oidc/prove route agree on nonces.
   configureProvisioning({ nonceStore });
 
-  const rbacByProvider = new Map<string | number, StrongRef>();
+  // Resolves once the XRPC relay registers and the external issuer URL is known.
+  let resolveIssuerReady!: (url: string) => void;
+  const issuerReady = new Promise<string>((res) => { resolveIssuerReady = res; });
 
   const poc = createWorkloadIdentityDropletOidcPoc({
     getIssuerUrl,
     getDroplet,
     log: ctx.log,
-    onIssuerUrl: (baseUrl) => { issuerUrl = baseUrl; },
+    onIssuerUrl: (baseUrl) => { issuerUrl = baseUrl; resolveIssuerReady(baseUrl); },
     xrpcRelayIssuerPath: Deno.env.get("XRPC_RELAY_ISSUER_PATH") || undefined,
   });
 
@@ -882,23 +887,42 @@ export function createLocalComputeProvider(
     async setup(): Promise<void> {
       // Warm up the signing key (loads from store or generates + persists).
       await getSigningKey();
+
+      // Transport selection (see ctx.serveHttp / ctx.xrpcRelay):
+      //   - xrpcRelay (default true): the issuer's real transport. Provisioned
+      //     containers reach /v1/oidc/{issue,prove} via the relay's did:web
+      //     proxyRef. We wait for registration so getIssuerUrl() is the public
+      //     URL before callers (e.g. createBidConfig) read it.
+      //   - serveHttp (default false): also bind a local HTTP port (debug /
+      //     direct access). Off by default — relay only.
+      const serveHttp = ctx.serveHttp ?? false;
+      const xrpcRelay = ctx.xrpcRelay ?? true;
+
+      if (serveHttp) {
+        httpServer = Deno.serve({ port: PORT }, poc.app.fetch);
+      }
+
+      if (xrpcRelay) {
+        relayController = poc.startRelay();
+        const REGISTRATION_TIMEOUT_MS = 60_000;
+        const timed = new Promise<string>((_, rej) =>
+          setTimeout(() => rej(new Error("XRPC relay registration timed out")), REGISTRATION_TIMEOUT_MS)
+        );
+        try {
+          await Promise.race([issuerReady, timed]);
+        } catch (err) {
+          ctx.log("warn", "issuer relay not registered; using fallback issuer URL", { error: String(err) });
+        }
+      }
+
       const jwk = await getPublicJwk();
       ctx.log("info", "workload-identity issuer listening", {
-        port: PORT,
+        serveHttp,
+        xrpcRelay,
+        port: serveHttp ? PORT : undefined,
         issuer: getIssuerUrl(),
         kid: jwk.kid,
       });
-
-      httpServer = Deno.serve({ port: PORT }, poc.app.fetch);
-
-      // Start the XRPC relay when requested. Once it registers, onIssuerUrl
-      // updates `issuerUrl` to the relay's did:web base URL.
-      if (
-        Deno.env.get("XRPC_RELAY_ENABLED") === "true" ||
-        Deno.env.get("XRPC_RELAY_ISSUER_PATH")
-      ) {
-        relayController = poc.startRelay();
-      }
     },
 
     async teardown(): Promise<void> {

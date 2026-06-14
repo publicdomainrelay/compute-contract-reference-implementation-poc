@@ -4503,7 +4503,8 @@
           "npm:@atproto/common@0.5",
           "npm:@atproto/crypto@0.5",
           "npm:@atproto/identity@0.5",
-          "npm:@atproto/xrpc@0.7"
+          "npm:@atproto/xrpc@0.7",
+          "npm:hono@^4.12.23"
         ]
       }
     }

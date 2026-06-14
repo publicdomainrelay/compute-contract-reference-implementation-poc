@@ -77,8 +77,6 @@ import { TID } from "@atproto/common";
 import type { ComputeProvider, ComputeProviderMode, DropletSpec, ProvisionResult, StrongRef, VM } from "@publicdomainrelay/compute-provider";
 import { computeProviderModeFromEnv } from "@publicdomainrelay/compute-provider";
 import { createLocalComputeProvider } from "@publicdomainrelay/compute-provider-local";
-import { createComputeProviderLocalFactory } from "@publicdomainrelay/hono-factory-compute-provider-local";
-import type { ComputeProviderLocalFactory } from "@publicdomainrelay/hono-factory-compute-provider-local";
 import { createDigitalOceanComputeProvider } from "@publicdomainrelay/compute-provider-digitalocean";
 import { createAttestationCid, type RecordMap } from "@atiproto/atproto-attestation";
 import { createLogger } from "@publicdomainrelay/utils-log";
@@ -160,91 +158,8 @@ function parseAtUri(uri: string): { repo: string; collection: string; rkey: stri
   return { repo: parts[0], collection: parts[1], rkey: parts.slice(2).join("/") };
 }
 
-/**
- * Start an in-process container host with XRPC relay registration.
- * Returns the factory and base URL (derived from the relay proxyRef).
- * The factory's provisionDroplet() injects ProvisioningData so the
- * container can exchange a provisioning JWT for a long-lived OIDC
- * token and bootstrap fedproxy-client + websocat for SSH relay access.
- */
-async function startContainerHost(args: {
-  operatorHandle: string;
-  selfDid: string;
-  containerImage: string;
-  cacheDir: string;
-  log: ReturnType<typeof createLogger>;
-}): Promise<{ baseUrl: string; factory: ComputeProviderLocalFactory }> {
-  const DISPATCHER_HOST = Deno.env.get("DISPATCHER_HOST") ?? "xrpc.fedproxy.com";
-  const dispatcherDid = `did:web:${DISPATCHER_HOST}`;
-
-  let issuerUrl = "http://localhost:0";
-
-  const factory = createComputeProviderLocalFactory({
-    operatorHandle: () => args.operatorHandle,
-    selfDid: args.selfDid,
-    issuerUrl: () => issuerUrl,
-    vmImage: Deno.env.get("VM_IMAGE") ?? "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner",
-    containerMode: true,
-    containerImage: args.containerImage,
-    cacheDir: args.cacheDir,
-    log: args.log,
-  });
-
-  const app = factory.createApp();
-  const { handleRequest } = createSubscriberFactory({ app });
-
-  const relayKeypair = await Secp256k1Keypair.create({ exportable: true });
-  const relaySigner: Signer = {
-    did: () => relayKeypair.did(),
-    sign: (bytes) => relayKeypair.sign(bytes),
-  };
-
-  const baseUrl = await new Promise<string>((resolve, reject) => {
-    const timeout = setTimeout(
-      () => reject(new Error("Container host relay registration timed out")),
-      60_000,
-    );
-
-    runSubscriber({
-      label: "qemu",
-      keypair: relayKeypair,
-      getServiceAuthToken: async (lxm: string) =>
-        signServiceAuth(relaySigner, { aud: dispatcherDid, lxm }),
-      dispatcherHost: DISPATCHER_HOST,
-      handleRequest,
-      subscribe: undefined,
-      onLog: (e) =>
-        args.log("info", `xrpc-relay: ${e.message}`, { severity: e.severity }),
-      onRegistered: (info) => {
-        clearTimeout(timeout);
-        const proxyHost = info.proxyRef.replace(/^did:web:/, "");
-        const url = `https://${proxyHost}`;
-        issuerUrl = url;
-        Deno.env.set("ISSUER_URL", url);
-        Deno.env.set("THIS_ENDPOINT", url);
-        args.log("info", "xrpc-relay issuer url updated", { baseUrl: url });
-        console.log(
-          JSON.stringify({
-            event: "container_host_ready",
-            url: info.proxyRef,
-            baseUrl: url,
-          }),
-        );
-        resolve(url);
-      },
-      onSubscriptionOpen: (sub) =>
-        args.log("info", "xrpc-relay subscription open", {
-          subscriptionId: sub.subscriptionId,
-          nsid: sub.nsid,
-        }),
-      onStatus: (status) =>
-        args.log("info", "xrpc-relay status", { status }),
-    });
-  });
-
-  return { baseUrl, factory };
-}
-
+/* startContainerHost removed — the local compute provider (createLocalComputeProvider)
+   now owns its issuer + XRPC relay in setup(); the bidder uses it directly. */
 /* createAgentAdapter removed — compute providers now accept createRecord directly */
 
 // ── createEphemeralBidder ─────────────────────────────────────────────
@@ -409,6 +324,10 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
     return { $type: "com.atproto.repo.strongRef", uri: `at://${did}/${collection}/${rkey}`, cid: rec?.cid ?? "" };
   };
 
+  const deleteRecord = async (collection: string, rkey: string): Promise<void> => {
+    await api.applyWrites(did, [{ action: "delete", collection, rkey }]);
+  };
+
   const computeProvider: ComputeProvider | null = (() => {
     if (mode === "digitalocean") {
       if (!token || !cpCfg?.getAgent || !cpCfg?.getAgentDid || !cpCfg?.rbacRepoRoot) {
@@ -430,89 +349,25 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
       const localLog = (level: string, msg: string, fields?: Record<string, unknown>) =>
         logInfo({ label: LABEL, severity: level, message: msg, ...(fields ?? {}) });
 
-      // Start container host eagerly — we need its relay-registered base URL
-      // for the bid config's url_path (fedproxy-client reads it from the
-      // accept bundle to know where to fetch OIDC tokens).
-      const HOME = Deno.env.get("HOME") ?? "/tmp";
-      const containerHostPromise = startContainerHost({
-        operatorHandle: did,
-        selfDid: did,
-        containerImage: cpCfg?.containerImage ?? "container-runner-ubuntu:latest",
-        cacheDir: cpCfg?.cacheDir ?? `${HOME}/.cache/simple-qemu`,
-        log: createLogger({ service: "qemu", selfDid: () => did }),
-      });
-
-      // Build base provider for non-provision methods.
-      const localBase = createLocalComputeProvider({
+      // The local provider owns the whole lifecycle: setup() stands up the
+      // workload-identity OIDC issuer + XRPC relay, createBidConfig advertises
+      // that relay's issuer URL, provision() injects the OIDC provisioning
+      // exchange + registers the container with the issuer, destroy() removes it.
+      // No method overrides — the provider is self-sufficient (getIssuerUrl is
+      // wired internally by createLocalComputeProvider after relay registration).
+      return createLocalComputeProvider({
         log: localLog,
         parseAtUri,
+        getAgentDid: () => did,
+        getIssuerUrl: () => "", // replaced internally by the provider
+        acceptPathVm: cpCfg?.acceptPathVm,
         containerMode: cpCfg?.containerMode ?? "container",
         vmImage: cpCfg?.vmImage,
         containerImage: cpCfg?.containerImage,
         cacheDir: cpCfg?.cacheDir,
         createRecord,
+        deleteRecord,
       });
-
-      // Override createBidConfig: include url_path pointing to the container
-      // host's OIDC issuer so fedproxy-client can fetch tokens.
-      const origCreateBidConfig = localBase.createBidConfig.bind(localBase);
-      localBase.createBidConfig = async (nowIso: string): Promise<StrongRef> => {
-        const { baseUrl } = await containerHostPromise;
-        // Create a bid config record with url_path.
-        const rkey = TID.next().toString();
-        await api.applyWrites(did, [{
-          action: "create",
-          collection: "com.publicdomainrelay.temp.compute.config.wif.simple",
-          rkey,
-          record: {
-            $type: "com.publicdomainrelay.temp.compute.config.wif.simple",
-            // The container host's OIDC issuer (relay proxyRef base URL). The
-            // requester reads this to mint the droplets.wid com.fedproxy.rbac
-            // grant in its own repo, scoped to exactly this service.
-            issuer_uri: baseUrl,
-            // fedproxy-client OIDC plugin reads these files (all written
-            // by provisioning-token.sh at boot after a successful prove).
-            url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
-            token_path: "/root/secrets/digitalocean.com/serviceaccount/token",
-            actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
-            url_route: "/v1/oidc/issue",
-            // fedproxy-client OIDC plugin interpolates {actx} from actx_path,
-            // {did-plc-key} from the accept DID, {role} from SERVICE env var.
-            subject: "actx:{actx}:plc:{did-plc-key}:role:{role}",
-            createdAt: nowIso,
-          },
-        }]);
-        const rec = await api.getRecord(did, "com.publicdomainrelay.temp.compute.config.wif.simple", rkey);
-        return { $type: "com.atproto.repo.strongRef", uri: `at://${did}/com.publicdomainrelay.temp.compute.config.wif.simple/${rkey}`, cid: rec?.cid ?? "" };
-      };
-
-      // Override provision: go through the container host factory so
-      // ProvisioningData.create() injects the OIDC token exchange script.
-      localBase.provision = async (vm: VM, requesterDid: string, spec?: DropletSpec): Promise<ProvisionResult> => {
-        const { factory: chFactory } = await containerHostPromise;
-        // Use the PLC key (without did:plc: prefix) as actx — the OIDC
-        // plugin in fedproxy-client strips did:plc: when interpolating
-        // the {actx} template variable.
-        const actx = requesterDid.startsWith("did:plc:")
-          ? requesterDid.slice("did:plc:".length)
-          : requesterDid;
-        return chFactory.provisionDroplet(vm, actx, {
-          image: spec?.image,
-          region: spec?.region,
-          size: spec?.size,
-        });
-      };
-
-      // Override destroy: clean up Docker containers.
-      localBase.destroy = async (id: string | number): Promise<void> => {
-        const sid = String(id);
-        for (const name of [sid, `droplet-${sid}`]) {
-          await new Deno.Command("docker", { args: ["kill", name] }).output().catch(() => {});
-          await new Deno.Command("docker", { args: ["rm", "-f", name] }).output().catch(() => {});
-        }
-      };
-
-      return localBase;
     }
     return null;
   })();

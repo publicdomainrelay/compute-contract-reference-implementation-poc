@@ -34,6 +34,10 @@
     "@publicdomainrelay/hono-factory-ephemeral-compute-bidder": "../lib/hono-factory-ephemeral-compute-bidder/mod.ts",
     "@publicdomainrelay/hono-factory-compute-provider-local": "../lib/hono-factory-compute-provider-local/mod.ts",
     "@publicdomainrelay/compute-provider-local": "../lib/compute-provider-local/mod.ts",
-    "@publicdomainrelay/compute-provider": "../lib/compute-provider/mod.ts"
+    "@publicdomainrelay/compute-provider": "../lib/compute-provider/mod.ts",
+    "@publicdomainrelay/qemu/": "../qemu/",
+    "hono": "npm:hono@^4.12.23",
+    "hono/factory": "npm:hono@^4.12.23/factory",
+    "hono/cors": "npm:hono@^4.12.23/cors"
   }
 }
