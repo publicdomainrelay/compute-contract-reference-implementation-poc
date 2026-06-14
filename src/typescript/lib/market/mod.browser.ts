@@ -9,3 +9,4 @@ export * from "./auth.browser.ts";
 export * from "./egress.ts";
 export * from "./client.ts";
 export * from "./bid.ts";
+export * from "./discovery.ts";

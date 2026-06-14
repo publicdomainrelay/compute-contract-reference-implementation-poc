@@ -82,6 +82,18 @@ function parseEnvList(value: string): string[] {
     .filter((s) => s.length > 0);
 }
 
+/** Safely read REGISTRY_ENDPOINTS env var (no-op in browser where Deno is absent). */
+function readEnvEndpoints(): string[] {
+  try {
+    const g = globalThis as Record<string, unknown>;
+    if (typeof g.Deno !== "undefined") {
+      const deno = g.Deno as { env: { get(key: string): string | undefined } };
+      return parseEnvList(deno.env.get(REGISTRY_ENDPOINTS_ENV) ?? "");
+    }
+  } catch { /* browser — Deno not available */ }
+  return [];
+}
+
 // ── public API ─────────────────────────────────────────────────────────
 
 /**
@@ -97,8 +109,7 @@ export async function discoverBiddersFromRegistries(
 ): Promise<Set<string>> {
   const log = opts.log ?? noopLogger;
   const endpoints =
-    opts.registryEndpoints ??
-    parseEnvList(Deno.env.get(REGISTRY_ENDPOINTS_ENV) ?? "");
+    opts.registryEndpoints ?? readEnvEndpoints();
   const effectiveEndpoints =
     endpoints.length > 0 ? endpoints : DEFAULT_REGISTRY_ENDPOINTS;
 

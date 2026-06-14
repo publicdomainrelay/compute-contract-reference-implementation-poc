@@ -32,8 +32,6 @@
   let edgeCount = $state(0);
   let paused = $state(false);
   let isRecording = $state(false);
-  let detailNode = $state<any>(null);
-  let pinnedUri = $state<string | null>(null);
   let sessions = $state<StoredSession[]>([]);
   let selectedSessionIdx = $state('');
 
@@ -134,12 +132,10 @@
         .on('start', (event: any, d: any) => { if (!event.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
         .on('drag', (event: any, d: any) => { d.fx = event.x; d.fy = event.y; })
         .on('end', (event: any, d: any) => { if (!event.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }))
-      .on('mouseenter', (event: any, d: any) => {
-        detailNode = d;
+      .on('mouseenter', (event: any, _d: any) => {
         d3.select(event.target).attr('stroke', '#1c2333').attr('stroke-width', 3);
       })
       .on('mouseleave', (event: any) => {
-        if (!pinnedUri) detailNode = null;
         d3.select(event.target).attr('stroke', '#fff').attr('stroke-width', 1.5);
       })
       .on('click', (_event: any, d: any) => {
@@ -300,7 +296,6 @@
 
   function replaySession(stored: StoredSession) {
     recordNodes.length = 0; nodeMap.clear(); edgeList.length = 0;
-    pinnedUri = null; detailNode = null;
     for (const frame of stored.events) {
       const rec = parseJetstreamFrame(frame);
       if (!rec) continue;
@@ -362,13 +357,7 @@
 
   function clearGraph() {
     recordNodes.length = 0; nodeMap.clear(); edgeList.length = 0;
-    pinnedUri = null; detailNode = null;
     restartSimulation();
-  }
-
-  function pinDetail(node: any) {
-    if (pinnedUri === node.uri) { pinnedUri = null; }
-    else { pinnedUri = node.uri; }
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────────────
@@ -387,12 +376,6 @@
     simulation?.stop();
   });
 
-  // ── derived detail YAML ──────────────────────────────────────────────────────
-
-  let detailYaml = $derived.by(() => {
-    if (!detailNode) return '';
-    try { return toYaml(detailNode.record); } catch { return JSON.stringify(detailNode.record, null, 2); }
-  });
 </script>
 
 <div class="live-graph">
@@ -421,30 +404,9 @@
   </div>
 
   <div class="body">
-    <!-- graph canvas -->
     <div class="graph-pane" bind:this={graphPane}>
       <svg bind:this={svgEl} width="100%" height="100%"></svg>
     </div>
-
-    <!-- detail panel -->
-    <aside class="detail-panel">
-      {#if detailNode}
-        <div class="detail-header">
-          <div class="detail-title">{nsidLabel(detailNode.collection)} · {detailNode.rkey}</div>
-          <div class="detail-uri">{detailNode.uri}</div>
-          <div class="detail-meta">DID: {shortDid(detailNode.did, 32)} · {detailNode.createdAt}</div>
-          <div class="detail-actions">
-            <button onclick={() => window.open(pdslsUrl(detailNode.uri), '_blank')}>Open pdsls.dev</button>
-            <button onclick={() => pinDetail(detailNode)}>
-              {pinnedUri === detailNode.uri ? 'Unpin' : 'Pin'}
-            </button>
-          </div>
-        </div>
-        <pre class="detail-yaml">{detailYaml}</pre>
-      {:else}
-        <div class="detail-empty">Hover a node to inspect</div>
-      {/if}
-    </aside>
   </div>
 </div>
 
@@ -517,37 +479,6 @@
     background: #f0f4fa;
     overflow: hidden;
     position: relative;
-  }
-
-  .detail-panel {
-    width: 280px;
-    flex-shrink: 0;
-    background: #ffffff;
-    border-left: 1px solid #dde3ec;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-  }
-  .detail-empty {
-    flex: 1; display: flex; align-items: center; justify-content: center;
-    color: #cbd5e1; font-size: 0.85rem;
-  }
-  .detail-header { padding: 0.75rem; border-bottom: 1px solid #e8edf4; }
-  .detail-title { font-size: 0.9rem; font-weight: 600; color: #1c2333; margin-bottom: 0.25rem; }
-  .detail-uri { font-size: 0.7rem; color: #94a3b8; word-break: break-all; margin-bottom: 0.25rem; }
-  .detail-meta { font-size: 0.7rem; color: #94a3b8; margin-bottom: 0.5rem; }
-  .detail-actions { display: flex; gap: 0.4rem; }
-  .detail-actions button {
-    padding: 0.2rem 0.6rem; border-radius: 4px;
-    border: 1px solid #dde3ec; background: #f8fafc; color: #475569; cursor: pointer; font-size: 0.75rem;
-    transition: all 0.15s;
-  }
-  .detail-actions button:hover { border-color: #4a9eff; color: #4a9eff; }
-  .detail-yaml {
-    flex: 1; margin: 0; padding: 0.75rem;
-    font-family: 'Courier New', monospace; font-size: 0.72rem;
-    color: #3b6fd4; white-space: pre-wrap; word-break: break-word;
-    background: #f8fafc;
   }
 
   :global(.live-graph .node-label) {

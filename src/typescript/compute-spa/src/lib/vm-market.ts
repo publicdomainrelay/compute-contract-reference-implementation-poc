@@ -13,6 +13,10 @@ export interface RequestVMParams {
   vmName: string;
   cloudInitScript: string;
   bidWindowSec: number;
+  /** Override registry endpoints for discovery (defaults to built-in list). */
+  registryEndpoints?: string[];
+  /** Override hardcoded bidder DIDs (defaults to built-in list). */
+  bidderDids?: string[];
   onLog: (msg: string) => void;
 }
 
@@ -27,20 +31,23 @@ export interface RequestVMResult {
 }
 
 export async function requestVM(params: RequestVMParams): Promise<RequestVMResult> {
-  const { agent, proxyRef, keypair, vmName, cloudInitScript, bidWindowSec, onLog } = params;
+  const { agent, proxyRef, keypair, vmName, cloudInitScript, bidWindowSec, registryEndpoints, bidderDids: bidderDidsOverride, onLog } = params;
 
   if (!keypair) throw new Error('relay keypair not ready');
   const signer = { keypair, issuer: proxyRef };
 
-  const { createRecord, createSignedRecord, createMarketClient, listRecordsAll, OFFERING_NSID } =
+  const { createRecord, createSignedRecord, createMarketClient, listRecordsAll, discoverBiddersFromRegistries, DEFAULT_REGISTRY_ENDPOINTS, OFFERING_NSID } =
     await import('@publicdomainrelay/market') as {
       createRecord: (agent: unknown, col: string, rec: Record<string, unknown>) => Promise<{ uri: string; cid: string }>;
       createSignedRecord: (agent: unknown, col: string, rec: Record<string, unknown>, signer: unknown) => Promise<{ uri: string; cid: string }>;
       createMarketClient: (session: unknown, opts: Record<string, unknown>) => {
         submitRfp: (target: string, input: { rfpUri: string; rfpCid: string }) => Promise<{ ok: boolean }>;
-        submitAccept: (target: string, input: Record<string, unknown>) => Promise<{ uri?: string; cid?: string; submitEvent?: string }>;
+        submitAccept: (target: string, input: { acceptUri: string; acceptCid: string }) => Promise<{ id: string; uri: string; cid: string; submitEvent: string }>;
+        listBidders: (target: string, params?: Record<string, unknown>) => Promise<{ bidders: Array<{ bidderDid: string; offeringEndpointUrl: string; appliesTo: string[]; lastHeartbeat: string }>; cursor?: string }>;
       };
       listRecordsAll: (pdsUrl: string, did: string, collection: string) => Promise<Array<{ uri: string; cid: string; value: Record<string, unknown> }>>;
+      discoverBiddersFromRegistries: (opts: { payloadNsid: string; registryEndpoints?: string[]; marketClient?: unknown; log?: (severity: string, msg: string, extra?: Record<string, unknown>) => void }) => Promise<Set<string>>;
+      DEFAULT_REGISTRY_ENDPOINTS: string[];
       OFFERING_NSID: string;
     };
 
@@ -66,39 +73,66 @@ export async function requestVM(params: RequestVMParams): Promise<RequestVMResul
   const rfpRef = await createSignedRecord(agent, RFP_NSID, rfpRecord, signer);
   onLog(`market.rfp: ${rfpRef.uri}`);
 
-  // 2.5. discover vouched bidders and notify via OFFERING_NSID
+  // 2.5. discover bidders: vouches + registry (run concurrently)
   const { IdResolver } = await import('@atproto/identity');
   const idResolver = new IdResolver();
   const mc = createMarketClient(agent, {});
 
-  // Demo: always include these DIDs in addition to any discovered via vouches.
-  const DEFAULT_BIDDER_DIDS = ['did:plc:5svqtrhheairglgiiyvutzik'];
+  // Hardcoded DIDs always included in addition to discovered bidders.
+  // Caller can override via params; otherwise falls back to the built-in list.
+  const DEFAULT_BIDDER_DIDS = bidderDidsOverride ?? ['did:plc:5svqtrhheairglgiiyvutzik'];
 
   const userDid = (agent as { did?: string }).did ?? '';
-  onLog(`discovering vouched bidders for ${userDid}…`);
-  let vouchedDids: string[] = [];
-  try {
-    const userDoc = await idResolver.did.resolve(userDid);
-    const userPdsSvc = (userDoc?.service ?? []).find((s: { id: string }) => s.id === '#atproto_pds');
-    const userPds = (userPdsSvc as { serviceEndpoint?: string } | undefined)?.serviceEndpoint;
-    if (userPds) {
-      const vouchRecords = await listRecordsAll(userPds, userDid, VOUCH_NSID);
-      vouchedDids = Array.from(new Set(
-        vouchRecords
-          .filter((r) => (r.value.kind as string | undefined) !== 'denounce')
-          .map((r) => r.uri.split('/').pop() ?? '')
-          .filter((rkey) => rkey.startsWith('did:'))
-      ));
-      onLog(`found ${vouchedDids.length} vouched DID(s)`);
-    } else {
-      onLog('could not resolve user PDS — skipping vouch discovery');
-    }
-  } catch (err) {
-    onLog(`vouch discovery error — ${String(err)}`);
-  }
 
-  const bidderDids = Array.from(new Set([...DEFAULT_BIDDER_DIDS, ...vouchedDids]));
-  onLog(`checking ${bidderDids.length} bidder DID(s) (incl. ${DEFAULT_BIDDER_DIDS.length} default)`);
+  // Vouch-based discovery (from user's PDS).
+  const vouchPromise = (async (): Promise<string[]> => {
+    onLog(`discovering vouched bidders for ${userDid}…`);
+    try {
+      const userDoc = await idResolver.did.resolve(userDid);
+      const userPdsSvc = (userDoc?.service ?? []).find((s: { id: string }) => s.id === '#atproto_pds');
+      const userPds = (userPdsSvc as { serviceEndpoint?: string } | undefined)?.serviceEndpoint;
+      if (userPds) {
+        const vouchRecords = await listRecordsAll(userPds, userDid, VOUCH_NSID);
+        const dids = Array.from(new Set(
+          vouchRecords
+            .filter((r) => (r.value.kind as string | undefined) !== 'denounce')
+            .map((r) => r.uri.split('/').pop() ?? '')
+            .filter((rkey) => rkey.startsWith('did:'))
+        ));
+        onLog(`found ${dids.length} vouched DID(s)`);
+        return dids;
+      } else {
+        onLog('could not resolve user PDS — skipping vouch discovery');
+      }
+    } catch (err) {
+      onLog(`vouch discovery error — ${String(err)}`);
+    }
+    return [];
+  })();
+
+  // Registry-based discovery (queries market registry for registered bidders).
+  const registryPromise = (async (): Promise<string[]> => {
+    onLog('discovering bidders from market registry…');
+    try {
+      const registryDids = await discoverBiddersFromRegistries({
+        payloadNsid: VM_NSID,
+        registryEndpoints: registryEndpoints ?? DEFAULT_REGISTRY_ENDPOINTS,
+        marketClient: mc,
+        log: (severity: string, msg: string) => {
+          if (severity === 'warn') onLog(`registry: ${msg}`);
+        },
+      });
+      onLog(`found ${registryDids.size} registry DID(s)`);
+      return Array.from(registryDids);
+    } catch (err) {
+      onLog(`registry discovery error — ${String(err)}`);
+    }
+    return [];
+  })();
+
+  const [vouchedDids, registryDids] = await Promise.all([vouchPromise, registryPromise]);
+  const bidderDids = Array.from(new Set([...DEFAULT_BIDDER_DIDS, ...vouchedDids, ...registryDids]));
+  onLog(`checking ${bidderDids.length} bidder DID(s) (${DEFAULT_BIDDER_DIDS.length} default, ${vouchedDids.length} vouched, ${registryDids.length} registry)`);
 
   await Promise.all(bidderDids.map(async (bidderDid) => {
     try {

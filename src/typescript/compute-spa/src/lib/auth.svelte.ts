@@ -1,5 +1,6 @@
 import { BrowserOAuthClient } from '@atproto/oauth-client-browser';
 import { Agent } from '@atproto/api';
+import { startLocalPds, type LocalPds } from './local-pds.ts';
 
 async function buildClientId(): Promise<string> {
   const isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
@@ -23,12 +24,32 @@ class AuthState {
 
   #oac: BrowserOAuthClient | null = null;
   #agent: Agent | null = null;
+  #localPds: LocalPds | null = null;
 
-  get agent(): Agent | null {
+  get agent(): Agent | LocalPds['agent'] | null {
+    // Return the local PDS agent by default; fall back to OAuth Agent if present.
+    if (this.#localPds) return this.#localPds.agent;
     return this.#agent;
   }
 
+  get localPds(): LocalPds | null {
+    return this.#localPds;
+  }
+
   async init() {
+    try {
+      // Boot the in-browser PDS — no OAuth sign-in required.
+      this.#localPds = await startLocalPds();
+      this.did = this.#localPds.did;
+      this.handle = this.#localPds.did; // use DID as pseudo-handle
+      console.log('[auth] local PDS ready, did:', this.did);
+    } catch (e) {
+      this.error = `Local PDS boot failed: ${String(e)}`;
+    } finally {
+      this.loading = false;
+    }
+
+    // Also initialize OAuth client for optional Bluesky sign-in.
     try {
       this.#oac = await BrowserOAuthClient.load({
         clientId: await buildClientId(),
@@ -42,11 +63,10 @@ class AuthState {
         if (!res.success) throw new Error(JSON.stringify(res));
         this.handle = res.data.handle;
         this.did = res.data.did;
+        console.log('[auth] OAuth session ready, handle:', this.handle);
       }
-    } catch (e) {
-      this.error = String(e);
-    } finally {
-      this.loading = false;
+    } catch {
+      // OAuth is optional — local PDS is sufficient.
     }
   }
 
@@ -69,8 +89,8 @@ class AuthState {
   async signOut() {
     if (!this.#oac || !this.did) return;
     await this.#oac.revoke(this.did);
-    this.handle = null;
-    this.did = null;
+    this.handle = this.#localPds?.did ?? null;
+    this.did = this.#localPds?.did ?? null;
     this.#agent = null;
   }
 }

@@ -17,7 +17,17 @@
      */
     "allowJs": true,
     "checkJs": true,
-    "moduleDetection": "force"
+    "moduleDetection": "force",
+    "paths": {
+      "@publicdomainrelay/lexicons": ["../lib/lexicons/mod.ts"],
+      "@publicdomainrelay/market": ["../lib/market/mod.browser.ts"],
+      "@publicdomainrelay/hono-factory-atproto-repo": ["../lib/hono-factory-atproto-repo/mod.ts"],
+      "@publicdomainrelay/did-plc": ["../lib/did-plc/mod.ts"],
+      "@publicdomainrelay/event-bus": ["../lib/event-bus/mod.ts"],
+      "@publicdomainrelay/xrpc-relay": ["../lib/xrpc-relay/mod.ts"],
+      "@hono/hono": ["../../../node_modules/hono/dist/types/index"],
+      "@hono/hono/cors": ["../../../node_modules/hono/dist/types/middleware/cors/index"]
+    }
   },
   "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.svelte"]
 }

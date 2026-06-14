@@ -8,6 +8,16 @@
   import { loadSavedVMs, persistVM, removeVM, type SavedVM } from './vm-storage.ts';
   import { requestVM } from './vm-market.ts';
   import { vmServiceName, didPlcKey, terminalUrl, XRPC_DISPATCHER_HOST } from './constants.ts';
+  import {
+    loadMarketSettings,
+    saveMarketSettings,
+    enabledRegistries,
+    enabledBidders,
+    toggleEntry,
+    addEntry,
+    removeEntry,
+    type MarketSettings,
+  } from './market-settings.ts';
 
   /** Random URL-safe ttyd password generated client-side per VM. */
   function generatePassword(): string {
@@ -55,6 +65,26 @@
   let logs = $state<string[]>([]);
   let savedVMs = $state<SavedVM[]>(loadSavedVMs());
 
+  // Market discovery settings (registry endpoints + bidder DIDs)
+  let discoveryExpanded = $state(false);
+  let marketSettings = $state<MarketSettings>(loadMarketSettings());
+  let newRegistryUrl = $state('');
+  let newBidderDid = $state('');
+
+  function saveSettings() { saveMarketSettings(marketSettings); }
+  function onToggle(kind: 'registries' | 'bidders', value: string) {
+    marketSettings = toggleEntry(marketSettings, kind, value);
+    saveSettings();
+  }
+  function onAdd(kind: 'registries' | 'bidders', value: string) {
+    marketSettings = addEntry(marketSettings, kind, value);
+    saveSettings();
+  }
+  function onRemove(kind: 'registries' | 'bidders', value: string) {
+    marketSettings = removeEntry(marketSettings, kind, value);
+    saveSettings();
+  }
+
   let selectedPreset = $derived(
     CLOUD_INIT_PRESETS.find((p) => p.id === selectedPresetId) ?? CLOUD_INIT_PRESETS[0]
   );
@@ -97,6 +127,14 @@
       });
       return res.data.token;
     });
+  });
+
+  // Wire the in-browser PDS fetch into the relay so external callers can resolve
+  // records (com.atproto.repo.getRecord / listRecords) from this subscriber's DID.
+  $effect(() => {
+    const pds = auth.localPds;
+    if (!pds) return;
+    relayClient.setPdsFetch((req) => pds.fetch(req));
   });
 
   // Re-register ttyd handshakes for saved VMs so a page reload can still serve
@@ -207,6 +245,8 @@
         vmName,
         cloudInitScript: effectiveScript,
         bidWindowSec,
+        registryEndpoints: enabledRegistries(marketSettings),
+        bidderDids: enabledBidders(marketSettings),
         onLog: addLog,
       });
       const saved: SavedVM = {
@@ -313,7 +353,64 @@
               spellcheck="false"
             ></textarea>
             {#if selectedPresetId === 'default'}
-              <span class="field-hint">Generated from your identity, VM name, and relay subdomain. Switch to “Custom” to edit.</span>
+              <span class="field-hint">Generated from your identity, VM name, and relay subdomain. Switch to "Custom" to edit.</span>
+            {/if}
+          </div>
+
+          <!-- Market Discovery Settings (collapsed by default) -->
+          <div class="discovery-section">
+            <button type="button" class="discovery-toggle" onclick={() => discoveryExpanded = !discoveryExpanded}>
+              <span class="toggle-arrow">{discoveryExpanded ? '▼' : '▶'}</span>
+              Market Discovery
+              <span class="toggle-summary">
+                ({marketSettings.registries.filter(r => r.enabled).length} registry, {marketSettings.bidders.filter(b => b.enabled).length} bidder)
+              </span>
+            </button>
+
+            {#if discoveryExpanded}
+              <div class="discovery-body">
+                <!-- Registries -->
+                <fieldset class="discovery-group">
+                  <legend>Registry Endpoints</legend>
+                  {#each marketSettings.registries as reg (reg.value)}
+                    <label class="check-row">
+                      <input type="checkbox" checked={reg.enabled} onchange={() => onToggle('registries', reg.value)} />
+                      <span class="check-value" title={reg.value}>{reg.value}</span>
+                      {#if !reg.isDefault}
+                        <button type="button" class="rm-btn" onclick={() => onRemove('registries', reg.value)} title="Remove">✕</button>
+                      {/if}
+                    </label>
+                  {/each}
+                  <div class="add-row">
+                    <input type="text" placeholder="did:web:… or https://…" bind:value={newRegistryUrl}
+                      onkeydown={(e) => { if (e.key === 'Enter') { onAdd('registries', newRegistryUrl.trim()); newRegistryUrl = ''; } }} />
+                    <button type="button" class="add-btn"
+                      disabled={!newRegistryUrl.trim()}
+                      onclick={() => { onAdd('registries', newRegistryUrl.trim()); newRegistryUrl = ''; }}>+ Add</button>
+                  </div>
+                </fieldset>
+
+                <!-- Bidders -->
+                <fieldset class="discovery-group">
+                  <legend>Bidder DIDs</legend>
+                  {#each marketSettings.bidders as bid (bid.value)}
+                    <label class="check-row">
+                      <input type="checkbox" checked={bid.enabled} onchange={() => onToggle('bidders', bid.value)} />
+                      <span class="check-value" title={bid.value}>{bid.value}</span>
+                      {#if !bid.isDefault}
+                        <button type="button" class="rm-btn" onclick={() => onRemove('bidders', bid.value)} title="Remove">✕</button>
+                      {/if}
+                    </label>
+                  {/each}
+                  <div class="add-row">
+                    <input type="text" placeholder="did:plc:…" bind:value={newBidderDid}
+                      onkeydown={(e) => { if (e.key === 'Enter') { onAdd('bidders', newBidderDid.trim()); newBidderDid = ''; } }} />
+                    <button type="button" class="add-btn"
+                      disabled={!newBidderDid.trim()}
+                      onclick={() => { onAdd('bidders', newBidderDid.trim()); newBidderDid = ''; }}>+ Add</button>
+                  </div>
+                </fieldset>
+              </div>
             {/if}
           </div>
 
@@ -688,5 +785,112 @@
   .modal form { display: flex; flex-direction: column; gap: 0.75rem; }
   .modal label { font-size: 0.85rem; color: #64748b; }
   .login-error { color: #dc2626; font-size: 0.88rem; margin: 0; }
+
+  /* Market Discovery collapsible section */
+  .discovery-section {
+    border: 1px solid #dde3ec;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .discovery-toggle {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.8rem;
+    border: none;
+    background: #f8fafc;
+    color: #475569;
+    font-size: 0.82rem;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s;
+    font-family: inherit;
+  }
+  .discovery-toggle:hover { background: #f0f4ff; }
+  .toggle-arrow { font-size: 0.65rem; width: 14px; text-align: center; flex-shrink: 0; }
+  .toggle-summary { font-weight: 400; font-size: 0.75rem; color: #94a3b8; }
+  .discovery-body {
+    padding: 0.6rem 0.8rem;
+    border-top: 1px solid #dde3ec;
+    background: #fff;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+  .discovery-group {
+    border: none;
+    padding: 0;
+    margin: 0;
+  }
+  .discovery-group legend {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #64748b;
+    margin-bottom: 0.3rem;
+    padding: 0;
+  }
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.15rem 0;
+    font-size: 0.75rem;
+  }
+  .check-row input[type="checkbox"] { width: 14px; height: 14px; margin: 0; cursor: pointer; accent-color: #4a9eff; }
+  .check-value {
+    flex: 1;
+    font-family: monospace;
+    font-size: 0.7rem;
+    color: #475569;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .rm-btn {
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+    border: 1px solid #e2e8f0;
+    background: transparent;
+    color: #94a3b8;
+    cursor: pointer;
+    font-size: 0.65rem;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: all 0.15s;
+  }
+  .rm-btn:hover { border-color: #f87171; color: #f87171; }
+  .add-row {
+    display: flex;
+    gap: 0.3rem;
+    margin-top: 0.25rem;
+  }
+  .add-row input {
+    flex: 1;
+    padding: 0.3rem 0.5rem;
+    border-radius: 4px;
+    border: 1px solid #dde3ec;
+    background: #f8fafc;
+    color: #1c2333;
+    font-size: 0.72rem;
+    font-family: monospace;
+    min-width: 0;
+  }
+  .add-row input:focus { outline: none; border-color: #4a9eff; }
+  .add-btn {
+    padding: 0.3rem 0.6rem;
+    border-radius: 4px;
+    border: 1px solid #4a9eff;
+    background: transparent;
+    color: #4a9eff;
+    cursor: pointer;
+    font-size: 0.72rem;
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+  .add-btn:hover:not(:disabled) { background: #eff6ff; }
+  .add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 </style>

@@ -15,9 +15,9 @@ export const XRPC_DISPATCHER_HOST = 'xrpc.fedproxy.com';
 // user:password), so this is retained only for the credential record's shape.
 export const TTYD_USERNAME = 'agent';
 
-/** Sanitize an atproto handle into a DNS label segment (dots/slashes → dashes). */
+/** Sanitize an atproto handle/DID into a DNS label segment (colons/dots/slashes → dashes). */
 export function handleToLabel(handle: string): string {
-  return handle.replace(/[./]/g, '-').toLowerCase();
+  return handle.replace(/[:./]/g, '-').toLowerCase();
 }
 
 /** Strip the `did:plc:` prefix, yielding the bare PLC key. */

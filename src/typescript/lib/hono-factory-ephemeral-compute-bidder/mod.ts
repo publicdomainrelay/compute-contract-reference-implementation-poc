@@ -77,6 +77,7 @@ import { TID } from "@atproto/common";
 import { createComputeProviderDigitalOcean } from "@publicdomainrelay/compute-provider-digitalocean";
 import type { StrongRef } from "@publicdomainrelay/compute-provider-digitalocean";
 import { createAttestationCid, type RecordMap } from "@atiproto/atproto-attestation";
+import { cors } from "@hono/hono/cors";
 import { createComputeProviderLocalFactory } from "@publicdomainrelay/hono-factory-compute-provider-local";
 import { createLogger } from "../../utils/log.ts";
 import { DEFAULT_REGISTRY_ENDPOINTS } from "../market/discovery.ts";
@@ -179,6 +180,7 @@ async function startContainerHost(): Promise<string> {
   });
 
   const app = factory.createApp();
+  app.use('*', cors());
   const { handleRequest } = createSubscriberFactory({ app });
 
   const relayKeypair = await Secp256k1Keypair.create({ exportable: true });
