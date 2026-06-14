@@ -430,11 +430,6 @@ export async function raiseIfUnauthorized(
     ? unverifiedPayload.aud[0]
     : unverifiedPayload.aud as string ?? "";
 
-  // Tokens issued by /v1/oidc/prove carry a droplet_id claim — they have
-  // already passed SSH host key signature verification. Treat them as
-  // self-issued by this service (no external RBAC record required).
-  const isProvisioningToken = !!unverifiedPayload["droplet_id"];
-
   let rbac: RBACRecord | null = null;
   let getIssuers: ((api: string, actx: string) => Promise<string[]>) | undefined;
 
@@ -449,29 +444,22 @@ export async function raiseIfUnauthorized(
     actx = "did:plc:" + actx
   }
 
-  if (isProvisioningToken) {
-    // Prove-issued token: validate against the service's own issuer
-    // (the container host). RBAC is bypassed — the prove endpoint's
-    // SSH signature check is the authorization.
-    getIssuers = async (_api: string, _actx: string) => [service];
-  } else {
-    try {
-      const pdsURL = await resolvePDS(actx);
-      rbac = await getRBACRecord(pdsURL, actx, service, scope);
-      const issuers = collectIssuers(rbac);
-      getIssuers = async (_api: string, _actx: string) => issuers;
-      void api;
-    } catch (err) {
-      // SECURITY: fail closed. This previously returned an empty AuthToken (`{}`),
-      // which made the calling middleware treat the request as authorized while
-      // skipping BOTH OIDC token validation AND the RBAC policy check below — an
-      // authentication/authorization bypass on the privileged /v1/oidc/issue
-      // endpoint (which mints OIDC tokens that grant droplet creation). If we
-      // cannot resolve the actx DID or load its com.fedproxy.rbac record, we have
-      // no basis on which to authorize the caller, so deny the request.
-      log("error", "failed to lookup rbac record", { actx: actx, err: String(err) });
-      throw new UnauthorizedException(`unable to authorize: rbac lookup failed for actx=${actx}: ${String(err)}`);
-    }
+  try {
+    const pdsURL = await resolvePDS(actx);
+    rbac = await getRBACRecord(pdsURL, actx, service, scope);
+    const issuers = collectIssuers(rbac);
+    getIssuers = async (_api: string, _actx: string) => issuers;
+    void api;
+  } catch (err) {
+    // SECURITY: fail closed. This previously returned an empty AuthToken (`{}`),
+    // which made the calling middleware treat the request as authorized while
+    // skipping BOTH OIDC token validation AND the RBAC policy check below — an
+    // authentication/authorization bypass on the privileged /v1/oidc/issue
+    // endpoint (which mints OIDC tokens that grant droplet creation). If we
+    // cannot resolve the actx DID or load its com.fedproxy.rbac record, we have
+    // no basis on which to authorize the caller, so deny the request.
+    log("error", "failed to lookup rbac record", { actx: actx, err: String(err) });
+    throw new UnauthorizedException(`unable to authorize: rbac lookup failed for actx=${actx}: ${String(err)}`);
   }
 
   const oidcToken = await OIDCToken.validate(token, getIssuers);

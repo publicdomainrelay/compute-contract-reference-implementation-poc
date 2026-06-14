@@ -1,40 +1,34 @@
-// ---------------------------------------------------------------------------
-// DigitalOcean + RBAC — provisioning backend for the bidder.
-//
-// Exposes createComputeProviderDigitalOcean(ctx), which wires the DO/RBAC
-// helpers against the bidder's atproto agent and env. Kept as a factory
-// (rather than module-level state) because `agent`/`agentDid` are only
-// available after loginAgent() resolves.
-// ---------------------------------------------------------------------------
-
 import { Agent } from "@atproto/api";
 import { stringify as yamlStringify, parse as yamlParse } from "npm:yaml@^2.7.0";
-import { COMPUTE_CONFIG_WIF_SIMPLE_NSID } from "@publicdomainrelay/lexicons";
 import { ON_BEHALF_OF_HEADER } from "@publicdomainrelay/utils-log";
-import type { ComputeProvider, ProvisionResult, DropletSpec, VM } from "@publicdomainrelay/compute-provider";
+import type {
+  ComputeProvider,
+  ComputeProviderCtx,
+  DropletSpec,
+  ProvisionResult,
+  StrongRef,
+  VM,
+} from "@publicdomainrelay/compute-provider";
 
-export type StrongRef = { $type: "com.atproto.repo.strongRef"; uri: string; cid: string };
-
-// Re-export VM type for consumers that still import it from here.
 export type { VM };
 
-type LogLevel = "info" | "warn" | "error" | "debug";
-type Logger = (level: LogLevel, msg: string, fields?: Record<string, unknown>) => void;
-
-export interface ComputeProviderDigitalOceanCtx {
+export interface ComputeProviderDigitalOceanCtx extends ComputeProviderCtx {
   getAgent: () => Agent;
   getAgentDid: () => string;
-  log: Logger;
-  acceptPathRecord: string;
   acceptPathVm: string;
   digitaloceanBaseUrl: string;
   doToken: string;
   rbacRepoRoot: string;
-  parseAtUri: (uri: string) => { repo: string; collection: string; rkey: string };
 }
 
 // RBAC NSID is specific to the DigitalOcean/homelab RBAC integration.
 const RBAC_NSID = "com.fedproxy.rbac";
+
+const COMPUTE_CONFIG_WIF_SIMPLE_NSID =
+  "com.publicdomainrelay.temp.compute.config.wif.simple";
+const DEFAULT_DIGITALOCEAN_BASE_URL = "https://droplet-oidc.its1337.com";
+const DEFAULT_ACCEPT_PATH_VM =
+  "/root/secrets/publicdomainrelay.com/market/accept.json";
 
 // JSON.stringify with sorted keys — used to compare RBAC records for
 // idempotency regardless of the key order the PDS returns them in.
@@ -47,18 +41,17 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-type DOContext = { rbacRepoRoot: string; teamUuid: string };
+type DOContext = { rbacRepo: string; teamUuid: string };
 
 export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOceanCtx) {
   const {
     getAgent,
     getAgentDid,
     log,
-    acceptPathRecord: ACCEPT_PATH_RECORD,
-    acceptPathVm: ACCEPT_PATH_VM,
-    digitaloceanBaseUrl: DIGITALOCEAN_BASE_URL,
-    doToken: DO_TOKEN,
-    rbacRepoRoot: RBAC_REPO_ROOT,
+    acceptPathVm = DEFAULT_ACCEPT_PATH_VM,
+    digitaloceanBaseUrl = DEFAULT_DIGITALOCEAN_BASE_URL,
+    doToken,
+    rbacRepoRoot,
     parseAtUri,
   } = ctx;
 
@@ -72,38 +65,16 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     return { $type: "com.atproto.repo.strongRef", uri: res.data.uri, cid: res.data.cid };
   }
 
-  // Derive did:web: from the service base URL for use as getServiceAuth aud.
-  function urlToDid(url: string): string {
-    const host = new URL(url).host;
-    return `did:web:${host}`;
-  }
-
-  // Get a short-lived ATProto service auth token targeting the DO/QEMU endpoint.
-  // These are non-OIDC JWTs: signed by the PDS, iss=agentDid, validated via DID doc.
-  async function getServiceAuthToken(): Promise<string> {
-    const aud = urlToDid(DIGITALOCEAN_BASE_URL);
-    // cannot request a method-less token with an expiration more than a minute in the future
-    const exp = Math.floor(Date.now() / 1000) + 60; // 1 min
-    log("info", "calling getServiceAuth", { aud, exp });
-    const res = await getAgent().com.atproto.server.getServiceAuth({ aud, exp });
-    return res.data.token;
-  }
-
   async function makeDoctx(): Promise<DOContext> {
-    const token = await getServiceAuthToken();
-    const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/account`, {
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+    const res = await fetch(`${digitaloceanBaseUrl}/v2/account`, {
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${doToken}` },
     });
     const json = await res.json();
     log("debug", "DO /v2/account response", { account: json });
     if (res.status >= 400) throw new Error(`DO /v2/account ${res.status}: ${JSON.stringify(json)}`);
 
     let uuid = json.account.team.uuid;
-    // Handle custom/homelab did:plc as actx / team uuid
-    if (uuid.startsWith("did:plc:")) {
-      uuid = uuid.substring(8);
-    }
-    const result = { rbacRepoRoot: RBAC_REPO_ROOT, teamUuid: uuid };
+    const result = { rbacRepo: `${rbacRepoRoot}/${uuid}`, teamUuid: uuid };
     log("debug", "DO /v2/account resolved context", { ...result });
     return result;
   }
@@ -131,67 +102,7 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     const slug = `${doctx.teamUuid}-${requesterPlc}-${vm.role}`;
     const roleName = `ex-${slug}`;
 
-    const rbacRecord = {
-      $type: RBAC_NSID,
-      protects: {
-        [roleName]: {
-          service: `${DIGITALOCEAN_BASE_URL}`,
-          scope: 'droplets.wid',
-        }
-      },
-      roles: {
-        [roleName]: {
-          role_name: roleName,
-          definition: {
-            aud: `api://DigitalOcean?actx=${doctx.teamUuid}`,
-            sub: `actx:${doctx.teamUuid}:plc:${requesterPlc}:role:${vm.role}`,
-            policies: [roleName],
-          },
-        },
-      },
-      policies: {
-        [roleName]: {
-          meta: {
-            policy: roleName,
-          },
-          schemas: {
-            "/v1/oidc/issue": {
-              type: "object",
-              $schema: "http://json-schema.org/draft-07/schema#",
-              required: ["capability", "allowed_parameters"],
-              properties: {
-                capability: {
-                  enum: ["create"],
-                },
-                allowed_parameters: {
-                  type: "object",
-                  properties: {
-                    aud: { type: "string" },
-                    sub: {
-                      type: "string",
-                      const: `actx:${doctx.teamUuid}:plc:${requesterPlc}:role:${vm.role}`,
-                    },
-                    ttl: {
-                      type: "number",
-                      const: 3600,
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      custom_claims_roles_index: {
-        job_workflow_ref: {},
-      },
-      createdAt: new Date().toISOString(),
-    };
-    log("info", "creating rbac record", { nsid: RBAC_NSID });
-    const rbacRef = await atprotoCreateRecord(RBAC_NSID, rbacRecord);
-    log("info", "rbac record created", { nsid: RBAC_NSID, uri: rbacRef.uri });
-
-    const rbac = doctx.rbacRepoRoot;
+    const rbac = doctx.rbacRepo;
     if (!(await isDir(`${rbac}/.git`))) {
       await Deno.mkdir(rbac, { recursive: true });
       const home = Deno.env.get("HOME") ?? "/root";
@@ -199,7 +110,7 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
       const credHelperPath = `${credHelperDir}/git-credential-rbac-digitalocean.sh`;
       const credHelper = `#!/usr/bin/env bash
 
-TOKEN="${DO_TOKEN}"
+TOKEN="${doToken}"
 
 while IFS='=' read -r key value; do
   if [[ -n "$key" && -n "$value" ]]; then
@@ -218,9 +129,9 @@ echo "password=\${TOKEN}"
 
       const helperAbs = await Deno.realPath(credHelperPath);
       const cmds: string[][] = [
-        ["git", "config", "--global", `credential.${DIGITALOCEAN_BASE_URL}/_rbac/DigitalOcean/.helper`, `!${helperAbs}`],
+        ["git", "config", "--global", `credential.${digitaloceanBaseUrl}/_rbac/DigitalOcean/.helper`, `!${helperAbs}`],
         ["git", "init"],
-        ["git", "remote", "add", "origin", `${DIGITALOCEAN_BASE_URL}/_rbac/DigitalOcean/${doctx.teamUuid}`],
+        ["git", "remote", "add", "origin", `${digitaloceanBaseUrl}/_rbac/DigitalOcean/${doctx.teamUuid}`],
         ["git", "pull", "origin", "main"],
         ["git", "branch", "--set-upstream-to=origin/main"],
       ];
@@ -308,77 +219,6 @@ echo "password=\${TOKEN}"
     }
   }
 
-  // Creates a separate com.fedproxy.rbac record for scope=account.auth.
-  // Protects /v2/account and /v2/droplets* using ATProto service auth tokens
-  // (com.atproto.server.getServiceAuth — iss=agentDid, validated via DID doc keys).
-  async function configureAccountAuthRbac(): Promise<void> {
-    const agentDid = getAgentDid();
-    const roleName = `account-auth-${agentDid.split(":").slice(-1)[0]}`;
-
-    const rbacRecord = {
-      $type: RBAC_NSID,
-      protects: {
-        [roleName]: {
-          service: `${DIGITALOCEAN_BASE_URL}`,
-          scope: "account.auth",
-        },
-      },
-      roles: {
-        // ATProto service auth: iss and sub are both the bidder's DID.
-        // getServiceAuth tokens have iss=agentDid, validated via DID document keys.
-        [roleName]: {
-          role_name: roleName,
-          definition: {
-            iss: agentDid,
-            sub: agentDid,
-            policies: [roleName],
-          },
-        },
-      },
-      policies: {
-        [roleName]: {
-          meta: { policy: roleName },
-          schemas: {
-            "/v2/account": {
-              type: "object",
-              properties: { capability: { enum: ["read"] } },
-            },
-            "/v2/droplets": {
-              type: "object",
-              properties: { capability: { enum: ["read", "create"] } },
-            },
-            "/v2/droplets/*": {
-              type: "object",
-              properties: { capability: { enum: ["read", "update", "delete"] } },
-            },
-          },
-        },
-      },
-      createdAt: new Date().toISOString(),
-    };
-
-    const agent = getAgent();
-    const listRes = await agent.com.atproto.repo.listRecords({
-      repo: agentDid,
-      collection: RBAC_NSID,
-      limit: 100,
-    });
-    const { createdAt: _createdAt, ...rbacRecordData } = rbacRecord;
-    const wanted = canonicalJson(rbacRecordData);
-    const existing = listRes.data.records.find((r) => {
-      const { createdAt: _existingCreatedAt, ...value } = r.value as Record<string, unknown>;
-      return canonicalJson(value) === wanted;
-    });
-    if (existing) {
-      log("info", "account.auth record already exists", { uri: existing.uri });
-      return;
-    }
-
-    log("info", "creating account.auth record", { nsid: RBAC_NSID });
-    await atprotoCreateRecord(RBAC_NSID, rbacRecord);
-    log("info", "account.auth record created", { nsid: RBAC_NSID });
-  }
-
   function injectAcceptBundle(userData: string, bundle: Record<string, unknown>): string {
     // deno-lint-ignore no-explicit-any
     let obj: Record<string, any> = {};
@@ -390,13 +230,13 @@ echo "password=\${TOKEN}"
     } catch { /* fall through with empty obj */ }
     const writeFiles = (obj.write_files ??= []) as unknown[];
     writeFiles.push({
-      path: ACCEPT_PATH_VM,
+      path: acceptPathVm,
       owner: "root:root",
       permissions: "0600",
       content: JSON.stringify(bundle, null, 2),
     });
     const runcmd = (obj.runcmd ??= []) as unknown[];
-    const parent = ACCEPT_PATH_VM.split("/").slice(0, -1).join("/");
+    const parent = acceptPathVm.split("/").slice(0, -1).join("/");
     runcmd.unshift(["sh", "-c", `install -d -m 0700 -o root -g root ${parent}`]);
     return "#cloud-config\n" + yamlStringify(obj, { lineWidth: 0 });
   }
@@ -408,8 +248,8 @@ echo "password=\${TOKEN}"
     const doctx = await makeDoctx();
     return atprotoCreateRecord(COMPUTE_CONFIG_WIF_SIMPLE_NSID, {
       $type: COMPUTE_CONFIG_WIF_SIMPLE_NSID,
-      accept_path: ACCEPT_PATH_RECORD,
-      issuer_uri: DIGITALOCEAN_BASE_URL,
+      accept_path: acceptPathVm,
+      issuer_uri: digitaloceanBaseUrl,
       to_issue: "exchange-custom-droplet-oidc-poc",
       actx: doctx.teamUuid,
       actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
@@ -438,12 +278,11 @@ echo "password=\${TOKEN}"
     log("info", "droplet request", { name, requesterDid, droplet: body });
     const doctx = await makeDoctx();
     const rbacRef = await configureDropletRbac(doctx, vm, requesterDid);
-    const token = await getServiceAuthToken();
-    const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/droplets`, {
+    const res = await fetch(`${digitaloceanBaseUrl}/v2/droplets`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
+        "Authorization": `Bearer ${doToken}`,
         // Forward the originating principal (the market.accept author) so the
         // compute host (qemu) can log whose request this provision serves.
         [ON_BEHALF_OF_HEADER]: requesterDid,
@@ -458,10 +297,9 @@ echo "password=\${TOKEN}"
 
   async function deleteDroplet(dropletId: number | string, reason: string): Promise<void> {
     log("info", "deleting droplet", { dropletId, reason });
-    const token = await getServiceAuthToken();
-    const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/droplets/${dropletId}`, {
+    const res = await fetch(`${digitaloceanBaseUrl}/v2/droplets/${dropletId}`, {
       method: "DELETE",
-      headers: { "Authorization": `Bearer ${token}` },
+      headers: { "Authorization": `Bearer ${doToken}` },
     });
     if (res.status >= 400 && res.status !== 404) {
       const body = await res.text();
@@ -476,7 +314,6 @@ echo "password=\${TOKEN}"
     createDroplet,
     deleteDroplet,
     deleteRbacRecord,
-    configureAccountAuthRbac,
     injectAcceptBundle,
   };
 }
@@ -494,7 +331,6 @@ export function createDigitalOceanComputeProvider(
     createDroplet,
     deleteDroplet,
     deleteRbacRecord,
-    configureAccountAuthRbac,
     injectAcceptBundle,
   } = createComputeProviderDigitalOcean(ctx);
 
@@ -528,7 +364,8 @@ export function createDigitalOceanComputeProvider(
 
     createBidConfig,
     injectAcceptBundle,
-    setupAuth: configureAccountAuthRbac,
+    setup: undefined,
+    teardown: undefined,
   };
 }
 

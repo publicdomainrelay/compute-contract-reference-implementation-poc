@@ -23,6 +23,9 @@ import { dropletSpecFromEnv } from "@publicdomainrelay/compute-provider";
 // ── types ───────────────────────────────────────────────────────────────
 
 export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
+  getAgent: () => Agent;
+  getAgentDid: () => string;
+  acceptPathVm: string;
   /** "container" (lightweight, no KVM) or "vm" (QEMU). Default: "container". */
   containerMode?: "vm" | "container";
   /** Docker image for QEMU VMs. */
@@ -31,6 +34,8 @@ export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
   containerImage?: string;
   /** Cache directory. Default: ~/.cache/pdr-local. */
   cacheDir?: string;
+  /** Gets the xrpc relay url for the hono-factory-workload-identity-droplet-oidc-poc. */
+  getIssuerUrl: () => string;
   /** Creates an atproto record in the bidder's repo (for createBidConfig). */
   createRecord: (
     collection: string,
@@ -387,6 +392,7 @@ export async function runContainer(
 async function provisionVM(
   vm: VM,
   containerName: string,
+  user_data: string,
   ds: DropletSpec,
   cacheDir: string,
   vmImage: string,
@@ -397,7 +403,7 @@ async function provisionVM(
   await pullImage(vmImage, log);
 
   const udFile = `${cacheDir}/ud-${containerName}.yaml`;
-  await Deno.writeTextFile(udFile, vm.user_data);
+  await Deno.writeTextFile(udFile, user_data);
 
   await dockerRun(["rm", "-f", containerName]).catch(() => {});
 
@@ -439,10 +445,14 @@ async function provisionVM(
 
 // ── factory ──────────────────────────────────────────────────────────────
 
-export function createLocalComputeProvider(
-  ctx: ComputeProviderLocalCtx,
-): ComputeProvider {
-  const { log, parseAtUri, createRecord } = ctx;
+// ---------------------------------------------------------------------------
+// ComputeProvider adapter — wraps the RBAC-aware DO implementation in the
+// provider-agnostic ComputeProvider interface.
+// ---------------------------------------------------------------------------
+
+
+export function createComputeProviderLocal(ctx: ComputeProviderDigitalOceanCtx) {
+  const { getAgent, getAgentDid, log, parseAtUri, acceptPathVm, getIssuerUrl, createRecord } = ctx;
   const containerMode = ctx.containerMode ??
     (Deno.env.get("CONTAINER_MODE") === "true" ? "container" : "vm");
   const vmImage = ctx.vmImage ??
@@ -458,19 +468,35 @@ export function createLocalComputeProvider(
   // Track container names
   const containers = new Map<string, string>();
 
+  async function atprotoCreateRecord(collection: string, record: Record<string, unknown>): Promise<StrongRef> {
+    const agent = getAgent();
+    const res = await agent.com.atproto.repo.createRecord({
+      repo: agent.assertDid,
+      collection,
+      record,
+    });
+    return { $type: "com.atproto.repo.strongRef", uri: res.data.uri, cid: res.data.cid };
+  }
+
   // ── provision ───────────────────────────────────────────────────────
 
   async function provision(
     vm: VM,
     requesterDid: string,
     spec?: DropletSpec,
-  ): Promise<ProvisionResult> {
+  ): Promise<ProvisionResult><{ result: ProvisionResult; rbacRef: StrongRef }> {
     const ds = spec ?? dropletSpecFromEnv();
     const requesterPlc = requesterDid.split(":").pop() ?? "unknown";
     const rfpRkey = (vm._uri ?? "").split("/")[4] ?? "unknown";
     const containerName = `pdr-${requesterPlc}-${rfpRkey}-${shortUuid()}`;
 
     await Deno.mkdir(cacheDir, { recursive: true });
+
+    const rbacRef = await configureDropletRbac(getAgent(), vm, requesterDid);
+
+    const provisioningData = await ProvisioningData.create(getAgentDid(), vm.user_data ?? null);
+    const user_data = provisioningData.userData;
+    provisioningData.associateWithDroplet(droplet.id);
 
     if (containerMode === "container") {
       // Container path — cloud-init + sshd directly in Docker (no KVM needed).
@@ -481,7 +507,7 @@ export function createLocalComputeProvider(
         image: containerImage,
       });
 
-      const info = await runContainer(vm.user_data, {
+      const info = await runContainer(user_data, {
         distro: (ds.image as Distro | undefined) ?? "ubuntu",
         containerName,
         imageTag: containerImage,
@@ -504,6 +530,7 @@ export function createLocalComputeProvider(
     const { ip, sshReady } = await provisionVM(
       vm,
       containerName,
+      user_data,
       ds,
       cacheDir,
       vmImage,
@@ -520,6 +547,7 @@ export function createLocalComputeProvider(
         mode: "vm",
         sshReady,
       },
+      rbacRef: rbacRef,
     };
   }
 
@@ -535,10 +563,22 @@ export function createLocalComputeProvider(
 
   // ── createBidConfig ─────────────────────────────────────────────────
 
+  // Creates the com.publicdomainrelay.temp.compute.config.wif.simple record
+  // that the bid advertises. Encodes the DO OIDC exchange parameters so the
+  // VM can mint its own short-lived credentials without a long-lived secret.
   async function createBidConfig(nowIso: string): Promise<StrongRef> {
-    return createRecord(COMPUTE_CONFIG_WIF_SIMPLE_NSID, {
+    const doctx = await makeDoctx();
+    return atprotoCreateRecord(COMPUTE_CONFIG_WIF_SIMPLE_NSID, {
       $type: COMPUTE_CONFIG_WIF_SIMPLE_NSID,
-      provider: "local",
+      accept_path: acceptPathVm,
+      issuer_uri: getIssuerUrl(),
+      to_issue: "exchange-custom-droplet-oidc-poc",
+      actx: getAgentDid(),
+      actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
+      token_path: "/root/secrets/digitalocean.com/serviceaccount/token",
+      url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
+      url_route: "/v1/oidc/issue",
+      subject: "actx:{actx}:plc:{did-plc-key}:role:{role}",
       createdAt: nowIso,
     });
   }
@@ -583,6 +623,99 @@ export function createLocalComputeProvider(
     return "#cloud-config\n" + yamlStringify(obj, { lineWidth: 0 });
   }
 
+  // -- setup --
+
+  async function configureRbac(agent: Agent, vm: VM, requesterDid: string): Promise<StrongRef> {
+    const agentDidPlc = getAgentDid().requesterDid.split(":").slice(-1)[0];
+    const requesterPlc = requesterDid.split(":").slice(-1)[0];
+    const slug = `${agentDidPlc}-${requesterPlc}-${vm.role}`;
+    const roleName = `ex-${slug}`;
+
+    const rbacRecord = {
+      $type: RBAC_NSID,
+      protects: {
+        [roleName]: {
+          service: `${digitaloceanBaseUrl}`,
+          scope: 'droplets.wid',
+        }
+      },
+      roles: {
+        [roleName]: {
+          role_name: roleName,
+          definition: {
+            aud: `api://DigitalOcean?actx=${agentDidPlc}`,
+            sub: `actx:${agentDidPlc}:plc:${requesterPlc}:role:${vm.role}`,
+            policies: [roleName],
+          },
+        },
+      },
+      policies: {
+        [roleName]: {
+          meta: {
+            policy: roleName,
+          },
+          schemas: {
+            "/v1/oidc/issue": {
+              type: "object",
+              $schema: "http://json-schema.org/draft-07/schema#",
+              required: ["capability", "allowed_parameters"],
+              properties: {
+                capability: {
+                  enum: ["create"],
+                },
+                allowed_parameters: {
+                  type: "object",
+                  properties: {
+                    aud: { type: "string" },
+                    sub: {
+                      type: "string",
+                      const: `actx:${agentDidPlc}:plc:${requesterPlc}:role:${vm.role}`,
+                    },
+                    ttl: {
+                      type: "number",
+                      const: 3600,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      custom_claims_roles_index: {
+        job_workflow_ref: {},
+      },
+      createdAt: new Date().toISOString(),
+    };
+    log("info", "creating rbac record", { nsid: RBAC_NSID });
+    const rbacRef = await atprotoCreateRecord(RBAC_NSID, rbacRecord);
+    log("info", "rbac record created", { nsid: RBAC_NSID, uri: rbacRef.uri });
+
+    return rbacRef;
+  }
+
+  // Deletes a com.fedproxy.rbac record previously minted for a droplet, e.g.
+  // when the droplet is torn down via a vm.delete event.
+  async function deleteRbacRecord(rbacRef: StrongRef, reason: string): Promise<void> {
+    const agent = getAgent();
+    const { repo, collection, rkey } = parseAtUri(rbacRef.uri);
+    log("info", "deleting rbac record", { uri: rbacRef.uri, cid: rbacRef.cid, repo, collection, rkey, agentDid: agent.assertDid, reason });
+    try {
+      const res = await agent.com.atproto.repo.deleteRecord({ repo, collection, rkey });
+      log("info", "rbac record deleted", { uri: rbacRef.uri, reason, status: res.success, headers: res.headers });
+    } catch (err) {
+      log("error", "failed to delete rbac record", {
+        uri: rbacRef.uri,
+        repo,
+        collection,
+        rkey,
+        reason,
+        err: String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
+    }
+  }
+
   // ── return ──────────────────────────────────────────────────────────
 
   return {
@@ -591,7 +724,239 @@ export function createLocalComputeProvider(
     destroy,
     createBidConfig,
     injectAcceptBundle,
-    setupAuth: undefined,
-    teardownAuth: undefined,
+    setup: undefined,
+    teardown: undefined,
+  };
+}
+
+
+export function createLocalComputeProvider(
+  ctx: ComputeProviderLocalCtx,
+): ComputeProvider {
+  const {
+    provision,
+    destroy,
+    createBidConfig,
+    injectAcceptBundle,
+    deleteRbacRecord,
+    injectAcceptBundle,
+  } = createComputeProviderLocal(ctx);
+
+  const rbacByProvider = new Map<string | number, StrongRef>();
+
+  return {
+    name: "local",
+
+    async provision(
+      vm: VM,
+      requesterDid: string,
+      _spec?: DropletSpec,
+    ): Promise<ProvisionResult> {
+      const { providerId, metadata, rbacRef } = await provision(vm, requesterDid);
+      rbacByProvider.set(providerId, rbacRef);
+      return { providerId, metadata };
+    },
+
+    async destroy(id: string | number): Promise<void> {
+      const rbacRef = rbacByProvider.get(id);
+      if (rbacRef) {
+        await deleteRbacRecord(rbacRef, "vm.delete event");
+        rbacByProvider.delete(id);
+      }
+      await destroy(id);
+    },
+
+    createBidConfig,
+    injectAcceptBundle,
+
+    async setup(): Promise<void> {
+      /* TODO start xrpc relay for workload identity */
+      /* TODO move the followin into hono-factory-workload-identity-droplet-oidc-poc */
+      const app = new Hono<{ Variables: { authToken: AuthToken } }>();
+
+      app.use('*', cors());
+
+      // request logger — opens a per-request log context so every line emitted while
+      // handling this request carries the caller DID (set after auth) and the
+      // originating principal forwarded by the caller (the market.accept author).
+      app.use("*", (c, next) => {
+        const onBehalfOfDid = c.req.header(ON_BEHALF_OF_HEADER) || undefined;
+        return runWithLogContext({ onBehalfOfDid }, async () => {
+          log("info", "request", { method: c.req.method, path: c.req.path });
+          await next();
+        });
+      });
+
+      // GET /.well-known/openid-configuration
+      app.get("/.well-known/openid-configuration", async (c) => {
+        const jwk = await getPublicJwk();
+        const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
+        return c.json({
+          issuer: issuerUrl,
+          jwks_uri: `${issuerUrl}/.well-known/jwks`,
+          response_types_supported: ["id_token"],
+          claims_supported: ["sub", "aud", "exp", "iat", "iss", "actx"],
+          id_token_signing_alg_values_supported: ["RS256"],
+          scopes_supported: ["openid"],
+        });
+      });
+
+      // GET /.well-known/jwks
+      app.get("/.well-known/jwks", async (c) => {
+        const jwk = await getPublicJwk();
+        return c.json({ keys: [jwk] });
+      });
+
+
+      app.use("/v1/oidc/issue", async (c, next) => {
+        try {
+          const token = extractBearer(c.req.header("Authorization"));
+          const issuerUrl = Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? `http://localhost:${PORT}`;
+          const authToken = await raiseIfUnauthorized(issuerUrl, "droplets.wid", token, "/v1/oidc/issue", c.req.method);
+          c.set("authToken", authToken);
+          // The validated token's actx is the caller DID performing this operation.
+          setLogContext({ actorDid: authToken.actx });
+          await next();
+        } catch (err) {
+          log("warn", "rbac denied /v1/oidc/issue", { error: String(err) });
+          return c.json({ id: "unauthorized", message: String(err) }, 401);
+        }
+      });
+
+      // POST /v1/oidc/issue — issue an OIDC token for authorized callers
+      app.post("/v1/oidc/issue", async (c) => {
+        try {
+          const body = await c.req.json<Record<string, unknown>>();
+          const authToken = c.get("authToken") as AuthToken;
+          const actx = authToken.actx;
+
+          const sub = (body["sub"] as string | undefined) ?? actx;
+          if (!subMatchesActx(sub, actx)) {
+            return c.json({ id: "unauthorized", message: `sub must be scoped to actx:${actx}` }, 401);
+          }
+
+          const token = await OIDCToken.create(actx, { ...body, sub });
+          return c.json({ token: token.asString });
+        } catch (err) {
+          log("error", "oidc issue failed", { error: String(err) });
+          return c.json({ id: "server_error", message: String(err) }, 500);
+        }
+      });
+
+      // POST /v1/oidc/prove — validate droplet SSH challenge + issue scoped token
+      app.post("/v1/oidc/prove", async (c) => {
+        log("debug", "/v1/oidc/prove request received");
+        try {
+          const body = await c.req.json<{ sig: string; port: number }>();
+          log("debug", "/v1/oidc/prove body parsed", { port: body.port, sigLen: body.sig?.length });
+          const token = extractBearer(c.req.header("Authorization"));
+          log("debug", "/v1/oidc/prove bearer extracted", { tokenPresent: !!token, tokenLen: token?.length });
+
+          const provToken = await OIDCToken.validate(token);
+          const actx = provToken.actx;
+          log("debug", "/v1/oidc/prove token validated", { actx, provTokenSub: provToken.sub });
+
+          const result = await provisioningValidate(token, body.sig, body.port, (id) => {
+            const droplet = getDroplets(actx).get(id) as Record<string, unknown> | undefined;
+            log("debug", "/v1/oidc/prove droplet lookup", { id, found: !!droplet });
+            return droplet;
+          });
+          log("debug", "/v1/oidc/prove provisioningValidate result", { valid: !!result });
+          if (!result) return c.json({ valid: false });
+
+          const { oidcToken, droplet } = result;
+          const dropletTags = ((droplet["tags"] as string[]) ?? []);
+          log("debug", "/v1/oidc/prove droplet info", { dropletId: droplet["id"], tags: dropletTags });
+          const subject = [
+            `actx:${oidcToken.actx}`,
+            ...dropletTags
+              .filter((t) => t.startsWith("oidc-sub:") && t.split(":").length === 3 && t.split(":")[1] !== "actx")
+              .map((t) => t.split(":")[1] + ":" + t.split(":")[2]),
+          ].join(":");
+          log("debug", "/v1/oidc/prove computed subject", { subject });
+
+          const issued = await OIDCToken.create(oidcToken.actx, {
+            sub: subject,
+            droplet_id: droplet["id"],
+          });
+          log("debug", "/v1/oidc/prove token issued", { sub: subject, dropletId: droplet["id"] });
+          return c.json({ token: issued.asString });
+        } catch (err) {
+          log("error", "oidc prove failed", { error: String(err), stack: err instanceof Error ? err.stack : undefined });
+          return c.json({ id: "unauthorized", message: String(err) }, 401);
+        }
+      });
+
+      // Warm up signing key (loads from DB or generates + persists)
+      await getSigningKey();
+      const jwk = await getPublicJwk();
+      log("info", "miniCloud listening", { port: PORT, issuer: issuerUrl, kid: jwk.kid });
+
+      // ── XRPC relay (optional) ─────────────────────────────────────────
+      // Enabled when --write-xrpc-relay-generated-issuer-to <path> is passed.
+      // Connects to the fedproxy relay, registers a did:web identity, and writes
+      // it to the given path once live. Requests proxied through the relay are
+      // dispatched into the existing Hono app via createSubscriberFactory.
+      let relayController: ReturnType<typeof runSubscriber> | undefined;
+      if (XRPC_RELAY_ENABLED) {
+        const PRIVATE_KEY_HEX = Deno.env.get("REPO_PRIVATE_KEY_HEX") ?? "";
+        const relayKeypair = PRIVATE_KEY_HEX
+          ? await Secp256k1Keypair.import(PRIVATE_KEY_HEX)
+          : await Secp256k1Keypair.create({ exportable: true });
+
+        const relaySigner: Signer = {
+          did: () => relayKeypair.did(),
+          sign: (bytes) => relayKeypair.sign(bytes),
+        };
+
+        // Use the existing Hono app for relay request dispatch. The relay
+        // registration mints a did:web identity; requests proxied through the
+        // relay arrive as #request frames and are dispatched via app.fetch().
+
+        const { handleRequest } = createSubscriberFactory({ app });
+
+        const dispatcherDid = `did:web:${DISPATCHER_HOST}`;
+        async function getServiceAuthToken(lxm: string): Promise<string> {
+          return await signServiceAuth(relaySigner, { aud: dispatcherDid, lxm });
+        }
+
+        relayController = runSubscriber({
+          label: "qemu",
+          keypair: relayKeypair,
+          getServiceAuthToken,
+          dispatcherHost: DISPATCHER_HOST,
+          handleRequest,
+          subscribe: undefined,
+          onLog: (e) => log("info", `xrpc-relay: ${e.message}`, { severity: e.severity }),
+          onRegistered: async (info) => {
+            log("info", "xrpc-relay registered", { subdomain: info.subdomain, proxyRef: info.proxyRef });
+            // Derive this qemu's external identity from the relay proxyRef so
+            // service-auth JWT validation (aud == service did) passes when
+            // callers reach us through the relay at https://<subdomain>.<host>.
+            const proxyHost = info.proxyRef.replace(/^did:web:/, "");
+            const baseUrl = `https://${proxyHost}`;
+            Deno.env.set("ISSUER_URL", baseUrl);
+            Deno.env.set("THIS_ENDPOINT", baseUrl);
+            log("info", "xrpc-relay issuer url updated", { baseUrl });
+            // Write did:web to the requested path so external tooling can discover it.
+            try {
+              await Deno.writeTextFile(XRPC_RELAY_ISSUER_PATH!, `${info.proxyRef}\n`);
+              log("info", "xrpc-relay issuer written", { path: XRPC_RELAY_ISSUER_PATH, proxyRef: info.proxyRef });
+            } catch (err) {
+              log("error", "xrpc-relay failed to write issuer", { path: XRPC_RELAY_ISSUER_PATH, error: String(err) });
+            }
+          },
+          onSubscriptionOpen: (sub) => log("info", "xrpc-relay subscription open", { subscriptionId: sub.subscriptionId, nsid: sub.nsid }),
+          onStatus: (status) => log("info", "xrpc-relay status", { status }),
+        });
+
+        log("info", "xrpc-relay connecting", { dispatcherHost: DISPATCHER_HOST });
+      }
+    },
+
+    async teardown(): Promise<void> {
+      /* TODO stop xrpc relay */
+      // stop the relayController
+    },
   };
 }

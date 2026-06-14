@@ -105,8 +105,6 @@ export interface ComputeProviderConfig {
   getAgentDid?: () => string;
   /** RBAC git repo root for policy files (digitalocean mode). */
   rbacRepoRoot?: string;
-  /** Path inside VM for accept record (digitalocean mode bid config). */
-  acceptPathRecord?: string;
   /** Path inside VM for accept bundle (digitalocean mode cloud-init). */
   acceptPathVm?: string;
 }
@@ -381,7 +379,7 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
   };
 
   const ready: Promise<{ subdomain: string; proxyRef: string }> = relayReady.then(async (info) => {
-    await _cpReady;
+    await _cpSetupDone;
     // ensureOperatorAllowlist is only needed for the legacy HTTP provider;
     // local and digitalocean modes don't use service-auth allowlists.
     if (mode !== "local" && mode !== "digitalocean") {
@@ -425,8 +423,7 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
         digitaloceanBaseUrl: baseUrl || "https://droplet-oidc.its1337.com",
         doToken: token,
         rbacRepoRoot: cpCfg.rbacRepoRoot,
-        acceptPathRecord: cpCfg.acceptPathRecord ?? "/root/accept.json",
-        acceptPathVm: cpCfg.acceptPathVm ?? "root/secrets/publicdomainrelay.com/market/accept.json",
+        acceptPathVm: cpCfg.acceptPathVm || "/root/secrets/publicdomainrelay.com/market/accept.json",
       });
     }
     if (mode === "local") {
@@ -469,7 +466,6 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
           rkey,
           record: {
             $type: "com.publicdomainrelay.temp.compute.config.wif.simple",
-            provider: "local",
             // fedproxy-client OIDC plugin reads these files (all written
             // by provisioning-token.sh at boot after a successful prove).
             url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
@@ -517,8 +513,8 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
     return null;
   })();
 
-  const _cpReady = computeProvider?.setupAuth
-    ? computeProvider.setupAuth().then(() => logInfo({ event: "bidder_compute_provider_ready", did, mode }))
+  const _cpSetupDone = computeProvider?.setup
+    ? computeProvider.setup().then(() => logInfo({ event: "bidder_compute_provider_setup_done", did, mode }))
     : Promise.resolve();
 
   // ── record helpers (same pattern as requester) ──────────────────
@@ -908,8 +904,10 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
           ctx.log("error", "submitEvent: failed to destroy compute", { providerId, error: String(err) });
         }
       }
-      if (computeProvider?.teardownAuth) {
-        // no-op for both local and DO — RBAC is gone
+      if (computeProvider?.teardown) {
+        const _cpTornDown = computeProvider?.teardown
+          ? computeProvider.teardown().then(() => logInfo({ event: "bidder_compute_provider_teardown_done", did, mode }))
+          : Promise.resolve();
       }
     }
 

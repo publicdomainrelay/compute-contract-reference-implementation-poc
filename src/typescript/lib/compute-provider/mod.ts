@@ -80,11 +80,11 @@ export interface ComputeProvider {
     bundle: Record<string, unknown>,
   ): string;
 
-  /** One-time auth setup before first provision. No-op for providers that don't need it. */
-  setupAuth?(): Promise<void>;
+  /** One-time setup before first provision. No-op for providers that don't need it. */
+  setup?(): Promise<void>;
 
-  /** Clean up auth artifacts after teardown. No-op for providers that don't need it. */
-  teardownAuth?(ref: { uri: string; cid: string }): Promise<void>;
+  /** Clean up artifacts after teardown. No-op for providers that don't need it. */
+  teardown?(): Promise<void>;
 }
 
 // ── mode selection ──────────────────────────────────────────────────────

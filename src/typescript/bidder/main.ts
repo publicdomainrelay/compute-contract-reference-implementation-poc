@@ -118,10 +118,8 @@ const cfg = {
     spec: dropletSpecFromEnv(),
     /** RBAC repo root for DO provider (git-backed policy repo). */
     rbacRepoRoot: Deno.env.get("RBAC_REPO_ROOT") ?? "",
-    /** Path inside VM for accept bundle record. */
-    acceptPathRecord: Deno.env.get("ACCEPT_PATH_RECORD") ?? "/root/accept.json",
     /** Path inside VM for accept bundle (cloud-init write_files). */
-    acceptPathVm: Deno.env.get("ACCEPT_PATH_VM") ?? "root/secrets/publicdomainrelay.com/market/accept.json",
+    acceptPathVm: Deno.env.get("ACCEPT_PATH_VM") ?? "/root/secrets/publicdomainrelay.com/market/accept.json",
   },
 } as const;
 
@@ -206,8 +204,7 @@ const computeProvider: ComputeProvider = (() => {
       digitaloceanBaseUrl: doBaseUrl,
       doToken,
       rbacRepoRoot: rbacRoot,
-      acceptPathRecord: cfg.compute.acceptPathRecord,
-      acceptPathVm: cfg.compute.acceptPathVm,
+      acceptPathVm: cfg.compute.acceptPathVm || "/root/secrets/publicdomainrelay.com/market/accept.json",
     });
   }
   // default: local
