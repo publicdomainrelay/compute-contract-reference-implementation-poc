@@ -1,0 +1,73 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.ssh.subscribe",
+  "defs": {
+    "main": {
+      "type": "subscription",
+      "description": "Subscribe to SSH session output. Establish a WebSocket, send a JSON connect message with SSH parameters, and receive binary frames for stdout/stderr and JSON frames for control messages.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["host", "username"],
+          "properties": {
+            "host": {
+              "type": "string",
+              "description": "SSH server hostname or IP."
+            },
+            "port": {
+              "type": "integer",
+              "description": "SSH server port. Defaults to 22."
+            },
+            "username": {
+              "type": "string",
+              "description": "SSH login username."
+            },
+            "password": {
+              "type": "string",
+              "description": "Plain-text password. Prefer privateKey."
+            },
+            "privateKey": {
+              "type": "string",
+              "description": "Base64-encoded private key."
+            },
+            "command": {
+              "type": "string",
+              "description": "Remote command to execute. Omit for an interactive shell."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "description": "Stream of control messages (JSON text frames) and data frames (binary with 1-byte stream tag: 0=stdout, 1=stderr). The stream ends with an exit frame.",
+        "schema": {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["ready", "connected", "exit", "error"]
+            },
+            "sessionId": {
+              "type": "string",
+              "description": "Session ID for use with the write procedure."
+            },
+            "code": {
+              "type": "integer",
+              "description": "SSH exit code."
+            },
+            "message": {
+              "type": "string",
+              "description": "Human-readable message."
+            }
+          }
+        }
+      },
+      "errors": [
+        { "name": "Unauthorized", "description": "Missing or invalid service-auth token." },
+        { "name": "Forbidden", "description": "Caller not permitted by RBAC policy." }
+      ]
+    }
+  }
+}

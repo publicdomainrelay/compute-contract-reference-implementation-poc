@@ -1,0 +1,47 @@
+{
+  "lexicon": 1,
+  "id": "com.publicdomainrelay.ssh.write",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Write bytes to the stdin of an active SSH session.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["sessionId", "data"],
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "Session ID returned by the subscribe endpoint."
+            },
+            "data": {
+              "type": "string",
+              "description": "Base64-encoded bytes to write to the SSH session's stdin."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["written"],
+          "properties": {
+            "written": {
+              "type": "integer",
+              "description": "Number of bytes written."
+            }
+          }
+        }
+      },
+      "errors": [
+        { "name": "Unauthorized", "description": "Missing or invalid service-auth token." },
+        { "name": "Forbidden", "description": "Caller not permitted by RBAC policy." },
+        { "name": "InvalidRequest", "description": "Malformed body or missing required fields." },
+        { "name": "SessionNotFound", "description": "No active SSH session with the given ID." },
+        { "name": "SessionClosed", "description": "The SSH session has already exited." }
+      ]
+    }
+  }
+}
