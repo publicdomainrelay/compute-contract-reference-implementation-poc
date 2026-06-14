@@ -42,7 +42,8 @@ import type { NonceStore } from "@publicdomainrelay/hono-factory-workload-identi
 export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
   getAgent: () => Agent;
   getAgentDid: () => string;
-  acceptPathVm: string;
+  /** Path the accept bundle is written to inside the VM. Default: DEFAULT_ACCEPT_PATH_VM. */
+  acceptPathVm?: string;
   /** "container" (lightweight, no KVM) or "vm" (QEMU). Default: "container". */
   containerMode?: "vm" | "container";
   /** Docker image for QEMU VMs. */
@@ -80,6 +81,10 @@ export interface ContainerInfo {
 // the full atproto stack.
 const COMPUTE_CONFIG_WIF_SIMPLE_NSID =
   "com.publicdomainrelay.temp.compute.config.wif.simple";
+
+// Default path the accept bundle is written to inside the provisioned VM.
+const DEFAULT_ACCEPT_PATH_VM =
+  "/root/secrets/publicdomainrelay.com/market/accept.json";
 
 // ── constants ────────────────────────────────────────────────────────────
 
@@ -486,7 +491,8 @@ interface LocalDroplet {
 // ---------------------------------------------------------------------------
 
 export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
-  const { getAgent, getAgentDid, log, parseAtUri, acceptPathVm, getIssuerUrl, createRecord } = ctx;
+  const { getAgent, getAgentDid, log, parseAtUri, getIssuerUrl, createRecord } = ctx;
+  const acceptPathVm = ctx.acceptPathVm ?? DEFAULT_ACCEPT_PATH_VM;
   const containerMode = ctx.containerMode ??
     (Deno.env.get("CONTAINER_MODE") === "true" ? "container" : "vm");
   const vmImage = ctx.vmImage ??

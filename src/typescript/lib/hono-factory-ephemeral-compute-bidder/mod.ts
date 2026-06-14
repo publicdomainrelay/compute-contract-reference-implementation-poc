@@ -466,6 +466,10 @@ export async function createEphemeralBidder(opts: EphemeralBidderOptions = {}): 
           rkey,
           record: {
             $type: "com.publicdomainrelay.temp.compute.config.wif.simple",
+            // The container host's OIDC issuer (relay proxyRef base URL). The
+            // requester reads this to mint the droplets.wid com.fedproxy.rbac
+            // grant in its own repo, scoped to exactly this service.
+            issuer_uri: baseUrl,
             // fedproxy-client OIDC plugin reads these files (all written
             // by provisioning-token.sh at boot after a successful prove).
             url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
