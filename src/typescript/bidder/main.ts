@@ -17,6 +17,7 @@
 // $ SETTLEMENT=free COMPUTE_PROVIDER=local deno run --allow-all --watch main.ts
 
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { registerErrorMiddleware } from "@publicdomainrelay/deno-hono-helpers";
 import {
   type MarketServerDeps,
@@ -368,6 +369,7 @@ const bidsFactory = createMarketBidsFactory(settlement.bidsFactoryOptions());
 const makeApp = () => {
   const app = new Hono();
   registerErrorMiddleware(app);
+  app.use('*', cors());
 
   const readmeHtml = "<html><body><h1>compute-contract-provider-bidder</h1></body></html>";
   app.get("/", (c) => c.html(readmeHtml));
