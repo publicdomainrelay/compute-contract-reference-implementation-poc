@@ -1,0 +1,16 @@
+{
+  "name": "@publicdomainrelay/xrpc-relay-example",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "tasks": {
+    "start": "deno run -A mod.ts --fresh-keypair --write-proxy-ref-http-to-path registry-https-url.txt",
+    "start:pretty": "sh -ec 'deno task start \"$@\" | jq --unbuffered -rR \"(fromjson? // .)\"' --"
+  },
+  "compilerOptions": {
+    "lib": ["deno.ns", "deno.unstable", "dom", "esnext"]
+  },
+  "imports": {
+    "@cliffy/command": "jsr:@cliffy/command@^1.2.1"
+  }
+}

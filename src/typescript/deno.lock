@@ -28,6 +28,7 @@
     "jsr:@std/yaml@*": "1.1.1",
     "jsr:@std/yaml@^1.1.1": "1.1.1",
     "npm:@atiproto/key-resolver@0.1": "0.1.0",
+    "npm:@atproto/api@*": "0.20.14",
     "npm:@atproto/api@~0.20.14": "0.20.14",
     "npm:@atproto/api@~0.20.8": "0.20.14",
     "npm:@atproto/common-web@0.5": "0.5.0",
@@ -4489,6 +4490,11 @@
             "npm:vite@^8.0.12"
           ]
         }
+      },
+      "xrpc-relay-example": {
+        "dependencies": [
+          "jsr:@cliffy/command@^1.2.1"
+        ]
       },
       "xrpc-relay-pds": {
         "dependencies": [
