@@ -208,12 +208,19 @@ const computeProvider: ComputeProvider = (() => {
       acceptPathVm: cfg.compute.acceptPathVm || "/root/secrets/publicdomainrelay.com/market/accept.json",
     });
   }
-  // default: local
+  // default: local — the provider owns its workload-identity OIDC issuer
+  // (/v1/oidc/{issue,prove}). We serve it over plain HTTP on ISSUER_PORT
+  // (fronted publicly by Caddy at ISSUER_URL = mini-cloud-0001.fedfork.com)
+  // instead of the fedproxy XRPC relay, so provisioned VMs reach prove/issue
+  // at a stable public hostname. setup() (called in main) starts that server.
   return createLocalComputeProvider({
     log: logCp,
     parseAtUri,
     createRecord,
     getAgentDid: () => agentDid,
+    getIssuerUrl: () => Deno.env.get("ISSUER_URL") ?? "",
+    serveHttp: true,
+    xrpcRelay: false,
   });
 })();
 
@@ -421,7 +428,7 @@ const main = async () => {
   log("info", "attestation keypair loaded", { key: keypair.did(), issuer: attestationSigner.issuer });
   // Signer-bound client for outbound submitBid: signs + writes + forwards the bid.
   bidderMarketClient = createMarketClient(session, { agent, signer: attestationSigner, log });
-  if (computeProvider.setupAuth) await computeProvider.setupAuth();
+  if (computeProvider.setup) await computeProvider.setup();
   if (cfg.server.baseUrl) {
     const expectedEndpoint = `${ownServiceDidWeb(cfg.server.baseUrl)}#${MARKET_SERVICE_ID}`;
     await ensureOfferingRecord(agent, [VM_NSID], expectedEndpoint, log);

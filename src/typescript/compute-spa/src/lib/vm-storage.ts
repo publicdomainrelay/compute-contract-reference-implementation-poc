@@ -27,7 +27,12 @@ export function loadSavedVMs(): SavedVM[] {
 }
 
 export function persistVM(current: SavedVM[], vm: SavedVM): SavedVM[] {
-  const next = [vm, ...current];
+  // Dedupe by VM name: a re-request of the same name supersedes the old entry.
+  // The ttyd handshake map (relayClient.#ttydRequests) is keyed by vmName, and
+  // the savedVMs $effect re-registers every saved VM on reload — a leftover
+  // duplicate with a stale ttydPassword would clobber the fresh one (last write
+  // wins), making the VM serve an old token → "terminal auth bootstrap 401".
+  const next = [vm, ...current.filter((v) => v.name !== vm.name)];
   localStorage.setItem(LS_KEY, JSON.stringify(next));
   return next;
 }

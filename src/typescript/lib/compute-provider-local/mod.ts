@@ -899,7 +899,12 @@ export function createLocalComputeProvider(
       const xrpcRelay = ctx.xrpcRelay ?? true;
 
       if (serveHttp) {
-        httpServer = Deno.serve({ port: PORT }, poc.app.fetch);
+        // Issuer binds ISSUER_PORT when set, else PORT. Lets a host process
+        // (e.g. the bidder) keep its own app on PORT while the issuer's
+        // /v1/oidc/{issue,prove} HTTP transport listens on a separate port
+        // fronted by a public reverse proxy (ISSUER_URL).
+        const issuerPort = Number(Deno.env.get("ISSUER_PORT") ?? PORT);
+        httpServer = Deno.serve({ port: issuerPort }, poc.app.fetch);
       }
 
       if (xrpcRelay) {
@@ -919,7 +924,7 @@ export function createLocalComputeProvider(
       ctx.log("info", "workload-identity issuer listening", {
         serveHttp,
         xrpcRelay,
-        port: serveHttp ? PORT : undefined,
+        port: serveHttp ? Number(Deno.env.get("ISSUER_PORT") ?? PORT) : undefined,
         issuer: getIssuerUrl(),
         kid: jwk.kid,
       });

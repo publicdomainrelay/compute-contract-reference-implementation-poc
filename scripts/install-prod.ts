@@ -26,7 +26,9 @@ const UNITS: ReadonlyArray<readonly [unit: string, dir: string]> = [
   ["market-registry-tunnel.service", "market-registry"],
   ["market-registry.service", "market-registry"],
   ["spindle.service", "spindle"],
-  ["qemu.service", "qemu"],
+  // qemu.service retired: the bidder's local compute provider now serves the
+  // workload-identity OIDC issuer (/v1/oidc/{issue,prove}) on ISSUER_PORT,
+  // fronted by Caddy at mini-cloud-0001.fedfork.com (127.0.0.1:9000).
 ];
 
 const secretWarnings: string[] = [];
