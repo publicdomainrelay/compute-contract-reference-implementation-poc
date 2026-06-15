@@ -92,8 +92,11 @@ def bootstrapify_html(html_string: str, base_dir: str = None) -> str:
     new_script_tag_mermaidjs = soup.new_tag(
         "script",
         type="module",
-        src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs",
     )
+    new_script_tag_mermaidjs.string = textwrap.dedent("""\
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: true, theme: 'default' });
+    """)
 
     head = soup.find("head")
     if head:
