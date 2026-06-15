@@ -213,6 +213,7 @@ const computeProvider: ComputeProvider = (() => {
     log: logCp,
     parseAtUri,
     createRecord,
+    getAgentDid: () => agentDid,
   });
 })();
 
