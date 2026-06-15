@@ -70,16 +70,45 @@ export class PlcInvalidOperationError extends PlcError {
   }
 }
 
-/** Helper: given a client result, throw the right PlcError subclass. */
-async function checkResponse(res: Response, did?: string): Promise<void> {
+/** Extract a human-readable message from a client error value. */
+function errorMessage(err: unknown): string | undefined {
+  if (err && typeof err === "object") {
+    const e = err as Record<string, unknown>;
+    if (typeof e.message === "string") return e.message;
+    if (typeof e.error === "string") return e.error;
+  }
+  return undefined;
+}
+
+/**
+ * Helper: given a client result, throw the right PlcError subclass.
+ *
+ * The generated @hey-api/openapi-ts client reads the response body on error
+ * (response.text()) *before* returning.  Calling res.json() afterwards fails
+ * because the body is already consumed.  Pass `clientError` (from
+ * `result.error`) so we can extract the server's error message.
+ */
+async function checkResponse(
+  res: Response,
+  did?: string,
+  clientError?: unknown,
+): Promise<void> {
   // If the fetch itself failed (network error), res is undefined.
   if (!res) throw new PlcError(0, "PLC directory unreachable (fetch failed)");
   if (res.ok) return;
-  let msg = res.statusText;
-  try {
-    const body = await res.json() as { message?: string };
-    if (body.message) msg = body.message;
-  } catch { /* ignore */ }
+
+  // Prefer the message already parsed by the generated client.
+  let msg = errorMessage(clientError) ?? res.statusText;
+
+  // Only try to read the body directly when we don't have a client-error
+  // message (e.g. when called from hand-rolled fetch paths).
+  if (!errorMessage(clientError)) {
+    try {
+      const body = await res.json() as { message?: string };
+      if (body.message) msg = body.message;
+    } catch { /* body already consumed or not JSON */ }
+  }
+
   if (res.status === 404) throw new PlcNotFoundError(did ?? msg);
   if (res.status === 410) throw new PlcTombstonedError(did ?? msg);
   if (res.status === 400) throw new PlcInvalidOperationError(msg);
@@ -131,7 +160,7 @@ export class PlcClient {
       signal: this.signal(),
       throwOnError: false,
     });
-    if (result.error) await checkResponse(result.response!, did);
+    if (result.error) await checkResponse(result.response!, did, result.error);
     return (result as { data: T }).data;
   }
 
@@ -144,7 +173,7 @@ export class PlcClient {
       signal: this.signal(),
       throwOnError: false,
     });
-    if (result.error) await checkResponse(result.response!, did);
+    if (result.error) await checkResponse(result.response!, did, result.error);
   }
 
   // ── public API ────────────────────────────────────────────────────
@@ -159,7 +188,7 @@ export class PlcClient {
       signal: this.signal(),
       throwOnError: false,
     });
-    if (result.error) await checkResponse(result.response!, did);
+    if (result.error) await checkResponse(result.response!, did, result.error);
     return result.data!;
   }
 
@@ -173,7 +202,7 @@ export class PlcClient {
       signal: this.signal(),
       throwOnError: false,
     });
-    if (result.error) await checkResponse(result.response!, did);
+    if (result.error) await checkResponse(result.response!, did, result.error);
     return result.data!;
   }
 
@@ -187,7 +216,7 @@ export class PlcClient {
       signal: this.signal(),
       throwOnError: false,
     });
-    if (result.error) await checkResponse(result.response!, did);
+    if (result.error) await checkResponse(result.response!, did, result.error);
     return result.data!;
   }
 
@@ -201,7 +230,7 @@ export class PlcClient {
       signal: this.signal(),
       throwOnError: false,
     });
-    if (result.error) await checkResponse(result.response!, did);
+    if (result.error) await checkResponse(result.response!, did, result.error);
     return result.data!;
   }
 
@@ -215,7 +244,7 @@ export class PlcClient {
       signal: this.signal(),
       throwOnError: false,
     });
-    if (result.error) await checkResponse(result.response!, did);
+    if (result.error) await checkResponse(result.response!, did, result.error);
     return result.data!;
   }
 
@@ -233,7 +262,7 @@ export class PlcClient {
       signal: this.signal(),
       throwOnError: false,
     });
-    if (result.error) await checkResponse(result.response!, did);
+    if (result.error) await checkResponse(result.response!, did, result.error);
   }
 
   /** Get server health / version. (Manual fetch — no generated type.) */
@@ -264,7 +293,7 @@ export class PlcClient {
         signal: this.signal(),
         throwOnError: false,
       });
-      if (result.error) await checkResponse(result.response!);
+      if (result.error) await checkResponse(result.response!, undefined, result.error);
       const data = result.data as unknown;
       if (Array.isArray(data)) return data as LogEntry[];
       if (data && typeof data === "object") return [data as LogEntry];
@@ -280,7 +309,7 @@ export class PlcClient {
       signal: this.signal(),
       throwOnError: false,
     });
-    if (result.error) await checkResponse(result.response!);
+    if (result.error) await checkResponse(result.response!, undefined, result.error);
     // The spec models export as a single LogEntry, but the server returns
     // JSON Lines — an array of entries. Handle both shapes.
     const data = result.data as unknown;
