@@ -35,7 +35,7 @@ import { createSignedRecord, type RecordSigner, type SignedRecord } from "./sign
 const MARKET_LEXICON_STUBS: Array<{
   lexicon: 1;
   id: string;
-  defs: { main: { type: "procedure" | "query" } };
+  defs: { main: { type: "procedure" | "query"; parameters?: Record<string, unknown>; output?: Record<string, unknown> } };
 }> = [
   SUBMIT_RFP_NSID,
   SUBMIT_BID_NSID,
@@ -50,7 +50,40 @@ const MARKET_LEXICON_STUBS: Array<{
 MARKET_LEXICON_STUBS.push({
   lexicon: 1 as const,
   id: LIST_BIDDERS_NSID,
-  defs: { main: { type: "query" as const } },
+  defs: {
+    main: {
+      type: "query" as const,
+      parameters: {
+        type: "params",
+        properties: {
+          payloadNsid: { type: "string" },
+          maxResults: { type: "integer" },
+          cursor: { type: "string" },
+        },
+      },
+      output: {
+        encoding: "application/json",
+        schema: {
+          type: "object",
+          properties: {
+            bidders: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  bidderDid: { type: "string" },
+                  offeringEndpointUrl: { type: "string" },
+                  appliesTo: { type: "array", items: { type: "string" } },
+                  lastHeartbeat: { type: "string" },
+                },
+              },
+            },
+            cursor: { type: "string" },
+          },
+        },
+      },
+    },
+  },
 });
 
 /**

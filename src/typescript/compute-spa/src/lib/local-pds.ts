@@ -184,29 +184,57 @@ export async function startLocalPds(): Promise<LocalPds> {
   // When the XrpcClient sets the atproto-proxy header (PDS service proxying),
   // resolve the DID ref to an HTTP endpoint and forward the request directly.
   // This lets the in-browser PDS talk to bidders/registries behind fedproxy tunnels.
+  //
+  // Supports both did:web:HOST#serviceId and did:plc:IDENTIFIER#serviceId.
+  // did:web resolves via /.well-known/did.json; did:plc resolves via plc.directory.
 
   app.use('*', async (c, next) => {
     const proxyTarget = c.req.header('atproto-proxy');
     if (!proxyTarget) return next();
 
-    // Parse did:web:HOST#serviceId → fetch DID doc, extract serviceEndpoint.
-    const match = proxyTarget.match(/^did:web:([^#]+)(?:#(.+))?$/);
-    if (!match) {
+    // Parse did:web:HOST#serviceId or did:plc:IDENTIFIER#serviceId.
+    const webMatch = proxyTarget.match(/^did:web:([^#]+)(?:#(.+))?$/);
+    const plcMatch = proxyTarget.match(/^(did:plc:[^#]+)(?:#(.+))?$/);
+    if (!webMatch && !plcMatch) {
       return c.json({ error: 'InvalidRequest', message: `Cannot resolve proxy target: ${proxyTarget}` }, 400);
     }
-    const host = match[1];
-    const serviceId = match[2] ?? 'atproto_pds';
+
+    let host: string;
+    let serviceId: string;
+    let didDoc: { service?: Array<{ id: string; type: string; serviceEndpoint: string }> } | null = null;
+
+    if (webMatch) {
+      host = webMatch[1];
+      serviceId = webMatch[2] ?? 'atproto_pds';
+    } else {
+      // plcMatch — resolve via PLC directory to find the service endpoint.
+      const plcDid = plcMatch![1];
+      serviceId = plcMatch![2] ?? 'atproto_pds';
+      try {
+        const plcRes = await fetch(`https://plc.directory/${plcDid}`);
+        if (!plcRes.ok) {
+          return c.json({ error: 'InvalidRequest', message: `PLC resolution failed for ${plcDid}: ${plcRes.status}` }, 502);
+        }
+        didDoc = await plcRes.json();
+      } catch (err) {
+        return c.json({ error: 'InvalidRequest', message: `PLC resolution error for ${plcDid}: ${err}` }, 502);
+      }
+      // Extract host from the PDS endpoint for the fallback URL below.
+      const pdsSvc = (didDoc?.service ?? []).find(s => s.id === '#atproto_pds');
+      host = pdsSvc?.serviceEndpoint ? new URL(pdsSvc.serviceEndpoint).host : '';
+    }
 
     let endpoint: string;
     try {
-      // Try fetching the DID doc (may fail due to CORS when the tunnel
-      // doesn't return Access-Control-Allow-Origin). Fall back to assuming
-      // the service endpoint is the base of the DID web host itself — this
-      // is the standard pattern for fedproxy tunnel DIDs.
-      let didDoc: { service?: Array<{ id: string; type: string; serviceEndpoint: string }> } | null = null;
-      try {
-        didDoc = await fetch(`https://${host}/.well-known/did.json`).then(r => r.ok ? r.json() : null);
-      } catch { /* CORS or network error — fall through */ }
+      if (!didDoc) {
+        // did:web path: try fetching the DID doc (may fail due to CORS when
+        // the tunnel doesn't return Access-Control-Allow-Origin). Fall back
+        // to assuming the service endpoint is the base of the DID web host
+        // itself — this is the standard pattern for fedproxy tunnel DIDs.
+        try {
+          didDoc = await fetch(`https://${host}/.well-known/did.json`).then(r => r.ok ? r.json() : null);
+        } catch { /* CORS or network error — fall through */ }
+      }
       const svc = (didDoc?.service ?? []).find(s => s.id === `#${serviceId}`);
       if (svc?.serviceEndpoint) {
         endpoint = svc.serviceEndpoint;
@@ -237,7 +265,13 @@ export async function startLocalPds(): Promise<LocalPds> {
     // Extract lxm from the request path (e.g. /xrpc/com.publicdomainrelay.temp.market.submitRfp).
     const lxm = c.req.path.startsWith('/xrpc/') ? c.req.path.slice('/xrpc/'.length).split('?')[0] : undefined;
     if (lxm) {
-      const token = await signServiceAuth(signer, { aud: proxyTarget, lxm });
+      // Build aud as did:web:<host>#<serviceId> — the relay tunnel's did:web
+      // identity — matching what the bidder's verifyServiceAuth expects.
+      // The bidder's DID doc lives at the service endpoint's host, not at the
+      // original did:plc, so a did:plc aud would fail audience verification.
+      const audHost = new URL(endpoint).host;
+      const audDid = `did:web:${audHost}#${serviceId}`;
+      const token = await signServiceAuth(signer, { aud: audDid, lxm });
       fwdHeaders.set('authorization', `Bearer ${token}`);
     }
 

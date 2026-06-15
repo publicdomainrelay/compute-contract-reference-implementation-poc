@@ -123,8 +123,8 @@ export async function requestVM(params: RequestVMParams): Promise<RequestVMResul
         payloadNsid: VM_NSID,
         registryEndpoints: registryEndpoints ?? DEFAULT_REGISTRY_ENDPOINTS,
         marketClient: mc,
-        log: (severity: string, msg: string) => {
-          if (severity === 'warn') onLog(`registry: ${msg}`);
+        log: (severity: string, msg: string, extra?: Record<string, unknown>) => {
+          if (severity === 'warn') onLog(`registry: ${msg}${extra ? ' — ' + JSON.stringify(extra) : ''}`);
         },
       });
       onLog(`found ${registryDids.size} registry DID(s)`);
