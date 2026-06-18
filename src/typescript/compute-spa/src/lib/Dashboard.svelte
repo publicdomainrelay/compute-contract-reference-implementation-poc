@@ -71,6 +71,7 @@
 
   // Market discovery settings (registry endpoints + bidder DIDs)
   let discoveryExpanded = $state(false);
+  let bidderHowToExpanded = $state(true);
   let marketSettings = $state<MarketSettings>(loadMarketSettings());
   let newRegistryUrl = $state('');
   let newBidderDid = $state('');
@@ -429,6 +430,30 @@
             {/if}
           </div>
 
+          <!-- How To Run Bidder -->
+          <div class="discovery-section" style="margin-bottom: 1rem;">
+            <button type="button" class="discovery-toggle" onclick={() => bidderHowToExpanded = !bidderHowToExpanded}>
+              <span class="toggle-arrow">{bidderHowToExpanded ? '▼' : '▶'}</span>
+              How To Run Bidder
+            </button>
+
+            {#if bidderHowToExpanded}
+              <div class="discovery-body">
+                <p class="bidder-intro">
+                  Run a bidder alongside the SPA to respond to market RFPs. The bidder
+                  watches registry events and submits competing bids for your VM requests.
+                </p>
+                <pre class="bidder-cmd"><code>JSR_URL=https://jsr.publicdomainrelay.com \
+deno run --reload -A \
+  --unstable-worker-options \
+  jsr:@publicdomainrelay/hono-bidder \
+  --compute-provider local \
+  --registry-endpoint 'did:web:market-registry-0001--johnandersen777-bsky-social.fedproxy.com' \
+  2>&1 | tee bidder.log | jq --unbuffered -rR '(fromjson? // .)'</code></pre>
+              </div>
+            {/if}
+          </div>
+
           <button
             type={auth.handle ? 'submit' : 'button'}
             disabled={submitting || (!!auth.handle && (!vmName.trim() || relayClient.status !== 'connected'))}
@@ -479,6 +504,7 @@
             </a>
           </div>
         {/if}
+
       </section>
 
       {#if savedVMs.length > 0}
@@ -883,5 +909,31 @@
   }
   .add-btn:hover:not(:disabled) { background: #eff6ff; }
   .add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .bidder-intro {
+    margin: 0 0 0.6rem;
+    font-size: 0.78rem;
+    color: #64748b;
+    line-height: 1.5;
+  }
+  .bidder-cmd {
+    margin: 0;
+    padding: 0.6rem 0.8rem;
+    border-radius: 6px;
+    background: #0f172a;
+    color: #e2e8f0;
+    font-family: 'Courier New', monospace;
+    font-size: 0.72rem;
+    line-height: 1.55;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .bidder-cmd code {
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+    background: none;
+    padding: 0;
+  }
 
 </style>
