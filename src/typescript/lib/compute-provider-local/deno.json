@@ -6,6 +6,9 @@
   "compilerOptions": {
     "lib": ["deno.ns", "deno.unstable", "dom", "esnext"]
   },
+  "publish": {
+    "include": ["systemctl-shim.ts"]
+  },
   "imports": {
     "@atproto/api": "npm:@atproto/api@^0.20.8",
     "@publicdomainrelay/compute-provider": "jsr:@publicdomainrelay/compute-provider@^0",
