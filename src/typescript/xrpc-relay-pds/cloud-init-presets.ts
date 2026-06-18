@@ -1,7 +1,3 @@
-/** websocat release binary (musl-static, runs anywhere). Bridges ws ↔ tcp. */
-const WEBSOCAT_URL =
-  'https://github.com/vi/websocat/releases/download/v1.13.0/websocat.x86_64-unknown-linux-musl';
-
 export interface CloudInitPreset {
   id: string;
   label: string;
@@ -42,8 +38,8 @@ const PLACEHOLDER: DefaultUserDataContext = {
  * :8080 — so an external SSH client tunnels through the relay over a WebSocket
  * (`ProxyCommand websocat --binary ws://<service>.fedproxy.com`). Root login is
  * key-only; the public key is injected by the orchestrator (server.ts), which
- * holds the matching private key. The VM's SSH host key is published back to the
- * relay via `createRecord` (un-gates the "Terminal" button in the SPA).
+ * holds the matching private key. SSH host key publication is handled by
+ * fedproxy-client directly (un-gates the "Terminal" button in the SPA).
  */
 export function buildDefaultUserData(ctx: DefaultUserDataContext): string {
   const { vmName, didPlc, didPlcKey, xrpcRelaySubdomain, sshAuthorizedKey } = ctx;
@@ -95,44 +91,18 @@ write_files:
       }
 
       # fedproxy-client (fronts the websocat WebSocket listener).
-      retry sh -c "curl -sfL 'https://github.com/publicdomainrelay/atproto-reverse-proxy/releases/download/latest/atproto-reverse-proxy_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin"
+      _arch=$(uname -m)
+      case "$_arch" in x86_64|amd64) _arch=amd64 ;; aarch64|arm64) _arch=arm64 ;; esac
+      _os=$(uname -s | tr '[:upper:]' '[:lower:]')
+      retry sh -c "curl -sfL 'https://github.com/publicdomainrelay/atproto-reverse-proxy/releases/download/latest/atproto-reverse-proxy_\${_os}_\${_arch}.tar.gz' | tar -xvz -C /usr/local/bin"
 
       # websocat release binary (musl-static; ws ↔ tcp bridge).
-      retry sh -c "curl -sfL '${WEBSOCAT_URL}' -o /usr/local/bin/websocat"
+      case "$_arch" in amd64) _ws_arch=x86_64 ;; arm64) _ws_arch=aarch64 ;; esac
+      retry sh -c "curl -sfL 'https://github.com/vi/websocat/releases/download/v1.13.0/websocat.\${_ws_arch}-unknown-linux-musl' -o /usr/local/bin/websocat"
       chmod +x /usr/local/bin/websocat
 
       systemctl enable websocat.service fedproxy-client.service
       systemctl start --no-block websocat.service fedproxy-client.service
-
-      # Publish the SSH host public key back through the relay via createRecord.
-      # The SPA watches for this record to un-gate the "Terminal" button and to
-      # pin the host key in the client's known_hosts.
-      DID_PLC="${didPlc}"
-      DID_PLC_KEY="${didPlcKey}"
-      URL=$(cat /root/secrets/digitalocean.com/serviceaccount/base_url)
-      TEAM_UUID=$(cat /root/secrets/digitalocean.com/serviceaccount/team_uuid)
-      ID_TOKEN=$(cat /root/secrets/digitalocean.com/serviceaccount/token)
-      SUBJECT="actx:\${TEAM_UUID}:plc:\${DID_PLC_KEY}:role:publish-ssh-hostkey-${vmName}"
-      TOKEN=$(curl -sf \\
-        -H "Authorization: Bearer \${ID_TOKEN}" \\
-        -d@<(jq -n -c \\
-          --arg aud "api://ATProto?actx=\${DID_PLC}" \\
-          --arg sub "\${SUBJECT}" \\
-          --arg ttl 300 \\
-          '{aud: \$aud, sub: \$sub, ttl: (\$ttl | fromjson)}') \\
-        "\${URL}/v1/oidc/issue" \\
-        | jq -r .token)
-
-      XRPC_RELAY_FQDN="${xrpcRelayFqdn}"
-      HOST_PUBKEY=$(cat /etc/ssh/ssh_host_ed25519_key.pub)
-      curl -sf \\
-        -H "Authorization: Bearer \${TOKEN}" \\
-        -d@<(jq -n -c \\
-          --arg col "com.fedproxy.sshPublicKey" \\
-          --arg svc "${vmName}" \\
-          --arg key "\${HOST_PUBKEY}" \\
-          '{collection: \$col, rkey: \$svc, record: {"\$type": \$col, service: \$svc, key: \$key, createdAt: (now | todate)}}') \\
-        "https://\${XRPC_RELAY_FQDN}/xrpc/com.atproto.repo.createRecord" | jq
 
       touch "\${STAMP}"
 
@@ -167,7 +137,7 @@ write_files:
     permissions: '0644'
     content: |
       [Unit]
-      Description=First-boot websocat setup (install binaries, publish SSH host key)
+      Description=First-boot websocat setup (install binaries)
       After=network-online.target
       Wants=network-online.target
       ConditionPathExists=/root/secrets/digitalocean.com/serviceaccount/token

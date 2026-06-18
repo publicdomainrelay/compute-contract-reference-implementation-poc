@@ -56,7 +56,11 @@
   let showLoginModal = $state(false);
   let loginHandle = $state('');
 
-  let vmName = $state('test-0001');
+  function randomVmName(): string {
+    return `test-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
+  }
+
+  let vmName = $state(randomVmName());
   let selectedPresetId = $state('default');
   let cloudInitScript = $state('');
   let bidWindowSec = $state(5);
@@ -280,6 +284,7 @@
       };
       savedVMs = persistVM(savedVMs, saved);
       submitResult = { success: true, message: `VM "${vmName}" accepted (bid: ${result.bidUri})`, vm: saved };
+      vmName = randomVmName();
     } catch (err) {
       addLog(`error: ${String(err)}`);
       submitResult = { success: false, message: String(err) };

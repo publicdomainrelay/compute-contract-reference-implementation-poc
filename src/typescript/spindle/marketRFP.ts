@@ -294,8 +294,11 @@ runcmd:
         done
       }
 
-      retry sh -c "curl -sfL 'https://github.com/publicdomainrelay/sshai/releases/download/latest/policy_engine_0.0.1-next_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin"
-      retry sh -c "curl -sfL 'https://github.com/publicdomainrelay/atproto-reverse-proxy/releases/download/latest/atproto-reverse-proxy_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin"
+      _os=$(uname -s | tr '[:upper:]' '[:lower:]')
+      _arch=$(uname -m)
+      case "$_arch" in x86_64|amd64) _arch=amd64 ;; aarch64|arm64) _arch=arm64 ;; esac
+      retry sh -c "curl -sfL 'https://github.com/publicdomainrelay/sshai/releases/download/latest/policy_engine_0.0.1-next_\${_os}_\${_arch}.tar.gz' | tar -xvz -C /usr/local/bin"
+      retry sh -c "curl -sfL 'https://github.com/publicdomainrelay/atproto-reverse-proxy/releases/download/latest/atproto-reverse-proxy_\${_os}_\${_arch}.tar.gz' | tar -xvz -C /usr/local/bin"
 
       mkdir -pv /home/agent/
       cd $(mktemp -d)

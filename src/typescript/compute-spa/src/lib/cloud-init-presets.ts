@@ -42,8 +42,8 @@ const PLACEHOLDER: DefaultUserDataContext = {
 /**
  * Build the default cloud-config for a VM: WooTTY-over-tmux terminal fronted by
  * fedproxy-client, with the WooTTY auth token fetched from the browser relay over
- * an OIDC-authenticated `getRecord`, and the VM's SSH host key published back to
- * the relay via `createRecord` (which un-gates the "Terminal" button in the SPA).
+ * an OIDC-authenticated `getRecord`. SSH host key publication is handled by
+ * fedproxy-client directly (un-gates the "Terminal" button in the SPA).
  */
 export function buildDefaultUserData(ctx: DefaultUserDataContext): string {
   const { vmName, serviceName, didPlc, didPlcKey, xrpcRelaySubdomain } = ctx;
@@ -126,11 +126,16 @@ write_files:
         done
       }
 
-      retry sh -c "curl -sfL 'https://github.com/publicdomainrelay/atproto-reverse-proxy/releases/download/latest/atproto-reverse-proxy_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin"
+      # Detect OS and architecture for the correct release archive.
+      _os=$(uname -s | tr '[:upper:]' '[:lower:]')
+      _arch=$(uname -m)
+      case "$_arch" in x86_64|amd64) _arch=amd64 ;; aarch64|arm64) _arch=arm64 ;; esac
+
+      retry sh -c "curl -sfL 'https://github.com/publicdomainrelay/atproto-reverse-proxy/releases/download/latest/atproto-reverse-proxy_\${_os}_\${_arch}.tar.gz' | tar -xvz -C /usr/local/bin"
 
       # Install the woottyd browser-terminal daemon (no apt package; pull the
       # release binary, mirroring the atproto-reverse-proxy pattern above).
-      retry sh -c "curl -sfL 'https://github.com/icoretech/wootty/releases/download/wootty-v0.2.17/woottyd_0.2.17_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin woottyd"
+      retry sh -c "curl -sfL 'https://github.com/icoretech/wootty/releases/download/wootty-v0.2.17/woottyd_0.2.17_\${_os}_\${_arch}.tar.gz' | tar -xvz -C /usr/local/bin woottyd"
       chmod +x /usr/local/bin/woottyd
 
       # The woottyd release binary (and the GHCR image) ship NO web UI: both embed
@@ -143,18 +148,6 @@ write_files:
 
       systemctl enable wootty fedproxy-client.service
       systemctl start --no-block wootty fedproxy-client.service
-
-      # Publish the SSH host public key back through the relay via createRecord.
-      # The SPA watches for this record to un-gate the "Terminal" button.
-      HOST_PUBKEY=$(cat /etc/ssh/ssh_host_ed25519_key.pub)
-      curl -sf \\
-        -H "Authorization: Bearer \${TOKEN}" \\
-        -d@<(jq -n -c \\
-          --arg col "com.fedproxy.sshPublicKey" \\
-          --arg svc "${vmName}" \\
-          --arg key "\${HOST_PUBKEY}" \\
-          '{collection: \$col, rkey: \$svc, record: {"\$type": \$col, service: \$svc, key: \$key, createdAt: (now | todate)}}') \\
-        "https://\${XRPC_RELAY_FQDN}/xrpc/com.atproto.repo.createRecord" | jq
 
       touch "\${STAMP}"
 

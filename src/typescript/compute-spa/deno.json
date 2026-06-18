@@ -1,0 +1,5 @@
+{
+  "tasks": {
+    "deploy:prod": "deno x -A -y npm:npm run build:full && sudo mkdir -p /var/www/graph-viewer-0001-fedfork && sudo rm -rf /var/www/graph-viewer-0001-fedfork/* && sudo cp -r dist/* /var/www/graph-viewer-0001-fedfork/ && sudo chown -R caddy:caddy /var/www/graph-viewer-0001-fedfork/"
+  }
+}
