@@ -6,6 +6,7 @@ RUN dnf install -y \
     e2fsprogs \
     openssh-clients \
     skopeo \
+    squashfs-tools \
     unzip \
  && dnf clean all
 
