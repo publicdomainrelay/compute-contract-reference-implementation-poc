@@ -64,7 +64,7 @@ export function createRelayFactory(opts: RelayFactoryOptions) {
       app.use("*", async (c, next) => {
         const method = c.req.method;
         const path = new URL(c.req.url).pathname;
-        log("info", { component: "relay", event: "request", method, path });
+        log("debug", { component: "relay", event: "request", method, path });
         await next();
         const status = c.res.status;
         if (status >= 400) {
