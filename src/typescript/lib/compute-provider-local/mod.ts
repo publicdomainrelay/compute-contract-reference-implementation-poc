@@ -224,17 +224,22 @@ exec deno run -A /usr/local/bin/systemctl-shim.ts --init
 function generateDockerfile(distro: Distro): string {
   const base = distro === "fedora"
     ? `FROM fedora:latest
-RUN dnf install -y \\
+RUN dnf upgrade -y \\
+  && dnf install -y \\
     cloud-init openssh-server sudo curl jq util-linux rsyslog vim tmux git unzip python3 \\
   && dnf clean all`
-    : `FROM ubuntu:latest
+    : `FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y \\
-    cloud-init openssh-server sudo curl jq util-linux rsyslog vim tmux git unzip ca-certificates locales python3 \\
-  && rm -rf /var/lib/apt/lists/*`;
+RUN apt-get update && apt-get upgrade -y && apt-get install -y \\
+    cloud-init openssh-server openssh-client openssh-sftp-server sudo curl jq util-linux rsyslog vim tmux git unzip ca-certificates locales python3
+RUN echo "datasource_list: [NoCloud]" > /etc/cloud/cloud.cfg.d/99-datasource.cfg`;
 
   return `${base}
-RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
+ARG DENO_VERSION=v2.9.2
+RUN _arch=\$(uname -m) && case "\$_arch" in x86_64|amd64) _arch=x86_64 ;; aarch64|arm64) _arch=aarch64 ;; esac && \\
+    curl -fsSL "https://dl.deno.land/release/\${DENO_VERSION}/deno-\${_arch}-unknown-linux-gnu.zip" -o /tmp/deno.zip && \\
+    unzip -d /usr/local/bin /tmp/deno.zip && \\
+    rm /tmp/deno.zip
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
@@ -245,14 +250,15 @@ ENTRYPOINT ["/entrypoint.sh"]
 
 export async function buildContainerImage(
   distro: Distro = "ubuntu",
+  opts: { force?: boolean } = {},
 ): Promise<string> {
   const tag = imageTag(distro);
 
-  // Check if already built
-  if (await imageExists(tag)) {
+  if (!opts.force && await imageExists(tag)) {
     console.log(`==> Image ${tag} already exists. Skipping build.`);
     return tag;
   }
+  if (opts.force) console.log(`==> Force-rebuilding ${tag}...`);
 
   console.log(`==> Building container image for ${distro}...`);
 
