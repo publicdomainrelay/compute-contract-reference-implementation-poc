@@ -7,12 +7,15 @@
  * OIDCToken.validate resolves the local issuer through oidc-helper's own getter.
  *
  * Flow (same as main.go validateOIDCToken + checkRBACPolicy):
- *   1. Peek unverified aud → extract actx (DID or UUID) + api
- *   2. If actx is a DID: resolve PDS → fetch com.fedproxy.rbac records
- *   3. Collect trusted issuers from role.definition.iss
- *   4. Verify JWT against those issuers via OIDC discovery + JWKS
+ *   1. Verify JWT against configuration only: the local issuer + trustedIssuerUrls
+ *   2. Take actx from the VERIFIED token, resolve its PDS → fetch RBAC records
+ *   3. Collect issuers from role.definition.iss; they narrow, never widen, the trust set
+ *   4. Re-verify against own ∪ (record ∩ configuration)
  *   5. Match verified sub against roles → collect policies
  *   6. Find best path schema → check capability enum
+ *
+ * Steps 2 and 3 fetch from a URL built out of the caller's token, so they run only
+ * after step 1 — a caller with no credential gets no outbound request at all.
  *
  * ATProto service auth path (non-OIDC):
  *   If token iss is a DID (com.atproto.server.getServiceAuth tokens):
@@ -22,7 +25,7 @@
  *   4. Check policy
  */
 
-import { OIDCToken, UnauthorizedException, parseAudience } from "@publicdomainrelay/oidc-helper";
+import { OIDCToken, UnauthorizedException, getTrustedIssuerUrls } from "@publicdomainrelay/oidc-helper";
 import { IdResolver } from '@atproto/identity';
 import { verifyJwt } from '@atproto/xrpc-server'
 import * as jose from "jose";
@@ -422,23 +425,18 @@ export async function raiseIfUnauthorized(
   method: string,
   reqJson?: unknown,
 ): Promise<AuthToken> {
-  const unverifiedPayload = (() => {
-    try {
-      const [, payloadB64] = token.split(".");
-      return JSON.parse(atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/")));
-    } catch {
-      return {};
-    }
-  })();
+  // SECURITY: verify BEFORE fetching. Everything below this line turns the
+  // caller's `aud` into a URL and opens a connection to it, so it may only run on
+  // a token whose signature already verified. A `did:web` actx is a hostname the
+  // caller wrote, and the `serviceEndpoint` that host's document names is fetched
+  // over whatever scheme it names — an SSRF primitive with no prerequisite at all
+  // when this ran first. The candidate issuers here are configuration only: the
+  // local issuer plus getTrustedIssuerUrls(), because obtaining the RBAC record
+  // IS the fetch under repair and its issuers cannot vouch for the token that
+  // named them.
+  const oidcToken = await OIDCToken.validate(token, getTrustedIssuerUrls);
 
-  const rawAud = Array.isArray(unverifiedPayload.aud)
-    ? unverifiedPayload.aud[0]
-    : unverifiedPayload.aud as string ?? "";
-
-  let rbac: RBACRecord | null = null;
-  let getIssuers: ((api: string, actx: string) => Promise<string[]>) | undefined;
-
-  let { actx, api } = parseAudience(rawAud);
+  let actx = oidcToken.actx;
   if (actx.startsWith("did:plc:") || actx.startsWith("did:web:")) {
     // Already a fully-qualified DID — nothing to prepend.
   } else if (actx.includes(".")) {
@@ -449,12 +447,13 @@ export async function raiseIfUnauthorized(
     actx = "did:plc:" + actx
   }
 
+  let rbac: RBACRecord | null = null;
+  let issuers: string[] = [];
+
   try {
     const pdsURL = await resolvePDS(actx);
     rbac = await getRBACRecord(pdsURL, actx, service, scope);
-    const issuers = collectIssuers(rbac);
-    getIssuers = async (_api: string, _actx: string) => issuers;
-    void api;
+    issuers = collectIssuers(rbac);
   } catch (err) {
     // SECURITY: fail closed. This previously returned an empty AuthToken (`{}`),
     // which made the calling middleware treat the request as authorized while
@@ -467,7 +466,13 @@ export async function raiseIfUnauthorized(
     throw new UnauthorizedException(`unable to authorize: rbac lookup failed for actx=${actx}: ${String(err)}`);
   }
 
-  const oidcToken = await OIDCToken.validate(token, getIssuers);
+  // The record's issuers NARROW the trusted set for this actx; they never add to
+  // it. This second pass is what keeps the admitted set exactly what the single
+  // pre-fix pass computed: own ∪ (record ∩ configuration).
+  if (issuers.length > 0) {
+    await OIDCToken.validate(token, async () =>
+      issuers.filter((issuer) => getTrustedIssuerUrls().includes(issuer)));
+  }
 
   if (rbac) {
     checkRBACPolicy(rbac, oidcToken.sub, path, method, reqJson);

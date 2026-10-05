@@ -32,6 +32,8 @@ export interface RequestVMResult {
   submitEventRef?: string;
   /** com.fedproxy.rbac record created to authorize this VM. */
   rbacUri?: string;
+  /** Winner's `issuer_uri` — the OIDC issuer the VM's tokens are minted under. */
+  issuerUri?: string;
 }
 
 export async function requestVM(params: RequestVMParams): Promise<RequestVMResult> {
@@ -188,6 +190,10 @@ export async function requestVM(params: RequestVMParams): Promise<RequestVMResul
   // marketRFP.ts RBAC creation (com.fedproxy.rbac).
   const RBAC_NSID = 'com.fedproxy.rbac';
   let rbacRef: { uri: string; cid: string } | undefined;
+  // The winning provider's OIDC issuer: the `iss` its /v1/oidc/issue mints the
+  // VM's short-lived tokens under (see the provider's createBidConfig). The
+  // relay pins trust to configuration, so the page must hand it back this value.
+  let issuerUri: string | undefined;
   const winnerConfigRef = (winner.record as Record<string, unknown>).config as { uri?: string } | undefined;
   if (winnerConfigRef?.uri && params.serviceName) {
     try {
@@ -204,7 +210,7 @@ export async function requestVM(params: RequestVMParams): Promise<RequestVMResul
         if (configRes.ok) {
           const configData = await configRes.json() as { value: Record<string, unknown> };
           const winnerConfig = configData.value;
-          const issuerUri = winnerConfig['issuer_uri'] as string | undefined;
+          issuerUri = winnerConfig['issuer_uri'] as string | undefined;
           const actx = winnerConfig['actx'] as string | undefined;
           if (issuerUri && actx) {
             const agentDid = (agent as { did?: string }).did ?? '';
@@ -299,5 +305,5 @@ export async function requestVM(params: RequestVMParams): Promise<RequestVMResul
     onLog('no submitAccept endpoint on bid — skipping');
   }
 
-  return { vmUri: vmRef.uri, rfpUri: rfpRef.uri, acceptUri: acceptRef.uri, bidUri: winner.uri, receiptUri, receiptCid, submitEventRef, rbacUri: rbacRef?.uri };
+  return { vmUri: vmRef.uri, rfpUri: rfpRef.uri, acceptUri: acceptRef.uri, bidUri: winner.uri, receiptUri, receiptCid, submitEventRef, rbacUri: rbacRef?.uri, issuerUri };
 }

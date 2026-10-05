@@ -16,6 +16,17 @@ export interface SavedVM {
   serviceName?: string;
   /** ttyd login password generated client-side, handed to the VM via the relay. */
   ttydPassword?: string;
+  /** Winner's `issuer_uri`: the OIDC issuer this VM's tokens are minted under,
+   * and the only issuer the relay will check them against. */
+  issuerUri?: string;
+}
+
+/**
+ * The OIDC issuers the relay must trust to serve these VMs: one per VM, from its
+ * winning bid. The relay's set is replaced wholesale, so it has to be the union.
+ */
+export function trustedIssuers(vms: SavedVM[]): string[] {
+  return [...new Set(vms.map((v) => v.issuerUri).filter((u): u is string => !!u))];
 }
 
 export function loadSavedVMs(): SavedVM[] {

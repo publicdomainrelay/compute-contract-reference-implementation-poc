@@ -5,7 +5,7 @@
   import LiveGraph from './LiveGraph.svelte';
   import { relayClient } from './relay-client.svelte.ts';
   import { tabFromHash, navigateToHash, type TabName } from './navigation.ts';
-  import { loadSavedVMs, persistVM, removeVM, type SavedVM } from './vm-storage.ts';
+  import { loadSavedVMs, persistVM, removeVM, trustedIssuers, type SavedVM } from './vm-storage.ts';
   import { requestVM } from './vm-market.ts';
   import { vmServiceName, didPlcKey, terminalUrl, XRPC_DISPATCHER_HOST } from './constants.ts';
   import {
@@ -147,6 +147,11 @@
   $effect(() => {
     const did = auth.did;
     if (!did) return;
+    // The relay pins OIDC trust to configuration and starts empty, so it must be
+    // told the issuers these VMs' tokens come from before the guests boot. The
+    // worker's set is replaced wholesale, so send the union of every saved VM —
+    // this effect re-runs on a new VM, which is what wires a fresh provision.
+    relayClient.setTrustedIssuers(trustedIssuers(savedVMs));
     for (const vm of savedVMs) {
       if (vm.ttydPassword && vm.serviceName) {
         relayClient.registerTtydRequest({
@@ -282,6 +287,7 @@
         rbacUri: result.rbacUri,
         serviceName,
         ttydPassword,
+        issuerUri: result.issuerUri,
       };
       savedVMs = persistVM(savedVMs, saved);
       submitResult = { success: true, message: `VM "${vmName}" accepted (bid: ${result.bidUri})`, vm: saved };

@@ -7,8 +7,9 @@
  *
  * This bridge keeps the exact public surface the SPA already consumes
  * (relayClient.{status,subdomain,proxyRef,isSshReady,start,stop,
- * registerTtydRequest,setCreateRecord,setPdsFetch,setServiceAuthMinter,
- * getAttestationKeypair} + the pendingBids map) so no other file changes.
+ * registerTtydRequest,setTrustedIssuers,setCreateRecord,setPdsFetch,
+ * setServiceAuthMinter,getAttestationKeypair} + the pendingBids map) so no other
+ * file changes.
  *
  * Two responsibilities:
  *   1. Mirror the worker's relay state into Svelte $state for the UI.
@@ -186,6 +187,17 @@ class RelayClient {
 
   registerTtydRequest(req: TtydRequest) {
     this.#post({ t: 'registerTtyd', req });
+  }
+
+  /**
+   * Name the OIDC issuers the relay may check a ttyd token's signature against.
+   * The worker starts with none and refuses every token until told, so a relay
+   * that never gets this message will not serve the guest's first-boot fetch.
+   * Always send the full set for every VM this browser holds: the worker
+   * replaces its set wholesale.
+   */
+  setTrustedIssuers(urls: string[]) {
+    this.#post({ t: 'trust', trustedIssuerUrls: urls });
   }
 
   setCreateRecord(fn: (collection: string, record: Record<string, unknown>) => Promise<{ uri: string; cid: string }>) {

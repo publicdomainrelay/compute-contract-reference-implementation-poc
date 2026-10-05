@@ -87,7 +87,8 @@ let reconnectDelay = 1_000;
 let stopped = false;
 let app: Hono | null = null;
 
-const state = {
+/** Exported so the dispatcher can be built and driven without a live relay socket. */
+export const state = {
   status: 'disconnected' as 'disconnected' | 'connecting' | 'connected',
   subdomain: null as string | null,
   proxyRef: null as string | null,
@@ -173,20 +174,51 @@ function markSshReady(serviceName: string) {
   }
 }
 
-async function verifyTtydOidc(authHeader?: string): Promise<TtydRequest> {
+// Trust anchor for the ttyd-credential gate: the issuers this relay will check a
+// signature against. Configuration owns the set (see configureRelayTrust) and it
+// starts EMPTY, so an unconfigured relay trusts no one. It is never derived from
+// the token under test -- deriving it from the token's `iss` is how a caller ends
+// up supplying the key material its own signature is checked against.
+let trustedIssuerUrls: string[] = [];
+
+export interface RelayTrustOptions {
+  trustedIssuerUrls?: string[];
+}
+
+/** Configure the issuers this relay trusts. Fail-closed: omitted or empty = none. */
+export function configureRelayTrust(opts: RelayTrustOptions): void {
+  trustedIssuerUrls = [...(opts.trustedIssuerUrls ?? [])];
+}
+
+function actxFromAudience(aud: string | string[] | undefined): string | null {
+  const rawAud = Array.isArray(aud) ? aud[0] : aud;
+  if (!rawAud) return null;
+  const qIdx = rawAud.indexOf('?');
+  return qIdx >= 0 ? new URLSearchParams(rawAud.slice(qIdx + 1)).get('actx') : null;
+}
+
+export async function verifyTtydOidc(authHeader?: string): Promise<TtydRequest> {
   const token = (authHeader ?? '').replace(/^Bearer\s+/i, '');
   if (token.split('.').length !== 3) throw new Error('missing or malformed OIDC token');
 
   const unverified = jose.decodeJwt(token);
   const rawAud = Array.isArray(unverified.aud) ? unverified.aud[0] : unverified.aud;
-  const sub = unverified.sub ?? '';
-  const iss = unverified.iss;
+  const iss = typeof unverified.iss === 'string' ? unverified.iss : '';
   if (!rawAud || !iss) throw new Error('OIDC token missing aud/iss');
 
-  const qIdx = rawAud.indexOf('?');
-  const actx = qIdx >= 0 ? new URLSearchParams(rawAud.slice(qIdx + 1)).get('actx') : null;
-  if (!actx) throw new Error('OIDC aud missing actx');
+  // A token names the issuer it wishes to be judged by; configuration decides
+  // whether that issuer is trusted at all, before any host is contacted.
+  if (!trustedIssuerUrls.includes(iss)) throw new Error(`untrusted OIDC issuer: ${iss}`);
 
+  const oidcCfg = await fetch(`${iss}/.well-known/openid-configuration`).then((r) => r.json()) as { jwks_uri: string };
+  const jwks = jose.createRemoteJWKSet(new URL(oidcCfg.jwks_uri));
+  const { payload } = await jose.jwtVerify(token, jwks, { issuer: iss, audience: rawAud });
+
+  // Only verified claims select the pending request, and the match returned here
+  // IS the credential handed to the caller.
+  const sub = payload.sub ?? '';
+  const actx = actxFromAudience(payload.aud);
+  if (!actx) throw new Error('OIDC aud missing actx');
   const match = [...ttydRequests.values()].find((r) =>
     r.didPlc === actx &&
     sub.startsWith('actx:') &&
@@ -194,14 +226,10 @@ async function verifyTtydOidc(authHeader?: string): Promise<TtydRequest> {
      sub.endsWith(`:plc:${r.didPlcKey}:role:${r.vmName}`))
   );
   if (!match) throw new Error('no pending VM request matches token actx/sub');
-
-  const oidcCfg = await fetch(`${iss}/.well-known/openid-configuration`).then((r) => r.json()) as { jwks_uri: string };
-  const jwks = jose.createRemoteJWKSet(new URL(oidcCfg.jwks_uri));
-  await jose.jwtVerify(token, jwks, { issuer: iss, audience: rawAud });
   return match;
 }
 
-function buildApp(): Hono {
+export function buildApp(): Hono {
   const app = new Hono();
   app.use('*', cors());
 
@@ -522,6 +550,9 @@ function onPortMessage(port: MessagePort, data: any) {
       break;
     case 'registerTtyd':
       ttydRequests.set(data.req.vmName, data.req as TtydRequest);
+      break;
+    case 'trust':
+      configureRelayTrust({ trustedIssuerUrls: data.trustedIssuerUrls });
       break;
     case 'oauthResult': {
       const pending = pendingOauth.get(data.id);

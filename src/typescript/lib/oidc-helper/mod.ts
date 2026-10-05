@@ -55,19 +55,33 @@ let _store: JwkStore = createMemoryStore();
 // `ttl` previously defaulted to ~100 years (effectively non-expiring), so any
 // leaked token stayed valid forever. Default to 24h; operators can tune via env.
 let _defaultTtlSeconds = Number(Deno.env.get("OIDC_DEFAULT_TTL_SECONDS") ?? 60 * 60 * 24);
+let _trustedIssuerUrls: string[] = [];
+
+export interface TrustedIssuerOptions {
+  trustedIssuerUrls?: string[];
+}
 
 /**
- * Configure issuer URL resolution, signing-key persistence, and default TTL.
- * Call once at startup. Any field omitted keeps its current value.
+ * Configure issuer URL resolution, signing-key persistence, default TTL, and the
+ * trusted-issuer allow-list. Call once at startup. Any field omitted keeps its
+ * current value.
  */
 export function configureOidc(cfg: {
   getIssuerUrl?: () => string;
   store?: JwkStore;
   defaultTtlSeconds?: number;
+  trustedIssuerUrls?: string[];
 }): void {
   if (cfg.getIssuerUrl) _getIssuerUrl = cfg.getIssuerUrl;
   if (cfg.store) _store = cfg.store;
   if (typeof cfg.defaultTtlSeconds === "number") _defaultTtlSeconds = cfg.defaultTtlSeconds;
+  if (cfg.trustedIssuerUrls) _trustedIssuerUrls = [...cfg.trustedIssuerUrls];
+}
+
+// The configured allow-list, so a caller can verify against configuration BEFORE
+// it fetches anything derived from the token — see raiseIfUnauthorized.
+export function getTrustedIssuerUrls(): string[] {
+  return _trustedIssuerUrls;
 }
 
 // Returns true iff `sub` is scoped to `actx`. The subject format is
@@ -237,7 +251,9 @@ export class OIDCToken implements OIDCTokenData {
     const expectedAud = `api://${api}?actx=${actx}`;
 
     const ownIssuers = [issuerUrl];
-    const extraIssuers = getIssuers ? await getIssuers(api, actx) : [];
+    const extraIssuers = (getIssuers ? await getIssuers(api, actx) : []).filter(
+      (issuer) => _trustedIssuerUrls.includes(issuer),
+    );
     const issuers = [...new Set([...ownIssuers, ...extraIssuers])];
 
     let lastErr: Error = new Error("no issuers");

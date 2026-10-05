@@ -1,0 +1,15 @@
+{
+  "nodeModulesDir": "auto",
+  "compilerOptions": {
+    "lib": ["deno.ns", "deno.window", "dom", "dom.iterable", "webworker", "esnext"]
+  },
+  "imports": {
+    "hono": "npm:hono@4.12.25",
+    "hono/cors": "npm:hono@4.12.25/cors",
+    "jose": "npm:jose@5.10.0",
+    "@atproto/crypto": "npm:@atproto/crypto@0.5.0",
+    "@atproto/identity": "npm:@atproto/identity@0.5.0",
+    "@publicdomainrelay/market": "jsr:@publicdomainrelay/market@^0",
+    "@std/assert": "jsr:@std/assert@^1.0.19"
+  }
+}
